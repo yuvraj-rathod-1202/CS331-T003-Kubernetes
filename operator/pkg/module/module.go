@@ -22,7 +22,7 @@ package module
 import (
 	"context"
 
-	remediationv1alpha1 "cn-project-1/operator/api/v1alpha1"
+	remediationv1alpha1 "CS331-CN-Project-1/operator/api/v1alpha1"
 )
 
 // CheckResult holds the raw signals gathered during the Check phase.

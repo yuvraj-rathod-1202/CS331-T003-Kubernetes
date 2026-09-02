@@ -27,8 +27,8 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	remediationv1alpha1 "cn-project-1/operator/api/v1alpha1"
-	"cn-project-1/operator/pkg/module"
+	remediationv1alpha1 "CS331-CN-Project-1/operator/api/v1alpha1"
+	"CS331-CN-Project-1/operator/pkg/module"
 )
 
 // requeueInterval is how often the reconciler re-runs after a successful reconcile.

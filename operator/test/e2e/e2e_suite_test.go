@@ -28,7 +28,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"cn-project-1/operator/test/utils"
+	"CS331-CN-Project-1/operator/test/utils"
 )
 
 var (
