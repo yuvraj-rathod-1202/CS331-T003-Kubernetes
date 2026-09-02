@@ -1,0 +1,13 @@
+# Default deny all ingress traffic to netpolicy-server
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-all-ingress
+  namespace: default
+spec:
+  podSelector:
+    matchLabels:
+      app: netpolicy-server
+  policyTypes:
+    - Ingress
+  # No ingress rules = deny all incoming traffic

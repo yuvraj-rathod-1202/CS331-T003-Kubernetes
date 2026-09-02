@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dns-load-generator
+  namespace: default
+  labels:
+    app: dns-load-generator
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: dns-load-generator
+  template:
+    metadata:
+      labels:
+        app: dns-load-generator
+    spec:
+      containers:
+        - name: loader
+          image: busybox:1.36
+          command:
+            - /bin/sh
+            - -c
+            - |
+              # Rapid-fire DNS queries to stress CoreDNS
+              while true; do
+                nslookup backend-api.default.svc.cluster.local > /dev/null 2>&1 &
+                nslookup google.com > /dev/null 2>&1 &
+                nslookup kubernetes.default.svc.cluster.local > /dev/null 2>&1 &
+                sleep 0.1
+              done
+          resources:
+            requests:
+              cpu: 5m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi

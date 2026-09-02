@@ -1,0 +1,201 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: networkremediations.remediation.cn-operator.yuvraj-rathod-1202.github.io
+spec:
+  group: remediation.cn-operator.yuvraj-rathod-1202.github.io
+  names:
+    kind: NetworkRemediation
+    listKind: NetworkRemediationList
+    plural: networkremediations
+    singular: networkremediation
+  scope: Cluster
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          NetworkRemediation is the Schema for the networkremediations API.
+          It defines the configuration for the network remediation operator,
+          which monitors and auto-heals networking failures in a Kubernetes cluster.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of NetworkRemediation
+            properties:
+              cni:
+                description: CNI configures CNI plugin health monitoring and remediation.
+                properties:
+                  enabled:
+                    default: true
+                    description: Enabled toggles the CNI monitoring module.
+                    type: boolean
+                required:
+                - enabled
+                type: object
+              coreDNS:
+                description: CoreDNS configures DNS health monitoring and remediation.
+                properties:
+                  enabled:
+                    default: true
+                    description: Enabled toggles the CoreDNS monitoring module.
+                    type: boolean
+                required:
+                - enabled
+                type: object
+              networkPolicy:
+                description: NetworkPolicy configures NetworkPolicy drift detection
+                  and enforcement verification.
+                properties:
+                  enabled:
+                    default: true
+                    description: Enabled toggles the NetworkPolicy monitoring module.
+                    type: boolean
+                required:
+                - enabled
+                type: object
+              podConnectivity:
+                description: PodConnectivity configures pod-to-pod and internode connectivity
+                  probing.
+                properties:
+                  enabled:
+                    default: true
+                    description: Enabled toggles the pod connectivity monitoring module.
+                    type: boolean
+                required:
+                - enabled
+                type: object
+            type: object
+          status:
+            description: status defines the observed state of NetworkRemediation
+            properties:
+              cni:
+                description: CNI is the observed state of the CNI module.
+                properties:
+                  enabled:
+                    description: Enabled indicates whether this module is currently
+                      active.
+                    type: boolean
+                  healthy:
+                    description: Healthy indicates whether the module's checks are
+                      passing.
+                    type: boolean
+                  lastChecked:
+                    description: LastChecked is the timestamp of the last health check.
+                    format: date-time
+                    type: string
+                  message:
+                    description: Message is a human-readable message about the module's
+                      current state.
+                    type: string
+                required:
+                - enabled
+                - healthy
+                type: object
+              coreDNS:
+                description: CoreDNS is the observed state of the CoreDNS module.
+                properties:
+                  enabled:
+                    description: Enabled indicates whether this module is currently
+                      active.
+                    type: boolean
+                  healthy:
+                    description: Healthy indicates whether the module's checks are
+                      passing.
+                    type: boolean
+                  lastChecked:
+                    description: LastChecked is the timestamp of the last health check.
+                    format: date-time
+                    type: string
+                  message:
+                    description: Message is a human-readable message about the module's
+                      current state.
+                    type: string
+                required:
+                - enabled
+                - healthy
+                type: object
+              lastReconcileTime:
+                description: LastReconcileTime is the timestamp of the last successful
+                  reconcile.
+                format: date-time
+                type: string
+              networkPolicy:
+                description: NetworkPolicy is the observed state of the NetworkPolicy
+                  module.
+                properties:
+                  enabled:
+                    description: Enabled indicates whether this module is currently
+                      active.
+                    type: boolean
+                  healthy:
+                    description: Healthy indicates whether the module's checks are
+                      passing.
+                    type: boolean
+                  lastChecked:
+                    description: LastChecked is the timestamp of the last health check.
+                    format: date-time
+                    type: string
+                  message:
+                    description: Message is a human-readable message about the module's
+                      current state.
+                    type: string
+                required:
+                - enabled
+                - healthy
+                type: object
+              phase:
+                description: Phase is the overall phase of the operator (e.g., "Running",
+                  "Degraded", "Error").
+                type: string
+              podConnectivity:
+                description: PodConnectivity is the observed state of the PodConnectivity
+                  module.
+                properties:
+                  enabled:
+                    description: Enabled indicates whether this module is currently
+                      active.
+                    type: boolean
+                  healthy:
+                    description: Healthy indicates whether the module's checks are
+                      passing.
+                    type: boolean
+                  lastChecked:
+                    description: LastChecked is the timestamp of the last health check.
+                    format: date-time
+                    type: string
+                  message:
+                    description: Message is a human-readable message about the module's
+                      current state.
+                    type: string
+                required:
+                - enabled
+                - healthy
+                type: object
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

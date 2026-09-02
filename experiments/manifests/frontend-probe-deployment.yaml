@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend-probe
+  namespace: default
+  labels:
+    app: frontend-probe
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: frontend-probe
+  template:
+    metadata:
+      labels:
+        app: frontend-probe
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - frontend-probe
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: probe
+          image: curlimages/curl:latest
+          command:
+            - /bin/sh
+            - -c
+            - |
+              while true; do
+                RESULT=$(curl -s -o /dev/null -w "%{http_code} %{time_total}" --connect-timeout 3 --max-time 5 http://backend-api/ 2>&1)
+                STATUS=$(echo "$RESULT" | awk '{print $1}')
+                LATENCY=$(echo "$RESULT" | awk '{printf "%.0f", $2 * 1000}')
+                echo "$(date '+%H:%M:%S') | status=$STATUS | latency=${LATENCY}ms"
+                sleep 2
+              done

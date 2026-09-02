@@ -1,0 +1,33 @@
+# This rule is not used by the project operator itself.
+# It is provided to allow the cluster admin to help manage permissions for users.
+#
+# Grants permissions to create, update, and delete resources within the remediation.cn-operator.yuvraj-rathod-1202.github.io.
+# This role is intended for users who need to manage these resources
+# but should not control RBAC or manage permissions for others.
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: operator
+    app.kubernetes.io/managed-by: kustomize
+  name: networkremediation-editor-role
+rules:
+- apiGroups:
+  - remediation.cn-operator.yuvraj-rathod-1202.github.io
+  resources:
+  - networkremediations
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - remediation.cn-operator.yuvraj-rathod-1202.github.io
+  resources:
+  - networkremediations/status
+  verbs:
+  - get

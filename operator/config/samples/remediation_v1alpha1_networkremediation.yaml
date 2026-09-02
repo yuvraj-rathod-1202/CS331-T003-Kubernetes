@@ -1,0 +1,13 @@
+apiVersion: remediation.cn-operator.yuvraj-rathod-1202.github.io/v1alpha1
+kind: NetworkRemediation
+metadata:
+  name: cluster-network-remediation
+spec:
+  cni:
+    enabled: true
+  coreDNS:
+    enabled: true
+  networkPolicy:
+    enabled: true
+  podConnectivity:
+    enabled: true

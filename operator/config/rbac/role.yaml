@@ -1,0 +1,32 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - remediation.cn-operator.yuvraj-rathod-1202.github.io
+  resources:
+  - networkremediations
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - remediation.cn-operator.yuvraj-rathod-1202.github.io
+  resources:
+  - networkremediations/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - remediation.cn-operator.yuvraj-rathod-1202.github.io
+  resources:
+  - networkremediations/status
+  verbs:
+  - get
+  - patch
+  - update

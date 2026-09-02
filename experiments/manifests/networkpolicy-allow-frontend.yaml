@@ -1,0 +1,20 @@
+# Allow only pods with role=allowed to access netpolicy-server
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-frontend-only
+  namespace: default
+spec:
+  podSelector:
+    matchLabels:
+      app: netpolicy-server
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              role: allowed
+      ports:
+        - protocol: TCP
+          port: 80

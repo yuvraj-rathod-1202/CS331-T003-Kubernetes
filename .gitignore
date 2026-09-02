@@ -1,0 +1,42 @@
+# Binaries and build artifacts
+bin/
+operator/bin/
+dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+Dockerfile.cross
+
+# Test artifacts and coverage
+*.test
+*.out
+cover.out
+
+# Go workspace and environment
+go.work
+go.work.sum
+
+# Kubernetes and secrets
+*.kubeconfig
+kubeconfig
+
+# IDEs and editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.sublime-project
+*.sublime-workspace
+
+# Operating System files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs and temporary files
+*.log
+tmp/
+scratch/
