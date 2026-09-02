@@ -1,4 +1,4 @@
-module cn-project-1/operator
+module CS331-CN-Project-1/operator
 
 go 1.26.0
 

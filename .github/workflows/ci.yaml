@@ -20,10 +20,11 @@ jobs:
         with:
           go-version-file: 'operator/go.mod'
 
+      - name: Check linter configuration
+        run: make lint-config
+
       - name: Lint
-        uses: golangci/golangci-lint-action@v6
-        with:
-          working-directory: ./operator
+        run: make lint
 
       - name: Run tests
         run: make test
