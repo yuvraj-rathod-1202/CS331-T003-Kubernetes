@@ -33,9 +33,9 @@ type CNIModule struct {
 }
 
 // New creates a new CNIModule instance.
-func New(client client.Client) *CNIModule {
+func New(c client.Client) *CNIModule {
 	return &CNIModule{
-		Client: client,
+		Client: c,
 	}
 }
 
@@ -52,7 +52,7 @@ func (m *CNIModule) Check(ctx context.Context, spec *remediationv1alpha1.Network
 	log.Info("Running CNI health check (not yet implemented)")
 
 	return &module.CheckResult{
-		Signals: map[string]interface{}{},
+		Signals: map[string]any{},
 	}, nil
 }
 

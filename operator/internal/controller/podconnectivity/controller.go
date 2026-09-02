@@ -33,9 +33,9 @@ type PodConnectivityModule struct {
 }
 
 // New creates a new PodConnectivityModule instance.
-func New(client client.Client) *PodConnectivityModule {
+func New(c client.Client) *PodConnectivityModule {
 	return &PodConnectivityModule{
-		Client: client,
+		Client: c,
 	}
 }
 
@@ -52,7 +52,7 @@ func (m *PodConnectivityModule) Check(ctx context.Context, spec *remediationv1al
 	log.Info("Running pod connectivity health check (not yet implemented)")
 
 	return &module.CheckResult{
-		Signals: map[string]interface{}{},
+		Signals: map[string]any{},
 	}, nil
 }
 

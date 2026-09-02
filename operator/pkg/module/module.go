@@ -30,7 +30,7 @@ import (
 type CheckResult struct {
 	// Signals is a map of signal names to their values.
 	// Each module defines its own signal keys (e.g., "containerCreatingPods", "dnsLatencyMs").
-	Signals map[string]interface{}
+	Signals map[string]any
 	// Err is any error encountered during the check phase (nil if check succeeded).
 	Err error
 }

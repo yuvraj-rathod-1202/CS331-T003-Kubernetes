@@ -33,9 +33,9 @@ type NetworkPolicyModule struct {
 }
 
 // New creates a new NetworkPolicyModule instance.
-func New(client client.Client) *NetworkPolicyModule {
+func New(c client.Client) *NetworkPolicyModule {
 	return &NetworkPolicyModule{
-		Client: client,
+		Client: c,
 	}
 }
 
@@ -52,7 +52,7 @@ func (m *NetworkPolicyModule) Check(ctx context.Context, spec *remediationv1alph
 	log.Info("Running NetworkPolicy health check (not yet implemented)")
 
 	return &module.CheckResult{
-		Signals: map[string]interface{}{},
+		Signals: map[string]any{},
 	}, nil
 }
 

@@ -150,7 +150,7 @@ Add the logic to gather health signals. Use the Kubernetes client (`m.Client`) t
 
 ```go
 func (m *CNIModule) Check(ctx context.Context, spec *...) (*module.CheckResult, error) {
-    signals := map[string]interface{}{}
+    signals := map[string]any{}
     
     // Example: check for stuck pods
     podList := &corev1.PodList{}

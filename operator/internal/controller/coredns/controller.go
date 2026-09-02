@@ -33,9 +33,9 @@ type CoreDNSModule struct {
 }
 
 // New creates a new CoreDNSModule instance.
-func New(client client.Client) *CoreDNSModule {
+func New(c client.Client) *CoreDNSModule {
 	return &CoreDNSModule{
-		Client: client,
+		Client: c,
 	}
 }
 
@@ -52,7 +52,7 @@ func (m *CoreDNSModule) Check(ctx context.Context, spec *remediationv1alpha1.Net
 	log.Info("Running CoreDNS health check (not yet implemented)")
 
 	return &module.CheckResult{
-		Signals: map[string]interface{}{},
+		Signals: map[string]any{},
 	}, nil
 }
 
