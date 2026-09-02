@@ -9,7 +9,7 @@ Kubernetes provides built-in recovery for standard container crashes, but it doe
 ## Repository Overview
 
 ```text
-CN-Project-1/
+CS331-CN-Project-1/
 ├── PROJECT.md             # Theoretical background & failure mode analysis
 ├── README.md              # Project overview & team guide (this file)
 ├── experiments/           # Manual failure reproduction & validation guides

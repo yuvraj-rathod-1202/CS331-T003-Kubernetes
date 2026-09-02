@@ -7,7 +7,7 @@ domain: cn-operator.yuvraj-rathod-1202.github.io
 layout:
 - go.kubebuilder.io/v4
 projectName: operator
-repo: cn-project-1/operator
+repo: CS331-CN-Project-1/operator
 resources:
 - api:
     crdVersion: v1
@@ -15,6 +15,6 @@ resources:
   domain: cn-operator.yuvraj-rathod-1202.github.io
   group: remediation
   kind: NetworkRemediation
-  path: cn-project-1/operator/api/v1alpha1
+  path: CS331-CN-Project-1/operator/api/v1alpha1
   version: v1alpha1
 version: "3"

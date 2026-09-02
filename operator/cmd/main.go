@@ -35,12 +35,12 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	remediationv1alpha1 "cn-project-1/operator/api/v1alpha1"
-	"cn-project-1/operator/internal/controller"
-	cnimod "cn-project-1/operator/internal/controller/cni"
-	corednsmod "cn-project-1/operator/internal/controller/coredns"
-	netpolmod "cn-project-1/operator/internal/controller/networkpolicy"
-	podconnmod "cn-project-1/operator/internal/controller/podconnectivity"
+	remediationv1alpha1 "CS331-CN-Project-1/operator/api/v1alpha1"
+	"CS331-CN-Project-1/operator/internal/controller"
+	cnimod "CS331-CN-Project-1/operator/internal/controller/cni"
+	corednsmod "CS331-CN-Project-1/operator/internal/controller/coredns"
+	netpolmod "CS331-CN-Project-1/operator/internal/controller/networkpolicy"
+	podconnmod "CS331-CN-Project-1/operator/internal/controller/podconnectivity"
 	// +kubebuilder:scaffold:imports
 )
 
