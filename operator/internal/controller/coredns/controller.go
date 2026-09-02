@@ -26,8 +26,6 @@ import (
 	"cn-project-1/operator/pkg/module"
 )
 
-var log = logf.Log.WithName("module").WithName("coredns")
-
 // CoreDNSModule implements the module.Module interface for CoreDNS health monitoring.
 type CoreDNSModule struct {
 	// Client is the Kubernetes API client for interacting with cluster resources.
@@ -50,6 +48,7 @@ func (m *CoreDNSModule) Name() string {
 //
 // TODO: Implement CoreDNS health checks
 func (m *CoreDNSModule) Check(ctx context.Context, spec *remediationv1alpha1.NetworkRemediationSpec) (*module.CheckResult, error) {
+	log := logf.FromContext(ctx).WithName("coredns")
 	log.Info("Running CoreDNS health check (not yet implemented)")
 
 	return &module.CheckResult{
@@ -61,6 +60,7 @@ func (m *CoreDNSModule) Check(ctx context.Context, spec *remediationv1alpha1.Net
 //
 // TODO: Implement CoreDNS evaluation logic
 func (m *CoreDNSModule) Evaluate(ctx context.Context, checkResult *module.CheckResult) (*module.EvalResult, error) {
+	log := logf.FromContext(ctx).WithName("coredns")
 	log.Info("Evaluating CoreDNS health signals (not yet implemented)")
 
 	return &module.EvalResult{
@@ -75,10 +75,12 @@ func (m *CoreDNSModule) Evaluate(ctx context.Context, checkResult *module.CheckR
 //
 // TODO: Implement CoreDNS remediation
 func (m *CoreDNSModule) Remediate(ctx context.Context, evalResult *module.EvalResult) (*module.RemediateResult, error) {
+	log := logf.FromContext(ctx).WithName("coredns")
 	log.Info("Remediating CoreDNS issue (not yet implemented)")
 
 	return &module.RemediateResult{
 		Action:  "none (not yet implemented)",
 		Success: true,
+		Err:     nil,
 	}, nil
 }

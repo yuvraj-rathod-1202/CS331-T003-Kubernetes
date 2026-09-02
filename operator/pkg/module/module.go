@@ -62,18 +62,18 @@ type RemediateResult struct {
 // NetworkPolicy, or PodConnectivity).
 //
 // The three methods form a pipeline:
-//  1. Check — Gather raw health signals (pod statuses, metrics, probe results).
+//  1. Check - Gather raw health signals (pod statuses, metrics, probe results).
 //     No decisions are made here.
-//  2. Evaluate — Analyze the signals to determine if there is an issue.
+//  2. Evaluate - Analyze the signals to determine if there is an issue.
 //     Classify severity and decide if remediation is needed.
-//  3. Remediate — Execute the corrective action. Only called when
+//  3. Remediate - Execute the corrective action. Only called when
 //     Evaluate returns NeedsRemediation=true.
 type Module interface {
 	// Name returns the module name (e.g., "cni", "coredns", "networkpolicy", "podconnectivity").
 	Name() string
 
 	// Check gathers raw health signals for this module.
-	// This is the data-gathering phase — no decisions are made here.
+	// This is the data-gathering phase - no decisions are made here.
 	Check(ctx context.Context, spec *remediationv1alpha1.NetworkRemediationSpec) (*CheckResult, error)
 
 	// Evaluate analyzes the check results to determine if there is an issue.

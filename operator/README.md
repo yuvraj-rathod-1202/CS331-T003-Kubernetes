@@ -42,7 +42,7 @@ go mod download
 
 ```
 operator/
-├── cmd/main.go                          # Entrypoint — sets up manager, registers modules
+├── cmd/main.go                          # Entrypoint - sets up manager, registers modules
 ├── api/v1alpha1/
 │   ├── networkremediation_types.go      # Top-level CRD types (Spec, Status)
 │   ├── cni_types.go                     # CNI module spec types
@@ -50,7 +50,7 @@ operator/
 │   ├── networkpolicy_types.go           # NetworkPolicy module spec types
 │   └── podconnectivity_types.go         # PodConnectivity module spec types
 ├── pkg/module/
-│   └── module.go                        # Module interface — Check/Evaluate/Remediate
+│   └── module.go                        # Module interface - Check/Evaluate/Remediate
 ├── internal/controller/
 │   ├── networkremediation_controller.go # Top-level dispatcher
 │   ├── cni/                             # CNI module
@@ -85,9 +85,9 @@ make generate
 ### 2. Implement Module Logic
 
 Your module lives in `internal/controller/<module>/controller.go`. Implement the three methods:
-- `Check()` — gather health signals
-- `Evaluate()` — analyze signals, decide if remediation is needed
-- `Remediate()` — execute the fix
+- `Check()` - gather health signals
+- `Evaluate()` - analyze signals, decide if remediation is needed
+- `Remediate()` - execute the fix
 
 ### 3. Add RBAC Permissions
 
@@ -194,9 +194,9 @@ make uninstall
 
 This project uses GitHub Actions for continuous integration. The CI pipeline (`.github/workflows/ci.yaml`) runs on every push and pull request to `main`:
 
-1. **Lint** — golangci-lint for code quality
-2. **Test** — `make test` (unit tests + envtest)
-3. **Build** — compile the operator binary
-4. **Manifests** — verify generated CRD/RBAC manifests are up to date
+1. **Lint** - golangci-lint for code quality
+2. **Test** - `make test` (unit tests + envtest)
+3. **Build** - compile the operator binary
+4. **Manifests** - verify generated CRD/RBAC manifests are up to date
 
 Make sure `make test` passes locally before pushing.

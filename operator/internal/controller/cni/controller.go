@@ -26,8 +26,6 @@ import (
 	"cn-project-1/operator/pkg/module"
 )
 
-var log = logf.Log.WithName("module").WithName("cni")
-
 // CNIModule implements the module.Module interface for CNI plugin health monitoring.
 type CNIModule struct {
 	// Client is the Kubernetes API client for interacting with cluster resources.
@@ -50,6 +48,7 @@ func (m *CNIModule) Name() string {
 //
 // TODO: Implement CNI health checks
 func (m *CNIModule) Check(ctx context.Context, spec *remediationv1alpha1.NetworkRemediationSpec) (*module.CheckResult, error) {
+	log := logf.FromContext(ctx).WithName("cni")
 	log.Info("Running CNI health check (not yet implemented)")
 
 	return &module.CheckResult{
@@ -61,6 +60,7 @@ func (m *CNIModule) Check(ctx context.Context, spec *remediationv1alpha1.Network
 //
 // TODO: Implement CNI evaluation logic
 func (m *CNIModule) Evaluate(ctx context.Context, checkResult *module.CheckResult) (*module.EvalResult, error) {
+	log := logf.FromContext(ctx).WithName("cni")
 	log.Info("Evaluating CNI health signals (not yet implemented)")
 
 	return &module.EvalResult{
@@ -75,6 +75,7 @@ func (m *CNIModule) Evaluate(ctx context.Context, checkResult *module.CheckResul
 //
 // TODO: Implement CNI remediation
 func (m *CNIModule) Remediate(ctx context.Context, evalResult *module.EvalResult) (*module.RemediateResult, error) {
+	log := logf.FromContext(ctx).WithName("cni")
 	log.Info("Remediating CNI issue (not yet implemented)")
 
 	return &module.RemediateResult{

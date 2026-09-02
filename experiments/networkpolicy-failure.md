@@ -24,7 +24,7 @@ kubectl get pods -l app=netpolicy-server
 kubectl get pods -l app=netpolicy-client
 ```
 
-**2. Verify baseline — both clients can reach the server (no policy applied yet):**
+**2. Verify baseline - both clients can reach the server (no policy applied yet):**
 
 ```bash
 kubectl logs netpolicy-client-allowed --tail=3
@@ -39,7 +39,7 @@ Both should show `status=200`.
 kubectl apply -f experiments/manifests/networkpolicy-deny-all.yaml
 ```
 
-**4. Verify — both clients are now blocked:**
+**4. Verify - both clients are now blocked:**
 
 ```bash
 kubectl logs -f netpolicy-client-allowed
@@ -54,7 +54,7 @@ Both should show `status=000` (connection timeout) since all ingress to `netpoli
 kubectl apply -f experiments/manifests/networkpolicy-allow-frontend.yaml
 ```
 
-**6. Verify — only allowed client can connect:**
+**6. Verify - only allowed client can connect:**
 
 ```bash
 kubectl logs netpolicy-client-allowed --tail=3
@@ -74,7 +74,7 @@ This confirms that Calico is correctly enforcing both policies. The `deny-all` b
 
 ### What breaks
 
-- Security posture silently changes — blocked traffic becomes allowed
+- Security posture silently changes - blocked traffic becomes allowed
 - No audit trail or alert from K8s
 
 ### What Kubernetes does
@@ -129,7 +129,7 @@ No warning about the policy deletion's security impact.
 
 ### Key Takeaway
 
-K8s is a declarative store — it doesn't understand the security intent behind a NetworkPolicy. Deleting a policy (accidentally or maliciously) silently opens traffic. Our operator will detect NetworkPolicy drift by periodically verifying that expected deny rules are still in place.
+K8s is a declarative store - it doesn't understand the security intent behind a NetworkPolicy. Deleting a policy (accidentally or maliciously) silently opens traffic. Our operator will detect NetworkPolicy drift by periodically verifying that expected deny rules are still in place.
 
 ### Recovery
 
@@ -148,7 +148,7 @@ kubectl apply -f experiments/manifests/networkpolicy-deny-all.yaml
 ### What breaks
 
 - New NetworkPolicy changes (create/update/delete) are NOT programmed into iptables
-- Stale rules from before the crash remain active — traffic is still blocked/allowed based on old state
+- Stale rules from before the crash remain active - traffic is still blocked/allowed based on old state
 - Policy state drifts from desired state
 
 ### What Kubernetes does
@@ -200,7 +200,7 @@ kubectl delete networkpolicy deny-all-ingress
 kubectl logs -f netpolicy-client-blocked
 ```
 
-The blocked client may STILL be blocked because the old iptables rules are stale in the kernel — the policy was deleted from K8s but felix wasn't running to remove the iptables rules.
+The blocked client may STILL be blocked because the old iptables rules are stale in the kernel - the policy was deleted from K8s but felix wasn't running to remove the iptables rules.
 
 ```
 11:10:07 | blocked-client -> server | status=000   <-- stale rule still blocking

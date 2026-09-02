@@ -23,7 +23,7 @@ Wait for all nodes to become Ready:
 kubectl get nodes -o wide
 ```
 
-Expected output — both nodes `Ready`:
+Expected output - both nodes `Ready`:
 
 ```
 NAME              STATUS   ROLES           AGE   VERSION

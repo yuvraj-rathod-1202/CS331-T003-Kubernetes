@@ -2,7 +2,7 @@
 
 A custom Kubernetes operator developed in Go using [Kubebuilder](https://book.kubebuilder.io/) to detect and automatically heal networking-related failures in a Kubernetes cluster.
 
-Kubernetes provides built-in recovery for standard container crashes, but it does not auto-recover from low-level networking degradation—such as CNI agent crashes, CoreDNS throttling, NetworkPolicy drift, or broken veth/tunnel interfaces. This operator bridges that gap.
+Kubernetes provides built-in recovery for standard container crashes, but it does not auto-recover from low-level networking degradation-such as CNI agent crashes, CoreDNS throttling, NetworkPolicy drift, or broken veth/tunnel interfaces. This operator bridges that gap.
 
 ---
 

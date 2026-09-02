@@ -16,7 +16,7 @@ These experiments demonstrate that Kubernetes does not detect or recover from DN
 
 ### What Kubernetes does
 
-- Nothing. CoreDNS is a Deployment — K8s respects the desired replica count you set.
+- Nothing. CoreDNS is a Deployment - K8s respects the desired replica count you set.
 
 ### What Kubernetes does NOT do
 
@@ -26,7 +26,7 @@ These experiments demonstrate that Kubernetes does not detect or recover from DN
 
 ### Steps
 
-**1. Open two terminals. Terminal 1 — watch dns-checker logs:**
+**1. Open two terminals. Terminal 1 - watch dns-checker logs:**
 
 ```bash
 kubectl logs -f -l app=dns-checker
@@ -34,7 +34,7 @@ kubectl logs -f -l app=dns-checker
 
 You should see `INTERNAL | OK` and `EXTERNAL | OK`.
 
-**2. Terminal 2 — scale CoreDNS to zero:**
+**2. Terminal 2 - scale CoreDNS to zero:**
 
 ```bash
 kubectl scale deployment coredns -n kube-system --replicas=0
@@ -56,7 +56,7 @@ EXTERNAL | FAIL | 5002ms
 kubectl logs -f -l app=frontend-probe
 ```
 
-If the probe uses the service name `http://backend-api/`, it fails because DNS can't resolve the name. If you had probes using direct pod IPs, those would still work — proving the issue is DNS, not networking.
+If the probe uses the service name `http://backend-api/`, it fails because DNS can't resolve the name. If you had probes using direct pod IPs, those would still work - proving the issue is DNS, not networking.
 
 **5. Verify CoreDNS is gone:**
 
@@ -68,11 +68,11 @@ No pods listed. K8s shows zero replicas and does nothing about it.
 
 **6. Check in Prometheus:**
 
-Query `coredns_dns_requests_total` — the metric stops being reported (scrape target gone).
+Query `coredns_dns_requests_total` - the metric stops being reported (scrape target gone).
 
 ### Key Takeaway
 
-K8s treats CoreDNS like any other Deployment — if you (or a bug) scale it to 0, it stays at 0. There is no "minimum critical service" concept. Our operator will detect when CoreDNS health degrades and take corrective action.
+K8s treats CoreDNS like any other Deployment - if you (or a bug) scale it to 0, it stays at 0. There is no "minimum critical service" concept. Our operator will detect when CoreDNS health degrades and take corrective action.
 
 ### Recovery
 
@@ -240,7 +240,7 @@ Find the `forward` directive (usually `forward . /etc/resolv.conf`) and change i
 forward . 192.0.2.1
 ```
 
-`192.0.2.1` is a TEST-NET address — it will never respond.
+`192.0.2.1` is a TEST-NET address - it will never respond.
 
 **3. Restart CoreDNS to pick up the change:**
 
@@ -286,7 +286,7 @@ Pods are `Running` and `Ready`. K8s sees nothing wrong.
 
 ### Key Takeaway
 
-K8s is a config store — it doesn't validate what's inside ConfigMaps. A typo or malicious change to CoreDNS upstream config silently breaks external DNS for the entire cluster. Our operator will detect spikes in external DNS failures and can auto-restore a known-good config.
+K8s is a config store - it doesn't validate what's inside ConfigMaps. A typo or malicious change to CoreDNS upstream config silently breaks external DNS for the entire cluster. Our operator will detect spikes in external DNS failures and can auto-restore a known-good config.
 
 ### Recovery
 

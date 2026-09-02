@@ -31,8 +31,6 @@ import (
 	"cn-project-1/operator/pkg/module"
 )
 
-var log = logf.Log.WithName("controller").WithName("networkremediation")
-
 // requeueInterval is how often the reconciler re-runs after a successful reconcile.
 const requeueInterval = 30 * time.Second
 
@@ -82,7 +80,7 @@ func (r *NetworkRemediationReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// 1. Fetch the NetworkRemediation CR
 	var nr remediationv1alpha1.NetworkRemediation
 	if err := r.Get(ctx, req.NamespacedName, &nr); err != nil {
-		// CR was deleted — nothing to do
+		// CR was deleted - nothing to do
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
@@ -91,101 +89,9 @@ func (r *NetworkRemediationReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// 2. Run each module's pipeline
 	overallHealthy := true
 	for _, reg := range r.modules {
-		modName := reg.module.Name()
-		modLogger := logger.WithValues("module", modName)
-
-		// Check if this module is enabled
-		if !reg.isEnabled(&nr.Spec) {
-			modLogger.V(1).Info("Module is disabled, skipping")
-			reg.setStatus(&nr.Status, remediationv1alpha1.ModuleStatus{
-				Healthy: true,
-				Enabled: false,
-				Message: "Module is disabled",
-			})
-			continue
-		}
-
-		now := metav1.Now()
-
-		// CHECK
-		modLogger.Info("Running Check phase")
-		checkResult, err := reg.module.Check(ctx, &nr.Spec)
-		if err != nil {
-			modLogger.Error(err, "Check phase failed")
-			reg.setStatus(&nr.Status, remediationv1alpha1.ModuleStatus{
-				Healthy:     false,
-				Enabled:     true,
-				Message:     "Check phase error: " + err.Error(),
-				LastChecked: &now,
-			})
+		if healthy := r.reconcileModule(ctx, &nr, reg); !healthy {
 			overallHealthy = false
-			continue
 		}
-
-		// EVALUATE
-		modLogger.Info("Running Evaluate phase")
-		evalResult, err := reg.module.Evaluate(ctx, checkResult)
-		if err != nil {
-			modLogger.Error(err, "Evaluate phase failed")
-			reg.setStatus(&nr.Status, remediationv1alpha1.ModuleStatus{
-				Healthy:     false,
-				Enabled:     true,
-				Message:     "Evaluate phase error: " + err.Error(),
-				LastChecked: &now,
-			})
-			overallHealthy = false
-			continue
-		}
-
-		if evalResult.IsHealthy {
-			modLogger.Info("Module is healthy")
-			reg.setStatus(&nr.Status, remediationv1alpha1.ModuleStatus{
-				Healthy:     true,
-				Enabled:     true,
-				Message:     evalResult.Reason,
-				LastChecked: &now,
-			})
-			continue
-		}
-
-		overallHealthy = false
-
-		if !evalResult.NeedsRemediation {
-			modLogger.Info("Issue detected but no remediation needed", "reason", evalResult.Reason, "severity", evalResult.Severity)
-			reg.setStatus(&nr.Status, remediationv1alpha1.ModuleStatus{
-				Healthy:     false,
-				Enabled:     true,
-				Message:     evalResult.Reason,
-				LastChecked: &now,
-			})
-			continue
-		}
-
-		// REMEDIATE
-		modLogger.Info("Running Remediate phase", "reason", evalResult.Reason, "severity", evalResult.Severity)
-		remediateResult, err := reg.module.Remediate(ctx, evalResult)
-		if err != nil {
-			modLogger.Error(err, "Remediate phase failed")
-			reg.setStatus(&nr.Status, remediationv1alpha1.ModuleStatus{
-				Healthy:     false,
-				Enabled:     true,
-				Message:     "Remediation error: " + err.Error(),
-				LastChecked: &now,
-			})
-			continue
-		}
-
-		msg := "Remediated: " + remediateResult.Action
-		if !remediateResult.Success {
-			msg = "Remediation failed: " + remediateResult.Action
-		}
-		modLogger.Info(msg, "success", remediateResult.Success)
-		reg.setStatus(&nr.Status, remediationv1alpha1.ModuleStatus{
-			Healthy:     remediateResult.Success,
-			Enabled:     true,
-			Message:     msg,
-			LastChecked: &now,
-		})
 	}
 
 	// 3. Update overall status
@@ -204,6 +110,107 @@ func (r *NetworkRemediationReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	// 4. Requeue for periodic reconciliation
 	return ctrl.Result{RequeueAfter: requeueInterval}, nil
+}
+
+// reconcileModule executes the Check -> Evaluate -> Remediate pipeline for a single module.
+// Returns true if the module is healthy (or disabled), false otherwise.
+func (r *NetworkRemediationReconciler) reconcileModule(
+	ctx context.Context,
+	nr *remediationv1alpha1.NetworkRemediation,
+	reg registeredModule,
+) bool {
+	modName := reg.module.Name()
+	logger := logf.FromContext(ctx).WithValues("module", modName)
+
+	// Check if this module is enabled
+	if !reg.isEnabled(&nr.Spec) {
+		logger.V(1).Info("Module is disabled, skipping")
+		reg.setStatus(&nr.Status, remediationv1alpha1.ModuleStatus{
+			Healthy: true,
+			Enabled: false,
+			Message: "Module is disabled",
+		})
+		return true
+	}
+
+	now := metav1.Now()
+
+	// CHECK
+	logger.Info("Running Check phase")
+	checkResult, err := reg.module.Check(ctx, &nr.Spec)
+	if err != nil {
+		logger.Error(err, "Check phase failed")
+		reg.setStatus(&nr.Status, remediationv1alpha1.ModuleStatus{
+			Healthy:     false,
+			Enabled:     true,
+			Message:     "Check phase error: " + err.Error(),
+			LastChecked: &now,
+		})
+		return false
+	}
+
+	// EVALUATE
+	logger.Info("Running Evaluate phase")
+	evalResult, err := reg.module.Evaluate(ctx, checkResult)
+	if err != nil {
+		logger.Error(err, "Evaluate phase failed")
+		reg.setStatus(&nr.Status, remediationv1alpha1.ModuleStatus{
+			Healthy:     false,
+			Enabled:     true,
+			Message:     "Evaluate phase error: " + err.Error(),
+			LastChecked: &now,
+		})
+		return false
+	}
+
+	if evalResult.IsHealthy {
+		logger.Info("Module is healthy")
+		reg.setStatus(&nr.Status, remediationv1alpha1.ModuleStatus{
+			Healthy:     true,
+			Enabled:     true,
+			Message:     evalResult.Reason,
+			LastChecked: &now,
+		})
+		return true
+	}
+
+	if !evalResult.NeedsRemediation {
+		logger.Info("Issue detected but no remediation needed", "reason", evalResult.Reason, "severity", evalResult.Severity)
+		reg.setStatus(&nr.Status, remediationv1alpha1.ModuleStatus{
+			Healthy:     false,
+			Enabled:     true,
+			Message:     evalResult.Reason,
+			LastChecked: &now,
+		})
+		return false
+	}
+
+	// REMEDIATE
+	logger.Info("Running Remediate phase", "reason", evalResult.Reason, "severity", evalResult.Severity)
+	remediateResult, err := reg.module.Remediate(ctx, evalResult)
+	if err != nil {
+		logger.Error(err, "Remediate phase failed")
+		reg.setStatus(&nr.Status, remediationv1alpha1.ModuleStatus{
+			Healthy:     false,
+			Enabled:     true,
+			Message:     "Remediation error: " + err.Error(),
+			LastChecked: &now,
+		})
+		return false
+	}
+
+	msg := "Remediated: " + remediateResult.Action
+	if !remediateResult.Success {
+		msg = "Remediation failed: " + remediateResult.Action
+	}
+	logger.Info(msg, "success", remediateResult.Success)
+	reg.setStatus(&nr.Status, remediationv1alpha1.ModuleStatus{
+		Healthy:     remediateResult.Success,
+		Enabled:     true,
+		Message:     msg,
+		LastChecked: &now,
+	})
+	return remediateResult.Success
 }
 
 // SetupWithManager sets up the controller with the Manager.

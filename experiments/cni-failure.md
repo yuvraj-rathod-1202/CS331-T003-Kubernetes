@@ -28,7 +28,7 @@ When `calico-node` is killed on a node:
 
 ### Steps
 
-**1. Open two terminals. Terminal 1 — watch frontend-probe logs:**
+**1. Open two terminals. Terminal 1 - watch frontend-probe logs:**
 
 ```bash
 kubectl logs -f -l app=frontend-probe
@@ -36,7 +36,7 @@ kubectl logs -f -l app=frontend-probe
 
 You should see continuous `status=200` responses.
 
-**2. Terminal 2 — identify the calico-node pod on node-2:**
+**2. Terminal 2 - identify the calico-node pod on node-2:**
 
 ```bash
 kubectl get pods -n kube-system -l k8s-app=calico-node -o wide
@@ -79,11 +79,11 @@ K8s restarts the calico-node pod (DaemonSet self-healing), but during the gap:
 - No alert is raised
 - Application-level failures go undetected by K8s
 
-This is the gap our custom operator will fill — detecting connectivity loss and triggering faster remediation.
+This is the gap our custom operator will fill - detecting connectivity loss and triggering faster remediation.
 
 ### Recovery
 
-Automatic — DaemonSet restarts the pod. If you need to force it:
+Automatic - DaemonSet restarts the pod. If you need to force it:
 
 ```bash
 kubectl rollout restart daemonset calico-node -n kube-system
@@ -126,7 +126,7 @@ Note the current default pool CIDR.
 **2. Disable the default pool and apply the tiny pool:**
 
 ```bash
-# Disable the default pool (don't delete it — we'll restore it later)
+# Disable the default pool (don't delete it - we'll restore it later)
 calicoctl patch ippool default-ipv4-ippool --patch '{\"spec\":{\"disabled\":true}}'
 
 # Apply the tiny /28 pool (14 usable IPs)

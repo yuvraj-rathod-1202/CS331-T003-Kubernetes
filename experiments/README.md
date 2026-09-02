@@ -4,10 +4,10 @@ This directory is used to experiment with and validate the networking failure sc
 
 The experiments here serve to:
 
-- **Reproduce failures** — Simulate each identified issue in a controlled Minikube environment to confirm it behaves as expected.
-- **Validate detection signals** — Identify what metrics, pod statuses, or events reliably indicate a failure has occurred.
-- **Test remediation steps** — Manually perform the recovery actions (restarting pods, reapplying policies, etc.) to verify they actually resolve the issue before automating them in the operator.
-- **Document findings** — Record observations, edge cases, and gotchas discovered during experimentation.
+- **Reproduce failures** - Simulate each identified issue in a controlled Minikube environment to confirm it behaves as expected.
+- **Validate detection signals** - Identify what metrics, pod statuses, or events reliably indicate a failure has occurred.
+- **Test remediation steps** - Manually perform the recovery actions (restarting pods, reapplying policies, etc.) to verify they actually resolve the issue before automating them in the operator.
+- **Document findings** - Record observations, edge cases, and gotchas discovered during experimentation.
 
 ## Structure
 

@@ -26,8 +26,6 @@ import (
 	"cn-project-1/operator/pkg/module"
 )
 
-var log = logf.Log.WithName("module").WithName("networkpolicy")
-
 // NetworkPolicyModule implements the module.Module interface for NetworkPolicy drift detection.
 type NetworkPolicyModule struct {
 	// Client is the Kubernetes API client for interacting with cluster resources.
@@ -50,6 +48,7 @@ func (m *NetworkPolicyModule) Name() string {
 //
 // TODO: Implement NetworkPolicy health checks
 func (m *NetworkPolicyModule) Check(ctx context.Context, spec *remediationv1alpha1.NetworkRemediationSpec) (*module.CheckResult, error) {
+	log := logf.FromContext(ctx).WithName("networkpolicy")
 	log.Info("Running NetworkPolicy health check (not yet implemented)")
 
 	return &module.CheckResult{
@@ -61,6 +60,7 @@ func (m *NetworkPolicyModule) Check(ctx context.Context, spec *remediationv1alph
 //
 // TODO: Implement NetworkPolicy evaluation logic:
 func (m *NetworkPolicyModule) Evaluate(ctx context.Context, checkResult *module.CheckResult) (*module.EvalResult, error) {
+	log := logf.FromContext(ctx).WithName("networkpolicy")
 	log.Info("Evaluating NetworkPolicy health signals (not yet implemented)")
 
 	return &module.EvalResult{
@@ -75,6 +75,7 @@ func (m *NetworkPolicyModule) Evaluate(ctx context.Context, checkResult *module.
 //
 // TODO: Implement NetworkPolicy remediation
 func (m *NetworkPolicyModule) Remediate(ctx context.Context, evalResult *module.EvalResult) (*module.RemediateResult, error) {
+	log := logf.FromContext(ctx).WithName("networkpolicy")
 	log.Info("Remediating NetworkPolicy issue (not yet implemented)")
 
 	return &module.RemediateResult{

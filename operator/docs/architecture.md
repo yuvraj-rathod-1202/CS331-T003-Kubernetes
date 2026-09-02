@@ -1,4 +1,4 @@
-# Network Remediation Operator — Architecture Guide
+# Network Remediation Operator - Architecture Guide
 
 This document explains the architecture of the network remediation operator for the team. Read this before implementing your module.
 
@@ -6,14 +6,14 @@ This document explains the architecture of the network remediation operator for 
 
 This operator monitors and auto-heals networking failures in a Kubernetes cluster. It covers four types of failures:
 
-| Module | Failure Type | Owner |
-|--------|-------------|-------|
-| **CNI** | CNI plugin crashes, IPAM exhaustion | Team member 1 |
-| **CoreDNS** | DNS latency, failure, misconfiguration | Team member 2 |
-| **NetworkPolicy** | Policy drift, enforcement gaps | Team member 3 |
-| **PodConnectivity** | Pod isolation, cross-node failures | Team member 4 |
+| Module | Failure Type | 
+|--------|-------------|
+| **CNI** | CNI plugin crashes, IPAM exhaustion |
+| **CoreDNS** | DNS latency, failure, misconfiguration |
+| **NetworkPolicy** | Policy drift, enforcement gaps |
+| **PodConnectivity** | Pod isolation, cross-node failures |
 
-All four modules run inside a single operator binary. There is one Custom Resource Definition (CRD) — `NetworkRemediation` — that configures all modules through a single CR instance.
+All four modules run inside a single operator binary. There is one Custom Resource Definition (CRD) - `NetworkRemediation` - that configures all modules through a single CR instance.
 
 ## Check → Evaluate → Remediate Pipeline
 
@@ -50,9 +50,9 @@ Examples:
 **Purpose**: Analyze the signals to decide if there's actually an issue.
 
 This phase exists to:
-- **Avoid false positives** — A single failed probe doesn't mean the network is broken
-- **Classify severity** — Is this informational, a warning, or critical?
-- **Decide if action is needed** — Some issues are detected but don't need automated remediation
+- **Avoid false positives** - A single failed probe doesn't mean the network is broken
+- **Classify severity** - Is this informational, a warning, or critical?
+- **Decide if action is needed** - Some issues are detected but don't need automated remediation
 
 **Input**: `CheckResult` from the Check phase
 **Output**: `EvalResult` with `IsHealthy`, `NeedsRemediation`, `Reason`, `Severity`
@@ -240,7 +240,7 @@ go test ./internal/controller/cni/... -v
 
 ```
 operator/
-├── cmd/main.go                                    # Entrypoint — registers modules with manager
+├── cmd/main.go                                    # Entrypoint - registers modules with manager
 ├── api/v1alpha1/
 │   ├── networkremediation_types.go                # Top-level CRD, Spec, Status (SHARED)
 │   ├── cni_types.go                               # ← Team member 1 (CNISpec)
@@ -263,9 +263,9 @@ operator/
 
 ## Collaboration Rules
 
-1. **Work in your own files** — Each module has its own controller in `internal/controller/<module>/` AND its own types file in `api/v1alpha1/<module>_types.go`. This minimizes git merge conflicts!
-2. **Top-level CRD types are shared** — `networkremediation_types.go` holds the parent spec and status. Avoid changing it unless adding top-level fields.
-3. **Don't modify the interface** — `pkg/module/module.go` is the contract. Changing it breaks all modules.
-4. **Don't modify the dispatcher** — `networkremediation_controller.go` is stable. If you need changes, discuss with the team.
-5. **Always regenerate after type changes** — Run `make manifests && make generate` after editing your `_types.go`.
-6. **Run tests before pushing** — `make test` must pass before you push.
+1. **Work in your own files** - Each module has its own controller in `internal/controller/<module>/` AND its own types file in `api/v1alpha1/<module>_types.go`. This minimizes git merge conflicts!
+2. **Top-level CRD types are shared** - `networkremediation_types.go` holds the parent spec and status. Avoid changing it unless adding top-level fields.
+3. **Don't modify the interface** - `pkg/module/module.go` is the contract. Changing it breaks all modules.
+4. **Don't modify the dispatcher** - `networkremediation_controller.go` is stable. If you need changes, discuss with the team.
+5. **Always regenerate after type changes** - Run `make manifests && make generate` after editing your `_types.go`.
+6. **Run tests before pushing** - `make test` must pass before you push.

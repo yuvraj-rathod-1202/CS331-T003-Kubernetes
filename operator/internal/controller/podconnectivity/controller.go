@@ -26,8 +26,6 @@ import (
 	"cn-project-1/operator/pkg/module"
 )
 
-var log = logf.Log.WithName("module").WithName("podconnectivity")
-
 // PodConnectivityModule implements the module.Module interface for pod connectivity probing.
 type PodConnectivityModule struct {
 	// Client is the Kubernetes API client for interacting with cluster resources.
@@ -50,6 +48,7 @@ func (m *PodConnectivityModule) Name() string {
 //
 // TODO: Implement pod connectivity health checks
 func (m *PodConnectivityModule) Check(ctx context.Context, spec *remediationv1alpha1.NetworkRemediationSpec) (*module.CheckResult, error) {
+	log := logf.FromContext(ctx).WithName("podconnectivity")
 	log.Info("Running pod connectivity health check (not yet implemented)")
 
 	return &module.CheckResult{
@@ -61,6 +60,7 @@ func (m *PodConnectivityModule) Check(ctx context.Context, spec *remediationv1al
 //
 // TODO: Implement connectivity evaluation logic
 func (m *PodConnectivityModule) Evaluate(ctx context.Context, checkResult *module.CheckResult) (*module.EvalResult, error) {
+	log := logf.FromContext(ctx).WithName("podconnectivity")
 	log.Info("Evaluating pod connectivity health signals (not yet implemented)")
 
 	return &module.EvalResult{
@@ -75,6 +75,7 @@ func (m *PodConnectivityModule) Evaluate(ctx context.Context, checkResult *modul
 //
 // TODO: Implement connectivity remediation
 func (m *PodConnectivityModule) Remediate(ctx context.Context, evalResult *module.EvalResult) (*module.RemediateResult, error) {
+	log := logf.FromContext(ctx).WithName("podconnectivity")
 	log.Info("Remediating pod connectivity issue (not yet implemented)")
 
 	return &module.RemediateResult{

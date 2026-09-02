@@ -22,7 +22,7 @@ Each pod gets a virtual ethernet (veth) pair. One end is inside the pod's networ
 
 ### Steps
 
-**1. Open Terminal 1 — watch frontend-probe logs:**
+**1. Open Terminal 1 - watch frontend-probe logs:**
 
 ```bash
 kubectl logs -f -l app=frontend-probe
@@ -87,11 +87,11 @@ The pod is STILL `Running` and `1/1 Ready`. K8s has no idea its network is dead.
 kubectl exec -it <dns-checker-on-node2> -- nslookup backend-api
 ```
 
-Works — only the targeted pod's network is broken.
+Works - only the targeted pod's network is broken.
 
 ### Key Takeaway
 
-Bringing down a single veth interface isolates exactly one pod. K8s has no network-layer health checks — it relies only on application-level liveness/readiness probes, which may not catch network isolation. Our operator will run periodic connectivity probes to detect this.
+Bringing down a single veth interface isolates exactly one pod. K8s has no network-layer health checks - it relies only on application-level liveness/readiness probes, which may not catch network isolation. Our operator will run periodic connectivity probes to detect this.
 
 ### Recovery
 
@@ -121,11 +121,11 @@ exit
 
 ### What causes it
 
-Calico uses IPIP tunneling (`tunl0` interface) for cross-node traffic. Bringing it down breaks the overlay network for that node. This is more severe than a veth failure — it affects ALL pods on the node, but only for cross-node traffic.
+Calico uses IPIP tunneling (`tunl0` interface) for cross-node traffic. Bringing it down breaks the overlay network for that node. This is more severe than a veth failure - it affects ALL pods on the node, but only for cross-node traffic.
 
 ### Steps
 
-**1. Open Terminal 1 — watch frontend-probe logs:**
+**1. Open Terminal 1 - watch frontend-probe logs:**
 
 ```bash
 kubectl logs -f -l app=frontend-probe
@@ -203,7 +203,7 @@ All pods `Running`, all nodes `Ready`. K8s is completely unaware.
 
 The tunnel interface is the critical link for cross-node traffic. When it goes down:
 - K8s sees nothing wrong (pods are running, node is ready)
-- Only cross-node traffic is affected — making it hard to diagnose manually
+- Only cross-node traffic is affected - making it hard to diagnose manually
 - Intra-node traffic masks the problem
 
 Our operator will detect internode connectivity failures by running cross-node probes and triggering CNI agent restart when the overlay is broken.
@@ -243,7 +243,7 @@ An `iptables` FORWARD chain DROP rule blocks all forwarded traffic from the pod 
 
 ### Steps
 
-**1. Open Terminal 1 — watch frontend-probe logs:**
+**1. Open Terminal 1 - watch frontend-probe logs:**
 
 ```bash
 kubectl logs -f -l app=frontend-probe
@@ -285,13 +285,13 @@ Requests to backends on node-2 start timing out:
 kubectl exec -it <dns-checker-on-node2> -- nslookup google.com
 ```
 
-Fails — egress from the pod is dropped by the iptables rule.
+Fails - egress from the pod is dropped by the iptables rule.
 
 ```bash
 kubectl exec -it <dns-checker-on-node2> -- nslookup backend-api.default.svc.cluster.local
 ```
 
-Also fails — even DNS queries to CoreDNS (which may be on node-1) are blocked.
+Also fails - even DNS queries to CoreDNS (which may be on node-1) are blocked.
 
 **6. Check pod and node status:**
 
