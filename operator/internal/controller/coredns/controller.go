@@ -53,6 +53,8 @@ var forwardRegex = regexp.MustCompile(`(?m)^\s*forward\s+\.\s+([^\s{]+)`)
 type CoreDNSModule struct {
 	// Client is the Kubernetes API client for interacting with cluster resources.
 	Client client.Client
+	// lastRemediatedAt tracks the timestamp of the last executed remediation to enforce a cooldown window.
+	lastRemediatedAt time.Time
 }
 
 // New creates a new CoreDNSModule instance.
@@ -325,6 +327,15 @@ func (m *CoreDNSModule) Remediate(ctx context.Context, evalResult *module.EvalRe
 	log := logf.FromContext(ctx).WithName("coredns")
 	reason := evalResult.Reason
 
+	// Enforce 30s remediation cooldown window to prevent restart-thrashing
+	cooldownWindow := 30 * time.Second
+	if !m.lastRemediatedAt.IsZero() && time.Since(m.lastRemediatedAt) < cooldownWindow {
+		rem := cooldownWindow - time.Since(m.lastRemediatedAt).Round(time.Second)
+		msg := fmt.Sprintf("Remediation cooldown active (%v remaining); skipping action to prevent restart thrashing", rem)
+		log.Info(msg)
+		return &module.RemediateResult{Action: msg, Success: true}, nil
+	}
+
 	// Remediation 1: Fix Scale to Zero or Degraded Replicas
 	if strings.Contains(reason, "available replicas") || strings.Contains(reason, "0 available replicas") {
 		var deploy appsv1.Deployment
@@ -341,6 +352,7 @@ func (m *CoreDNSModule) Remediate(ctx context.Context, evalResult *module.EvalRe
 			return &module.RemediateResult{Action: "scale coredns deployment", Success: false, Err: err}, err
 		}
 
+		m.lastRemediatedAt = time.Now()
 		msg := fmt.Sprintf("Scaled CoreDNS deployment back up to %d replicas", targetReplicas)
 		log.Info(msg)
 		return &module.RemediateResult{Action: msg, Success: true}, nil
@@ -364,6 +376,18 @@ func (m *CoreDNSModule) Remediate(ctx context.Context, evalResult *module.EvalRe
 			return &module.RemediateResult{Action: "repair coredns configmap", Success: false, Err: err}, err
 		}
 
+		// Wait briefly / verify ConfigMap commit before triggering rolling restart
+		// to avoid restart race where pods start before ConfigMap is committed
+		for i := 0; i < 5; i++ {
+			var checkCM corev1.ConfigMap
+			if err := m.Client.Get(ctx, cmKey, &checkCM); err == nil {
+				if strings.Contains(checkCM.Data["Corefile"], "forward . /etc/resolv.conf") {
+					break
+				}
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+
 		// Rollout restart CoreDNS deployment so pods pick up the corrected ConfigMap
 		var deploy appsv1.Deployment
 		deployKey := types.NamespacedName{Namespace: corednsNamespace, Name: corednsName}
@@ -375,6 +399,7 @@ func (m *CoreDNSModule) Remediate(ctx context.Context, evalResult *module.EvalRe
 			_ = m.Client.Update(ctx, &deploy)
 		}
 
+		m.lastRemediatedAt = time.Now()
 		msg := "Repaired CoreDNS ConfigMap forward directive to /etc/resolv.conf and initiated rolling restart"
 		log.Info(msg)
 		return &module.RemediateResult{Action: msg, Success: true}, nil
@@ -406,6 +431,7 @@ func (m *CoreDNSModule) Remediate(ctx context.Context, evalResult *module.EvalRe
 			return &module.RemediateResult{Action: "restore coredns resources", Success: false, Err: err}, err
 		}
 
+		m.lastRemediatedAt = time.Now()
 		msg := "Restored CoreDNS CPU resources (100m CPU limit/request) to remove throttling"
 		log.Info(msg)
 		return &module.RemediateResult{Action: msg, Success: true}, nil
@@ -427,6 +453,7 @@ func (m *CoreDNSModule) Remediate(ctx context.Context, evalResult *module.EvalRe
 			return &module.RemediateResult{Action: "restart coredns deployment", Success: false, Err: err}, err
 		}
 
+		m.lastRemediatedAt = time.Now()
 		msg := "Triggered rolling restart of CoreDNS deployment to recover pods"
 		log.Info(msg)
 		return &module.RemediateResult{Action: msg, Success: true}, nil
