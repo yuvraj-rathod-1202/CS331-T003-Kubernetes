@@ -41,7 +41,7 @@ func newTestScheme() *runtime.Scheme {
 
 func TestCoreDNSModule_Name(t *testing.T) {
 	mod := New(nil)
-	if mod.Name() != "coredns" {
+	if mod.Name() != corednsName {
 		t.Fatalf("expected module name 'coredns', got %s", mod.Name())
 	}
 }
@@ -62,7 +62,7 @@ func TestCoreDNSModule_CheckAndEvaluate_Healthy(t *testing.T) {
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
-							Name: "coredns",
+							Name: corednsName,
 							Resources: corev1.ResourceRequirements{
 								Requests: corev1.ResourceList{
 									corev1.ResourceCPU: resource.MustParse("100m"),
@@ -86,7 +86,7 @@ func TestCoreDNSModule_CheckAndEvaluate_Healthy(t *testing.T) {
 			Name:      corednsName,
 		},
 		Data: map[string]string{
-			"Corefile": ".:53 {\n    forward . /etc/resolv.conf\n}\n",
+			corefileName: ".:53 {\n    forward . /etc/resolv.conf\n}\n",
 		},
 	}
 
@@ -165,7 +165,7 @@ func TestCoreDNSModule_ScaleToZero_DetectionAndRemediation(t *testing.T) {
 	if !evalResult.NeedsRemediation {
 		t.Fatalf("expected NeedsRemediation=true")
 	}
-	if evalResult.Severity != "critical" {
+	if evalResult.Severity != severityCritical {
 		t.Fatalf("expected severity critical, got %s", evalResult.Severity)
 	}
 
@@ -215,7 +215,7 @@ func TestCoreDNSModule_CorruptedUpstreamConfigMap_DetectionAndRemediation(t *tes
 			Name:      corednsName,
 		},
 		Data: map[string]string{
-			"Corefile": ".:53 {\n    forward . 192.0.2.1 {\n       max_concurrent 1000\n    }\n}\n",
+			corefileName: ".:53 {\n    forward . 192.0.2.1 {\n       max_concurrent 1000\n    }\n}\n",
 		},
 	}
 
@@ -261,10 +261,10 @@ func TestCoreDNSModule_CorruptedUpstreamConfigMap_DetectionAndRemediation(t *tes
 	if err := fakeClient.Get(ctx, types.NamespacedName{Namespace: corednsNamespace, Name: corednsName}, &updatedCM); err != nil {
 		t.Fatalf("failed to fetch updated configmap: %v", err)
 	}
-	if !forwardRegex.MatchString(updatedCM.Data["Corefile"]) {
+	if !forwardRegex.MatchString(updatedCM.Data[corefileName]) {
 		t.Fatalf("repaired Corefile missing forward directive")
 	}
-	match := forwardRegex.FindStringSubmatch(updatedCM.Data["Corefile"])
+	match := forwardRegex.FindStringSubmatch(updatedCM.Data[corefileName])
 	if len(match) < 2 || match[1] != "/etc/resolv.conf" {
 		t.Fatalf("expected forward target /etc/resolv.conf, got %v", match)
 	}
@@ -286,7 +286,7 @@ func TestCoreDNSModule_CPUThrottled_DetectionAndRemediation(t *testing.T) {
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
-							Name: "coredns",
+							Name: corednsName,
 							Resources: corev1.ResourceRequirements{
 								Requests: corev1.ResourceList{
 									corev1.ResourceCPU: resource.MustParse("1m"),
@@ -313,7 +313,7 @@ func TestCoreDNSModule_CPUThrottled_DetectionAndRemediation(t *testing.T) {
 			Name:      corednsName,
 		},
 		Data: map[string]string{
-			"Corefile": ".:53 {\n    forward . /etc/resolv.conf\n}\n",
+			corefileName: ".:53 {\n    forward . /etc/resolv.conf\n}\n",
 		},
 	}
 

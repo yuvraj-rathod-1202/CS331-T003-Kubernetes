@@ -40,6 +40,13 @@ import (
 const (
 	corednsNamespace = "kube-system"
 	corednsName      = "coredns"
+	corefileName     = "Corefile"
+
+	severityCritical = "critical"
+	severityWarning  = "warning"
+	severityInfo     = "info"
+
+	actionFetchDeployment = "fetch coredns deployment"
 
 	// Default values
 	defaultExpectedReplicas   int32 = 2
@@ -66,7 +73,7 @@ func New(c client.Client) *CoreDNSModule {
 
 // Name returns the module name.
 func (m *CoreDNSModule) Name() string {
-	return "coredns"
+	return corednsName
 }
 
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;update;patch
@@ -75,7 +82,6 @@ func (m *CoreDNSModule) Name() string {
 
 // Check gathers raw health signals for CoreDNS.
 func (m *CoreDNSModule) Check(ctx context.Context, spec *remediationv1alpha1.NetworkRemediationSpec) (*module.CheckResult, error) {
-	log := logf.FromContext(ctx).WithName("coredns")
 	signals := map[string]any{}
 
 	expectedReplicas := defaultExpectedReplicas
@@ -102,16 +108,42 @@ func (m *CoreDNSModule) Check(ctx context.Context, spec *remediationv1alpha1.Net
 	}
 	signals["fallbackDNS"] = fallbackDNS
 
-	// 1. Inspect CoreDNS Deployment in kube-system
+	// 1. Check CoreDNS Deployment
+	if err := m.checkDeployment(ctx, signals); err != nil {
+		return nil, err
+	}
+	if found, ok := signals["deploymentFound"].(bool); ok && !found {
+		return &module.CheckResult{Signals: signals}, nil
+	}
+
+	// 2. Check CoreDNS Pods
+	m.checkPods(ctx, signals)
+
+	// 3. Check CoreDNS ConfigMap
+	m.checkConfigMap(ctx, signals)
+
+	// 4. Query Prometheus metrics for DNS latency (if available)
+	if promLatencyMs, err := queryPrometheusLatency(ctx); err == nil && promLatencyMs > 0 {
+		signals["prometheusLatencyMs"] = promLatencyMs
+	}
+
+	return &module.CheckResult{
+		Signals: signals,
+	}, nil
+}
+
+func (m *CoreDNSModule) checkDeployment(ctx context.Context, signals map[string]any) error {
+	log := logf.FromContext(ctx).WithName(corednsName)
 	var deploy appsv1.Deployment
 	deployKey := types.NamespacedName{Namespace: corednsNamespace, Name: corednsName}
+
 	if err := m.Client.Get(ctx, deployKey, &deploy); err != nil {
 		if errors.IsNotFound(err) {
 			log.Error(err, "CoreDNS deployment not found in kube-system")
 			signals["deploymentFound"] = false
-			return &module.CheckResult{Signals: signals}, nil
+			return nil
 		}
-		return nil, fmt.Errorf("failed to get coredns deployment: %w", err)
+		return fmt.Errorf("failed to get coredns deployment: %w", err)
 	}
 
 	signals["deploymentFound"] = true
@@ -124,7 +156,6 @@ func (m *CoreDNSModule) Check(ctx context.Context, spec *remediationv1alpha1.Net
 	signals["readyReplicas"] = deploy.Status.ReadyReplicas
 	signals["updatedReplicas"] = deploy.Status.UpdatedReplicas
 
-	// Check if CPU limits/requests are heavily throttled (<10m CPU, e.g. 1m from Experiment 2.2)
 	cpuThrottled := false
 	if len(deploy.Spec.Template.Spec.Containers) > 0 {
 		container := deploy.Spec.Template.Spec.Containers[0]
@@ -140,75 +171,72 @@ func (m *CoreDNSModule) Check(ctx context.Context, spec *remediationv1alpha1.Net
 		}
 	}
 	signals["cpuThrottled"] = cpuThrottled
+	return nil
+}
 
-	// 2. Inspect CoreDNS Pods in kube-system
+func (m *CoreDNSModule) checkPods(ctx context.Context, signals map[string]any) {
+	log := logf.FromContext(ctx).WithName(corednsName)
 	var podList corev1.PodList
 	if err := m.Client.List(ctx, &podList, client.InNamespace(corednsNamespace), client.MatchingLabels{"k8s-app": "kube-dns"}); err != nil {
 		log.Error(err, "Failed to list coredns pods")
-	} else {
-		runningPods := 0
-		crashLoopingPods := 0
-		var totalRestarts int32 = 0
+		return
+	}
 
-		for _, pod := range podList.Items {
-			if pod.Status.Phase == corev1.PodRunning {
-				runningPods++
-			}
-			for _, cs := range pod.Status.ContainerStatuses {
-				totalRestarts += cs.RestartCount
-				if cs.State.Waiting != nil {
-					reason := cs.State.Waiting.Reason
-					if reason == "CrashLoopBackOff" || reason == "Error" || reason == "ImagePullBackOff" {
-						crashLoopingPods++
-					}
+	runningPods := 0
+	crashLoopingPods := 0
+	var totalRestarts int32
+
+	for _, pod := range podList.Items {
+		if pod.Status.Phase == corev1.PodRunning {
+			runningPods++
+		}
+		for _, cs := range pod.Status.ContainerStatuses {
+			totalRestarts += cs.RestartCount
+			if cs.State.Waiting != nil {
+				reason := cs.State.Waiting.Reason
+				if reason == "CrashLoopBackOff" || reason == "Error" || reason == "ImagePullBackOff" {
+					crashLoopingPods++
 				}
 			}
 		}
-
-		signals["podCount"] = len(podList.Items)
-		signals["runningPods"] = runningPods
-		signals["crashLoopingPods"] = crashLoopingPods
-		signals["totalRestarts"] = totalRestarts
 	}
 
-	// 3. Inspect CoreDNS ConfigMap in kube-system
+	signals["podCount"] = len(podList.Items)
+	signals["runningPods"] = runningPods
+	signals["crashLoopingPods"] = crashLoopingPods
+	signals["totalRestarts"] = totalRestarts
+}
+
+func (m *CoreDNSModule) checkConfigMap(ctx context.Context, signals map[string]any) {
+	log := logf.FromContext(ctx).WithName(corednsName)
 	var cm corev1.ConfigMap
 	cmKey := types.NamespacedName{Namespace: corednsNamespace, Name: corednsName}
 	if err := m.Client.Get(ctx, cmKey, &cm); err != nil {
 		log.Error(err, "Failed to get coredns configmap")
 		signals["configMapFound"] = false
-	} else {
-		signals["configMapFound"] = true
-		corefile := cm.Data["Corefile"]
-		signals["corefileLength"] = len(corefile)
+		return
+	}
 
-		matches := forwardRegex.FindStringSubmatch(corefile)
-		upstreamCorrupted := false
-		var forwardTarget string
-		if len(matches) > 1 {
-			forwardTarget = strings.TrimSpace(matches[1])
-			signals["forwardTarget"] = forwardTarget
+	signals["configMapFound"] = true
+	corefile := cm.Data[corefileName]
+	signals["corefileLength"] = len(corefile)
 
-			// Detect known bad/unreachable IP blocks (e.g. 192.0.2.x from RFC 5737 TEST-NET-1, 198.51.100.x, 203.0.113.x)
-			if strings.HasPrefix(forwardTarget, "192.0.2.") ||
-				strings.HasPrefix(forwardTarget, "198.51.100.") ||
-				strings.HasPrefix(forwardTarget, "203.0.113.") ||
-				forwardTarget == "0.0.0.0" ||
-				forwardTarget == "127.0.0.1" {
-				upstreamCorrupted = true
-			}
+	matches := forwardRegex.FindStringSubmatch(corefile)
+	upstreamCorrupted := false
+	var forwardTarget string
+	if len(matches) > 1 {
+		forwardTarget = strings.TrimSpace(matches[1])
+		signals["forwardTarget"] = forwardTarget
+
+		if strings.HasPrefix(forwardTarget, "192.0.2.") ||
+			strings.HasPrefix(forwardTarget, "198.51.100.") ||
+			strings.HasPrefix(forwardTarget, "203.0.113.") ||
+			forwardTarget == "0.0.0.0" ||
+			forwardTarget == "127.0.0.1" {
+			upstreamCorrupted = true
 		}
-		signals["upstreamCorrupted"] = upstreamCorrupted
 	}
-
-	// 4. Query Prometheus metrics for DNS latency (if Prometheus is available)
-	if promLatencyMs, err := queryPrometheusLatency(ctx); err == nil && promLatencyMs > 0 {
-		signals["prometheusLatencyMs"] = promLatencyMs
-	}
-
-	return &module.CheckResult{
-		Signals: signals,
-	}, nil
+	signals["upstreamCorrupted"] = upstreamCorrupted
 }
 
 // Evaluate analyzes the CoreDNS check results to determine if there is an issue.
@@ -218,19 +246,18 @@ func (m *CoreDNSModule) Evaluate(ctx context.Context, checkResult *module.CheckR
 			IsHealthy:        true,
 			NeedsRemediation: false,
 			Reason:           "No check signals available",
-			Severity:         "info",
+			Severity:         severityInfo,
 		}, nil
 	}
 
 	signals := checkResult.Signals
 
-	// Check if deployment exists
 	if found, ok := signals["deploymentFound"].(bool); ok && !found {
 		return &module.EvalResult{
 			IsHealthy:        false,
 			NeedsRemediation: false,
 			Reason:           "CoreDNS deployment missing in kube-system namespace",
-			Severity:         "critical",
+			Severity:         severityCritical,
 		}, nil
 	}
 
@@ -255,7 +282,7 @@ func (m *CoreDNSModule) Evaluate(ctx context.Context, checkResult *module.CheckR
 			IsHealthy:        false,
 			NeedsRemediation: autoHealReplicas,
 			Reason:           fmt.Sprintf("CoreDNS deployment has 0 available replicas (expected %d, desired %d); all cluster DNS resolution is unavailable", expectedReplicas, desiredReplicas),
-			Severity:         "critical",
+			Severity:         severityCritical,
 		}, nil
 	}
 
@@ -265,7 +292,7 @@ func (m *CoreDNSModule) Evaluate(ctx context.Context, checkResult *module.CheckR
 			IsHealthy:        false,
 			NeedsRemediation: autoHealReplicas,
 			Reason:           fmt.Sprintf("CoreDNS deployment is degraded: %d/%d available replicas ready", availableReplicas, expectedReplicas),
-			Severity:         "warning",
+			Severity:         severityWarning,
 		}, nil
 	}
 
@@ -275,7 +302,7 @@ func (m *CoreDNSModule) Evaluate(ctx context.Context, checkResult *module.CheckR
 			IsHealthy:        false,
 			NeedsRemediation: autoHealConfigMap,
 			Reason:           fmt.Sprintf("CoreDNS upstream resolver corrupted (forward directive points to unreachable '%s'); external DNS lookups failing", forwardTarget),
-			Severity:         "critical",
+			Severity:         severityCritical,
 		}, nil
 	}
 
@@ -285,7 +312,7 @@ func (m *CoreDNSModule) Evaluate(ctx context.Context, checkResult *module.CheckR
 			IsHealthy:        false,
 			NeedsRemediation: true,
 			Reason:           "CoreDNS deployment CPU is severely throttled (<= 5m CPU request/limit), causing DNS latency spikes",
-			Severity:         "warning",
+			Severity:         severityWarning,
 		}, nil
 	}
 
@@ -299,7 +326,7 @@ func (m *CoreDNSModule) Evaluate(ctx context.Context, checkResult *module.CheckR
 			IsHealthy:        false,
 			NeedsRemediation: true,
 			Reason:           fmt.Sprintf("Prometheus metric query detected DNS latency (%.2f ms) exceeding threshold (%d ms)", promLatencyMs, latencyThresholdMs),
-			Severity:         "warning",
+			Severity:         severityWarning,
 		}, nil
 	}
 
@@ -309,7 +336,7 @@ func (m *CoreDNSModule) Evaluate(ctx context.Context, checkResult *module.CheckR
 			IsHealthy:        false,
 			NeedsRemediation: true,
 			Reason:           fmt.Sprintf("%d CoreDNS pod(s) are crashlooping", crashLoopingPods),
-			Severity:         "critical",
+			Severity:         severityCritical,
 		}, nil
 	}
 
@@ -318,13 +345,13 @@ func (m *CoreDNSModule) Evaluate(ctx context.Context, checkResult *module.CheckR
 		IsHealthy:        true,
 		NeedsRemediation: false,
 		Reason:           fmt.Sprintf("CoreDNS is healthy (%d/%d replicas ready and serving)", readyReplicas, expectedReplicas),
-		Severity:         "info",
+		Severity:         severityInfo,
 	}, nil
 }
 
 // Remediate executes corrective actions for CoreDNS failures.
 func (m *CoreDNSModule) Remediate(ctx context.Context, evalResult *module.EvalResult) (*module.RemediateResult, error) {
-	log := logf.FromContext(ctx).WithName("coredns")
+	log := logf.FromContext(ctx).WithName(corednsName)
 	reason := evalResult.Reason
 
 	// Enforce 30s remediation cooldown window to prevent restart-thrashing
@@ -341,7 +368,7 @@ func (m *CoreDNSModule) Remediate(ctx context.Context, evalResult *module.EvalRe
 		var deploy appsv1.Deployment
 		deployKey := types.NamespacedName{Namespace: corednsNamespace, Name: corednsName}
 		if err := m.Client.Get(ctx, deployKey, &deploy); err != nil {
-			return &module.RemediateResult{Action: "fetch coredns deployment", Success: false, Err: err}, err
+			return &module.RemediateResult{Action: actionFetchDeployment, Success: false, Err: err}, err
 		}
 
 		targetReplicas := defaultExpectedReplicas
@@ -366,10 +393,9 @@ func (m *CoreDNSModule) Remediate(ctx context.Context, evalResult *module.EvalRe
 			return &module.RemediateResult{Action: "fetch coredns configmap", Success: false, Err: err}, err
 		}
 
-		corefile := cm.Data["Corefile"]
-		// Replace any forward . <bad-target> with forward . /etc/resolv.conf
+		corefile := cm.Data[corefileName]
 		repairedCorefile := forwardRegex.ReplaceAllString(corefile, "forward . /etc/resolv.conf")
-		cm.Data["Corefile"] = repairedCorefile
+		cm.Data[corefileName] = repairedCorefile
 
 		if err := m.Client.Update(ctx, &cm); err != nil {
 			log.Error(err, "Failed to update coredns configmap Corefile")
@@ -377,11 +403,10 @@ func (m *CoreDNSModule) Remediate(ctx context.Context, evalResult *module.EvalRe
 		}
 
 		// Wait briefly / verify ConfigMap commit before triggering rolling restart
-		// to avoid restart race where pods start before ConfigMap is committed
-		for i := 0; i < 5; i++ {
+		for range 5 {
 			var checkCM corev1.ConfigMap
 			if err := m.Client.Get(ctx, cmKey, &checkCM); err == nil {
-				if strings.Contains(checkCM.Data["Corefile"], "forward . /etc/resolv.conf") {
+				if strings.Contains(checkCM.Data[corefileName], "forward . /etc/resolv.conf") {
 					break
 				}
 			}
@@ -410,7 +435,7 @@ func (m *CoreDNSModule) Remediate(ctx context.Context, evalResult *module.EvalRe
 		var deploy appsv1.Deployment
 		deployKey := types.NamespacedName{Namespace: corednsNamespace, Name: corednsName}
 		if err := m.Client.Get(ctx, deployKey, &deploy); err != nil {
-			return &module.RemediateResult{Action: "fetch coredns deployment", Success: false, Err: err}, err
+			return &module.RemediateResult{Action: actionFetchDeployment, Success: false, Err: err}, err
 		}
 
 		if len(deploy.Spec.Template.Spec.Containers) > 0 {
@@ -442,7 +467,7 @@ func (m *CoreDNSModule) Remediate(ctx context.Context, evalResult *module.EvalRe
 		var deploy appsv1.Deployment
 		deployKey := types.NamespacedName{Namespace: corednsNamespace, Name: corednsName}
 		if err := m.Client.Get(ctx, deployKey, &deploy); err != nil {
-			return &module.RemediateResult{Action: "fetch coredns deployment", Success: false, Err: err}, err
+			return &module.RemediateResult{Action: actionFetchDeployment, Success: false, Err: err}, err
 		}
 
 		if deploy.Spec.Template.Annotations == nil {
@@ -481,11 +506,10 @@ func queryPrometheusLatency(ctx context.Context) (float64, error) {
 		resp, err := httpClient.Do(req)
 		if err != nil || resp.StatusCode != 200 {
 			if resp != nil {
-				resp.Body.Close()
+				_ = resp.Body.Close()
 			}
 			continue
 		}
-		defer resp.Body.Close()
 
 		var result struct {
 			Data struct {
@@ -494,7 +518,10 @@ func queryPrometheusLatency(ctx context.Context) (float64, error) {
 				} `json:"result"`
 			} `json:"data"`
 		}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err == nil && len(result.Data.Result) > 0 {
+		err = json.NewDecoder(resp.Body).Decode(&result)
+		_ = resp.Body.Close()
+
+		if err == nil && len(result.Data.Result) > 0 {
 			if len(result.Data.Result[0].Value) >= 2 {
 				valStr, ok := result.Data.Result[0].Value[1].(string)
 				if ok {
