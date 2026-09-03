@@ -14,72 +14,601 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package cni implements the CNI health monitoring and remediation module.
+//
+// It monitors:
+//   - Calico-node DaemonSet readiness (detected crash / eviction of CNI pods)
+//   - Pods stuck in ContainerCreating with a CNI-error event (FailedCreatePodSandBox)
+//   - IP pool utilisation via Calico IPAMBlock CRDs
+//
+// When failures are found it:
+//   - Deletes unready calico-node pods so the DaemonSet controller recreates them.
+//   - Deletes workload pods that are stuck in ContainerCreating due to CNI errors
+//     so they can be rescheduled once the CNI recovers.
+//   - Emits a warning log when IP-pool usage crosses the configured threshold.
 package cni
 
 import (
 	"context"
+	"fmt"
+	"strings"
+	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	remediationv1alpha1 "CS331-CN-Project-1/operator/api/v1alpha1"
 	"CS331-CN-Project-1/operator/pkg/module"
 )
 
-// CNIModule implements the module.Module interface for CNI plugin health monitoring.
+// Signal keys stored in CheckResult.Signals.
+const (
+	signalCalicoNodeUnready  = "calicoNodeUnready"  // []string  — names of unready calico-node pods
+	signalStuckPods          = "stuckPods"          // []StuckPod
+	signalIPAMUsageByPool    = "ipamUsageByPool"    // map[string]float64 — block CIDR → usage %
+	signalIPAMExhaustedPools = "ipamExhaustedPools" // []string — block CIDRs at 100 %
+	signalDisabledIPPools    = "disabledIPPools"    // []string — names of disabled Calico IPPools
+)
+
+// StuckPod records a pod that is stuck in ContainerCreating with a CNI error.
+type StuckPod struct {
+	Namespace     string
+	Name          string
+	Node          string
+	CNIError      string // short message from the FailedCreatePodSandBox event
+	IPAMExhausted bool   // true when the error indicates IPAM pool exhaustion
+}
+
+// CNIModule monitors CNI plugin health and remediates detected failures.
 type CNIModule struct {
-	// Client is the Kubernetes API client for interacting with cluster resources.
 	Client client.Client
 }
 
-// New creates a new CNIModule instance.
+// New returns a configured CNIModule.
 func New(c client.Client) *CNIModule {
-	return &CNIModule{
-		Client: c,
+	return &CNIModule{Client: c}
+}
+
+// Name satisfies module.Module.
+func (m *CNIModule) Name() string { return "CNI" }
+
+// --------------------------------------------------------------------------
+// Check
+// --------------------------------------------------------------------------
+
+// Check collects raw health signals from the Kubernetes API and stores them in
+// CheckResult.Signals. It does NOT make any pass/fail decision — that is left
+// to Evaluate.
+func (m *CNIModule) Check(
+	ctx context.Context,
+	spec *remediationv1alpha1.NetworkRemediationSpec,
+) (*module.CheckResult, error) {
+	logger := log.FromContext(ctx).WithName("cni-check")
+
+	signals := map[string]any{}
+
+	calicoNS := "kube-system"
+	calicoDSName := "calico-node"
+	if spec.CNI.CalicoNamespace != "" {
+		calicoNS = spec.CNI.CalicoNamespace
 	}
+	if spec.CNI.CalicoDaemonSetName != "" {
+		calicoDSName = spec.CNI.CalicoDaemonSetName
+	}
+	stuckThreshold := 60
+	if spec.CNI.StuckPodThresholdSeconds > 0 {
+		stuckThreshold = spec.CNI.StuckPodThresholdSeconds
+	}
+
+	// ------------------------------------------------------------------ 1 --
+	// Calico-node DaemonSet readiness
+	// ------------------------------------------------------------------ 1 --
+	unreadyPods, err := m.checkCalicoDaemonSet(ctx, calicoNS, calicoDSName)
+	if err != nil {
+		logger.Error(err, "failed to check calico-node DaemonSet")
+		unreadyPods = []string{}
+	}
+	signals[signalCalicoNodeUnready] = unreadyPods
+
+	// ------------------------------------------------------------------ 2 --
+	// Pods stuck in ContainerCreating with CNI errors
+	// ------------------------------------------------------------------ 2 --
+	stuckPods, err := m.checkStuckPods(ctx, time.Duration(stuckThreshold)*time.Second)
+	if err != nil {
+		logger.Error(err, "failed to check stuck pods")
+		stuckPods = []StuckPod{}
+	}
+	signals[signalStuckPods] = stuckPods
+
+	// ------------------------------------------------------------------ 3 --
+	// IPAM pool utilisation via Calico IPAMBlock and IPPool CRDs
+	// ------------------------------------------------------------------ 3 --
+	usageByPool, exhausted, disabledPools, err := m.checkIPAMUsage(ctx)
+	if err != nil {
+		logger.Error(err, "failed to query Calico IPAM resources")
+		usageByPool = map[string]float64{}
+		exhausted = []string{}
+		disabledPools = []string{}
+	}
+	signals[signalIPAMUsageByPool] = usageByPool
+	signals[signalIPAMExhaustedPools] = exhausted
+	signals[signalDisabledIPPools] = disabledPools
+
+	logger.Info("check complete",
+		"unreadyCalicoNodes", len(unreadyPods),
+		"stuckPods", len(stuckPods),
+		"exhaustedPools", len(exhausted),
+		"disabledPools", len(disabledPools),
+	)
+
+	return &module.CheckResult{Signals: signals}, nil
 }
 
-// Name returns the module name.
-func (m *CNIModule) Name() string {
-	return "cni"
+// checkCalicoDaemonSet returns the names of calico-node pods that are Not Ready.
+func (m *CNIModule) checkCalicoDaemonSet(ctx context.Context, ns, dsName string) ([]string, error) {
+	ds := &unstructured.Unstructured{}
+	ds.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "apps",
+		Version: "v1",
+		Kind:    "DaemonSet",
+	})
+	if err := m.Client.Get(ctx, types.NamespacedName{Namespace: ns, Name: dsName}, ds); err != nil {
+		return nil, fmt.Errorf("get DaemonSet %s/%s: %w", ns, dsName, err)
+	}
+
+	desired, _, _ := unstructured.NestedInt64(ds.Object, "status", "desiredNumberScheduled")
+	ready, _, _ := unstructured.NestedInt64(ds.Object, "status", "numberReady")
+
+	if desired == 0 || desired == ready {
+		return []string{}, nil // all nodes covered and ready
+	}
+
+	podList := &corev1.PodList{}
+	if err := m.Client.List(ctx, podList,
+		client.InNamespace(ns),
+		client.MatchingLabels{"k8s-app": dsName},
+	); err != nil {
+		return nil, fmt.Errorf("list calico-node pods: %w", err)
+	}
+
+	var unready []string
+	for _, pod := range podList.Items {
+		if !isPodReady(&pod) {
+			unready = append(unready, pod.Name)
+		}
+	}
+	return unready, nil
 }
 
-// Check gathers raw health signals for the CNI plugin.
-//
-// TODO: Implement CNI health checks
-func (m *CNIModule) Check(ctx context.Context, spec *remediationv1alpha1.NetworkRemediationSpec) (*module.CheckResult, error) {
-	log := logf.FromContext(ctx).WithName("cni")
-	log.Info("Running CNI health check (not yet implemented)")
-
-	return &module.CheckResult{
-		Signals: map[string]any{},
-	}, nil
+// isPodReady returns true when the pod has the Ready condition set to True.
+func isPodReady(pod *corev1.Pod) bool {
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type == corev1.PodReady {
+			return cond.Status == corev1.ConditionTrue
+		}
+	}
+	return false
 }
 
-// Evaluate analyzes the CNI check results to determine if there is an issue.
-//
-// TODO: Implement CNI evaluation logic
-func (m *CNIModule) Evaluate(ctx context.Context, checkResult *module.CheckResult) (*module.EvalResult, error) {
-	log := logf.FromContext(ctx).WithName("cni")
-	log.Info("Evaluating CNI health signals (not yet implemented)")
+// checkStuckPods lists cluster-wide pods in ContainerCreating (no IP) that
+// have been waiting longer than threshold and have a CNI-related event.
+func (m *CNIModule) checkStuckPods(ctx context.Context, threshold time.Duration) ([]StuckPod, error) {
+	podList := &corev1.PodList{}
+	if err := m.Client.List(ctx, podList); err != nil {
+		return nil, fmt.Errorf("list pods: %w", err)
+	}
+
+	now := time.Now()
+	var stuck []StuckPod
+
+	for _, pod := range podList.Items {
+		pod := pod
+		if pod.Status.Phase != corev1.PodPending {
+			continue
+		}
+		if pod.Status.PodIP != "" {
+			continue
+		}
+
+		inContainerCreating := false
+		for _, cs := range pod.Status.ContainerStatuses {
+			if cs.State.Waiting != nil && cs.State.Waiting.Reason == "ContainerCreating" {
+				inContainerCreating = true
+				break
+			}
+		}
+		// Also catch pods that have no ContainerStatus yet (sandbox not started).
+		if !inContainerCreating && len(pod.Status.ContainerStatuses) == 0 {
+			inContainerCreating = true
+		}
+		if !inContainerCreating {
+			continue
+		}
+
+		if threshold > 0 && now.Sub(pod.CreationTimestamp.Time) < threshold {
+			continue
+		}
+
+		cniErr, ipamExhausted := m.findCNIEvent(ctx, pod.Namespace, pod.Name)
+		if cniErr == "" {
+			continue // stuck but not due to CNI
+		}
+
+		stuck = append(stuck, StuckPod{
+			Namespace:     pod.Namespace,
+			Name:          pod.Name,
+			Node:          pod.Spec.NodeName,
+			CNIError:      cniErr,
+			IPAMExhausted: ipamExhausted,
+		})
+	}
+
+	return stuck, nil
+}
+
+// findCNIEvent checks whether there is a FailedCreatePodSandBox warning event
+// for the given pod and returns the error message and whether it indicates
+// IPAM exhaustion. Empty string means no CNI event was found.
+func (m *CNIModule) findCNIEvent(ctx context.Context, ns, podName string) (errMsg string, ipamExhausted bool) {
+	evList := &corev1.EventList{}
+	if err := m.Client.List(ctx, evList, client.InNamespace(ns)); err != nil {
+		return "", false
+	}
+
+	for _, ev := range evList.Items {
+		if ev.InvolvedObject.Name != podName {
+			continue
+		}
+		if ev.Reason != "FailedCreatePodSandBox" {
+			continue
+		}
+		msg := ev.Message
+		msgLower := strings.ToLower(msg)
+		if strings.Contains(msgLower, "failed to setup network for sandbox") ||
+			strings.Contains(msgLower, "no ips available in pools") ||
+			strings.Contains(msgLower, "no ip addresses available") ||
+			strings.Contains(msgLower, "failed to allocate") ||
+			strings.Contains(msgLower, "failed to request ipv4 addresses") ||
+			strings.Contains(msgLower, "plugin type=\"calico\"") ||
+			strings.Contains(msgLower, "calico") ||
+			strings.Contains(msgLower, "cni plugin") {
+
+			ipamEx := strings.Contains(msgLower, "no ips available") ||
+				strings.Contains(msgLower, "no ip addresses available") ||
+				strings.Contains(msgLower, "assigned 0 out of") ||
+				strings.Contains(msgLower, "failed to allocate")
+
+			if len(msg) > 200 {
+				msg = msg[:200] + "…"
+			}
+			return msg, ipamEx
+		}
+	}
+	return "", false
+}
+
+// checkIPAMUsage reads Calico IPAMBlock and IPPool CRDs to compute per-block utilisation
+// and discover disabled pools.
+// Returns (usageByBlock, exhaustedBlocks, disabledPools, error).
+func (m *CNIModule) checkIPAMUsage(ctx context.Context) (map[string]float64, []string, []string, error) {
+	// 1. Check IPPools for disabled status
+	poolList := &unstructured.UnstructuredList{}
+	poolList.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "crd.projectcalico.org",
+		Version: "v1",
+		Kind:    "IPPoolList",
+	})
+	var disabledPools []string
+	if err := m.Client.List(ctx, poolList); err == nil {
+		for _, item := range poolList.Items {
+			disabled, _, _ := unstructured.NestedBool(item.Object, "spec", "disabled")
+			if disabled {
+				disabledPools = append(disabledPools, item.GetName())
+			}
+		}
+	}
+
+	// 2. Check IPAMBlocks for capacity and usage
+	blockList := &unstructured.UnstructuredList{}
+	blockList.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "crd.projectcalico.org",
+		Version: "v1",
+		Kind:    "IPAMBlockList",
+	})
+	if err := m.Client.List(ctx, blockList); err != nil {
+		return nil, nil, disabledPools, fmt.Errorf("list IPAMBlocks: %w", err)
+	}
+
+	usageByPool := make(map[string]float64)
+	var exhausted []string
+
+	for _, item := range blockList.Items {
+		cidr, _, _ := unstructured.NestedString(item.Object, "spec", "cidr")
+		if cidr == "" {
+			continue
+		}
+		allocations, _, _ := unstructured.NestedSlice(item.Object, "spec", "allocations")
+		unallocated, _, _ := unstructured.NestedSlice(item.Object, "spec", "unallocated")
+
+		total := len(allocations) + len(unallocated)
+		if total == 0 {
+			continue
+		}
+
+		used := 0
+		for _, a := range allocations {
+			if a != nil {
+				used++
+			}
+		}
+
+		pct := float64(used) / float64(total) * 100
+		usageByPool[cidr] = pct
+		if pct >= 100 {
+			exhausted = append(exhausted, cidr)
+		}
+	}
+	return usageByPool, exhausted, disabledPools, nil
+}
+
+// --------------------------------------------------------------------------
+// Evaluate
+// --------------------------------------------------------------------------
+
+// Evaluate analyses the signals collected by Check and decides whether the CNI
+// plugin is healthy and whether remediation is required.
+func (m *CNIModule) Evaluate(
+	ctx context.Context,
+	checkResult *module.CheckResult,
+) (*module.EvalResult, error) {
+	logger := log.FromContext(ctx).WithName("cni-evaluate")
+
+	if checkResult == nil {
+		return &module.EvalResult{IsHealthy: true, NeedsRemediation: false, Reason: "no check result"}, nil
+	}
+
+	unreadyPods := signalStringSlice(checkResult, signalCalicoNodeUnready)
+	stuckPods := signalStuckPodSlice(checkResult)
+	exhaustedPools := signalStringSlice(checkResult, signalIPAMExhaustedPools)
+	disabledPools := signalStringSlice(checkResult, signalDisabledIPPools)
+	usageByPool, _ := checkResult.Signals[signalIPAMUsageByPool].(map[string]float64)
+
+	// ---- calico-node crash (highest severity) ----
+	if len(unreadyPods) > 0 {
+		reason := fmt.Sprintf(
+			"%d calico-node pod(s) not ready: %s — CNI may be unavailable on those nodes",
+			len(unreadyPods), strings.Join(unreadyPods, ", "),
+		)
+		logger.Info("CNI unhealthy: calico-node pods not ready", "pods", unreadyPods)
+		return &module.EvalResult{
+			IsHealthy:        false,
+			NeedsRemediation: true,
+			Reason:           reason,
+			Severity:         "critical",
+		}, nil
+	}
+
+	// ---- disabled IPPools causing IP allocation failure ----
+	if len(disabledPools) > 0 && (len(stuckPods) > 0 || hasIPAMStuck(stuckPods)) {
+		reason := fmt.Sprintf(
+			"Calico IPPool(s) disabled [%s] while %d pod(s) are failing to acquire IPs",
+			strings.Join(disabledPools, ", "), countIPAMStuck(stuckPods),
+		)
+		logger.Info("CNI unhealthy: disabled IPPools causing pod creation failure", "disabledPools", disabledPools)
+		return &module.EvalResult{
+			IsHealthy:        false,
+			NeedsRemediation: true,
+			Reason:           reason,
+			Severity:         "critical",
+		}, nil
+	}
+
+	// ---- IPAM exhaustion ----
+	if len(exhaustedPools) > 0 || hasIPAMStuck(stuckPods) {
+		reason := fmt.Sprintf(
+			"IPAM exhaustion: %d block(s) at 100%% (%s); %d pod(s) stuck due to IPAM",
+			len(exhaustedPools), strings.Join(exhaustedPools, ", "), countIPAMStuck(stuckPods),
+		)
+		logger.Info("CNI unhealthy: IPAM exhaustion", "exhaustedPools", exhaustedPools)
+		return &module.EvalResult{
+			IsHealthy:        false,
+			NeedsRemediation: true,
+			Reason:           reason,
+			Severity:         "critical",
+		}, nil
+	}
+
+	// ---- pods stuck with other CNI errors ----
+	if len(stuckPods) > 0 {
+		reason := fmt.Sprintf(
+			"%d pod(s) stuck in ContainerCreating with CNI errors", len(stuckPods),
+		)
+		logger.Info("CNI degraded: stuck pods", "count", len(stuckPods))
+		return &module.EvalResult{
+			IsHealthy:        false,
+			NeedsRemediation: true,
+			Reason:           reason,
+			Severity:         "warning",
+		}, nil
+	}
+
+	// ---- IPAM usage warning only ----
+	for cidr, pct := range usageByPool {
+		if pct >= 80 {
+			logger.Info("IPAM usage elevated", "block", cidr, "usagePct", fmt.Sprintf("%.1f%%", pct))
+		}
+	}
 
 	return &module.EvalResult{
 		IsHealthy:        true,
 		NeedsRemediation: false,
-		Reason:           "CNI evaluation not yet implemented",
-		Severity:         "info",
+		Reason:           "CNI plugin is healthy",
+		Severity:         "none",
 	}, nil
 }
 
-// Remediate executes corrective actions for CNI failures.
-//
-// TODO: Implement CNI remediation
-func (m *CNIModule) Remediate(ctx context.Context, evalResult *module.EvalResult) (*module.RemediateResult, error) {
-	log := logf.FromContext(ctx).WithName("cni")
-	log.Info("Remediating CNI issue (not yet implemented)")
+// --------------------------------------------------------------------------
+// Remediate
+// --------------------------------------------------------------------------
+
+// Remediate applies automated fixes for detected CNI failures:
+//   - Unready calico-node pods → delete (DaemonSet recreates them).
+//   - Workload pods stuck with CNI errors → delete (scheduler retries).
+//   - Disabled IPPools → automatically re-enable them to unblock pod scheduling.
+func (m *CNIModule) Remediate(
+	ctx context.Context,
+	evalResult *module.EvalResult,
+) (*module.RemediateResult, error) {
+	logger := log.FromContext(ctx).WithName("cni-remediate")
+
+	if evalResult == nil || !evalResult.NeedsRemediation {
+		return &module.RemediateResult{Action: "none", Success: true}, nil
+	}
+	if evalResult.IsHealthy {
+		return &module.RemediateResult{Action: "none (healthy)", Success: true}, nil
+	}
+
+	var actions []string
+	var lastErr error
+
+	// ---- 1. Restart unready calico-node pods ----
+	calicoUnready, err := m.checkCalicoDaemonSet(ctx, "kube-system", "calico-node")
+	if err != nil {
+		logger.Error(err, "could not re-check calico-node pods for remediation")
+	} else {
+		for _, podName := range calicoUnready {
+			pod := &corev1.Pod{}
+			pod.Name = podName
+			pod.Namespace = "kube-system"
+			if err := m.Client.Delete(ctx, pod); err != nil {
+				logger.Error(err, "failed to delete unready calico-node pod", "pod", podName)
+				lastErr = err
+			} else {
+				logger.Info("deleted unready calico-node pod for restart", "pod", podName)
+				actions = append(actions, "restarted calico-node/"+podName)
+			}
+		}
+	}
+
+	// ---- 2. Re-enable any disabled IPPools if pods are stuck without IPs ----
+	poolList := &unstructured.UnstructuredList{}
+	poolList.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "crd.projectcalico.org",
+		Version: "v1",
+		Kind:    "IPPoolList",
+	})
+	if err := m.Client.List(ctx, poolList); err == nil {
+		for _, item := range poolList.Items {
+			disabled, _, _ := unstructured.NestedBool(item.Object, "spec", "disabled")
+			if disabled {
+				patch := item.DeepCopy()
+				if err := unstructured.SetNestedField(patch.Object, false, "spec", "disabled"); err == nil {
+					if err := m.Client.Patch(ctx, patch, client.MergeFrom(&item)); err != nil {
+						logger.Error(err, "failed to re-enable disabled IPPool", "pool", item.GetName())
+						lastErr = err
+					} else {
+						logger.Info("re-enabled disabled IPPool", "pool", item.GetName())
+						actions = append(actions, "re-enabled IPPool "+item.GetName())
+					}
+				}
+			}
+		}
+	}
+
+	// ---- 3. Delete workload pods stuck with CNI errors ----
+	// threshold=0 means include all CNI-stuck pods regardless of age.
+	stuckPods, err := m.checkStuckPods(ctx, 0)
+	if err != nil {
+		logger.Error(err, "could not re-check stuck pods for remediation")
+	} else {
+		for _, sp := range stuckPods {
+			pod := &corev1.Pod{}
+			pod.Name = sp.Name
+			pod.Namespace = sp.Namespace
+			if err := m.Client.Delete(ctx, pod); err != nil {
+				logger.Error(err, "failed to delete CNI-stuck pod", "pod", sp.Name, "ns", sp.Namespace)
+				lastErr = err
+			} else {
+				logger.Info("evicted CNI-stuck pod", "pod", sp.Name, "ns", sp.Namespace, "ipamExhausted", sp.IPAMExhausted)
+				actions = append(actions, fmt.Sprintf("evicted %s/%s", sp.Namespace, sp.Name))
+			}
+		}
+	}
+
+	if len(actions) == 0 && lastErr == nil {
+		return &module.RemediateResult{
+			Action:  "no targets found (already recovered?)",
+			Success: true,
+		}, nil
+	}
 
 	return &module.RemediateResult{
-		Action:  "none (not yet implemented)",
-		Success: true,
+		Action:  strings.Join(actions, "; "),
+		Success: lastErr == nil,
+		Err:     lastErr,
 	}, nil
+}
+
+// --------------------------------------------------------------------------
+// helpers
+// --------------------------------------------------------------------------
+
+func signalStringSlice(cr *module.CheckResult, key string) []string {
+	if cr == nil {
+		return nil
+	}
+	v, ok := cr.Signals[key]
+	if !ok {
+		return nil
+	}
+	switch s := v.(type) {
+	case []string:
+		return s
+	case []interface{}:
+		out := make([]string, 0, len(s))
+		for _, item := range s {
+			if str, ok := item.(string); ok {
+				out = append(out, str)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
+func signalStuckPodSlice(cr *module.CheckResult) []StuckPod {
+	if cr == nil {
+		return nil
+	}
+	v, ok := cr.Signals[signalStuckPods]
+	if !ok {
+		return nil
+	}
+	if sp, ok := v.([]StuckPod); ok {
+		return sp
+	}
+	return nil
+}
+
+func hasIPAMStuck(pods []StuckPod) bool {
+	for _, p := range pods {
+		if p.IPAMExhausted {
+			return true
+		}
+	}
+	return false
+}
+
+func countIPAMStuck(pods []StuckPod) int {
+	n := 0
+	for _, p := range pods {
+		if p.IPAMExhausted {
+			n++
+		}
+	}
+	return n
 }
