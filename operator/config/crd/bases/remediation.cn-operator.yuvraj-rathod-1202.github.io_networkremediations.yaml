@@ -45,10 +45,32 @@ spec:
               cni:
                 description: CNI configures CNI plugin health monitoring and remediation.
                 properties:
+                  calicoDaemonSetName:
+                    default: calico-node
+                    description: CalicoDaemonSetName is the name of the Calico CNI
+                      DaemonSet.
+                    type: string
+                  calicoNamespace:
+                    default: kube-system
+                    description: CalicoNamespace is the namespace where calico-node
+                      DaemonSet lives.
+                    type: string
                   enabled:
                     default: true
                     description: Enabled toggles the CNI monitoring module.
                     type: boolean
+                  ipamUsageThresholdPercent:
+                    default: 80
+                    description: |-
+                      IPAMUsageThresholdPercent triggers an alert when Calico's IP pool
+                      utilisation exceeds this percentage (0–100).
+                    type: integer
+                  stuckPodThresholdSeconds:
+                    default: 60
+                    description: |-
+                      StuckPodThresholdSeconds is how long (in seconds) a pod may sit in
+                      ContainerCreating with no pod IP before it is considered CNI-stuck.
+                    type: integer
                 required:
                 - enabled
                 type: object
