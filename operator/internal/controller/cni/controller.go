@@ -52,6 +52,10 @@ const (
 	signalIPAMUsageByPool    = "ipamUsageByPool"    // map[string]float64 — block CIDR → usage %
 	signalIPAMExhaustedPools = "ipamExhaustedPools" // []string — block CIDRs at 100 %
 	signalDisabledIPPools    = "disabledIPPools"    // []string — names of disabled Calico IPPools
+
+	kubeSystemNamespace = "kube-system"
+	calicoCRDGroup      = "crd.projectcalico.org"
+	severityCritical    = "critical"
 )
 
 // StuckPod records a pod that is stuck in ContainerCreating with a CNI error.
@@ -91,7 +95,7 @@ func (m *CNIModule) Check(
 
 	signals := map[string]any{}
 
-	calicoNS := "kube-system"
+	calicoNS := kubeSystemNamespace
 	calicoDSName := "calico-node"
 	if spec.CNI.CalicoNamespace != "" {
 		calicoNS = spec.CNI.CalicoNamespace
@@ -206,7 +210,6 @@ func (m *CNIModule) checkStuckPods(ctx context.Context, threshold time.Duration)
 	var stuck []StuckPod
 
 	for _, pod := range podList.Items {
-		pod := pod
 		if pod.Status.Phase != corev1.PodPending {
 			continue
 		}
@@ -298,7 +301,7 @@ func (m *CNIModule) checkIPAMUsage(ctx context.Context) (map[string]float64, []s
 	// 1. Check IPPools for disabled status
 	poolList := &unstructured.UnstructuredList{}
 	poolList.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "crd.projectcalico.org",
+		Group:   calicoCRDGroup,
 		Version: "v1",
 		Kind:    "IPPoolList",
 	})
@@ -315,7 +318,7 @@ func (m *CNIModule) checkIPAMUsage(ctx context.Context) (map[string]float64, []s
 	// 2. Check IPAMBlocks for capacity and usage
 	blockList := &unstructured.UnstructuredList{}
 	blockList.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "crd.projectcalico.org",
+		Group:   calicoCRDGroup,
 		Version: "v1",
 		Kind:    "IPAMBlockList",
 	})
@@ -388,7 +391,7 @@ func (m *CNIModule) Evaluate(
 			IsHealthy:        false,
 			NeedsRemediation: true,
 			Reason:           reason,
-			Severity:         "critical",
+			Severity:         severityCritical,
 		}, nil
 	}
 
@@ -403,7 +406,7 @@ func (m *CNIModule) Evaluate(
 			IsHealthy:        false,
 			NeedsRemediation: true,
 			Reason:           reason,
-			Severity:         "critical",
+			Severity:         severityCritical,
 		}, nil
 	}
 
@@ -418,7 +421,7 @@ func (m *CNIModule) Evaluate(
 			IsHealthy:        false,
 			NeedsRemediation: true,
 			Reason:           reason,
-			Severity:         "critical",
+			Severity:         severityCritical,
 		}, nil
 	}
 
@@ -476,14 +479,14 @@ func (m *CNIModule) Remediate(
 	var lastErr error
 
 	// ---- 1. Restart unready calico-node pods ----
-	calicoUnready, err := m.checkCalicoDaemonSet(ctx, "kube-system", "calico-node")
+	calicoUnready, err := m.checkCalicoDaemonSet(ctx, kubeSystemNamespace, "calico-node")
 	if err != nil {
 		logger.Error(err, "could not re-check calico-node pods for remediation")
 	} else {
 		for _, podName := range calicoUnready {
 			pod := &corev1.Pod{}
 			pod.Name = podName
-			pod.Namespace = "kube-system"
+			pod.Namespace = kubeSystemNamespace
 			if err := m.Client.Delete(ctx, pod); err != nil {
 				logger.Error(err, "failed to delete unready calico-node pod", "pod", podName)
 				lastErr = err
@@ -497,7 +500,7 @@ func (m *CNIModule) Remediate(
 	// ---- 2. Re-enable any disabled IPPools if pods are stuck without IPs ----
 	poolList := &unstructured.UnstructuredList{}
 	poolList.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "crd.projectcalico.org",
+		Group:   calicoCRDGroup,
 		Version: "v1",
 		Kind:    "IPPoolList",
 	})
@@ -568,7 +571,7 @@ func signalStringSlice(cr *module.CheckResult, key string) []string {
 	switch s := v.(type) {
 	case []string:
 		return s
-	case []interface{}:
+	case []any:
 		out := make([]string, 0, len(s))
 		for _, item := range s {
 			if str, ok := item.(string); ok {

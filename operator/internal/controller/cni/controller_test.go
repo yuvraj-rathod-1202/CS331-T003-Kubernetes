@@ -17,6 +17,14 @@ import (
 	"CS331-CN-Project-1/operator/pkg/module"
 )
 
+const (
+	testPoolCIDR            = "10.200.0.0/28"
+	testSeverityCritical    = "critical"
+	testNamespaceDefault    = "default"
+	testStuckPodNameBackend = "backend-stuck"
+	testNamespaceKubeSystem = "kube-system"
+)
+
 func newTestScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
 	_ = corev1.AddToScheme(s)
@@ -32,7 +40,7 @@ func TestCNIModule_Evaluate_Healthy(t *testing.T) {
 		Signals: map[string]any{
 			signalCalicoNodeUnready:  []string{},
 			signalStuckPods:          []StuckPod{},
-			signalIPAMUsageByPool:    map[string]float64{"10.200.0.0/28": 30.0},
+			signalIPAMUsageByPool:    map[string]float64{testPoolCIDR: 30.0},
 			signalIPAMExhaustedPools: []string{},
 			signalDisabledIPPools:    []string{},
 		},
@@ -76,8 +84,8 @@ func TestCNIModule_Evaluate_CalicoNodeCrash(t *testing.T) {
 	if !evalResult.NeedsRemediation {
 		t.Errorf("expected remediation to be requested")
 	}
-	if evalResult.Severity != "critical" {
-		t.Errorf("expected severity 'critical', got '%s'", evalResult.Severity)
+	if evalResult.Severity != testSeverityCritical {
+		t.Errorf("expected severity '%s', got '%s'", testSeverityCritical, evalResult.Severity)
 	}
 }
 
@@ -90,14 +98,14 @@ func TestCNIModule_Evaluate_IPAMExhaustion(t *testing.T) {
 			signalCalicoNodeUnready: []string{},
 			signalStuckPods: []StuckPod{
 				{
-					Namespace:     "default",
-					Name:          "backend-stuck",
+					Namespace:     testNamespaceDefault,
+					Name:          testStuckPodNameBackend,
 					CNIError:      "No IPs available in pools",
 					IPAMExhausted: true,
 				},
 			},
-			signalIPAMUsageByPool:    map[string]float64{"10.200.0.0/28": 100.0},
-			signalIPAMExhaustedPools: []string{"10.200.0.0/28"},
+			signalIPAMUsageByPool:    map[string]float64{testPoolCIDR: 100.0},
+			signalIPAMExhaustedPools: []string{testPoolCIDR},
 			signalDisabledIPPools:    []string{},
 		},
 	}
@@ -113,8 +121,8 @@ func TestCNIModule_Evaluate_IPAMExhaustion(t *testing.T) {
 	if !evalResult.NeedsRemediation {
 		t.Errorf("expected remediation to be requested")
 	}
-	if evalResult.Severity != "critical" {
-		t.Errorf("expected severity 'critical', got '%s'", evalResult.Severity)
+	if evalResult.Severity != testSeverityCritical {
+		t.Errorf("expected severity '%s', got '%s'", testSeverityCritical, evalResult.Severity)
 	}
 }
 
@@ -127,7 +135,7 @@ func TestCNIModule_Evaluate_DisabledIPPool(t *testing.T) {
 			signalCalicoNodeUnready: []string{},
 			signalStuckPods: []StuckPod{
 				{
-					Namespace:     "default",
+					Namespace:     testNamespaceDefault,
 					Name:          "frontend-stuck",
 					CNIError:      "failed to request IPv4 addresses",
 					IPAMExhausted: true,
@@ -160,7 +168,7 @@ func TestCNIModule_Remediate_UnreadyCalicoPod(t *testing.T) {
 	unreadyCalicoPod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "calico-node-bad",
-			Namespace: "kube-system",
+			Namespace: testNamespaceKubeSystem,
 			Labels:    map[string]string{"k8s-app": "calico-node"},
 		},
 		Status: corev1.PodStatus{
@@ -182,7 +190,7 @@ func TestCNIModule_Remediate_UnreadyCalicoPod(t *testing.T) {
 		Kind:    "DaemonSet",
 	})
 	ds.SetName("calico-node")
-	ds.SetNamespace("kube-system")
+	ds.SetNamespace(testNamespaceKubeSystem)
 	_ = unstructured.SetNestedField(ds.Object, int64(1), "status", "desiredNumberScheduled")
 	_ = unstructured.SetNestedField(ds.Object, int64(0), "status", "numberReady")
 
@@ -196,7 +204,7 @@ func TestCNIModule_Remediate_UnreadyCalicoPod(t *testing.T) {
 	evalResult := &module.EvalResult{
 		IsHealthy:        false,
 		NeedsRemediation: true,
-		Severity:         "critical",
+		Severity:         testSeverityCritical,
 		Reason:           "1 calico-node pod not ready",
 	}
 
@@ -211,7 +219,7 @@ func TestCNIModule_Remediate_UnreadyCalicoPod(t *testing.T) {
 
 	// Verify the unready pod was deleted
 	remainingPod := &corev1.Pod{}
-	err = fakeClient.Get(ctx, client.ObjectKey{Namespace: "kube-system", Name: "calico-node-bad"}, remainingPod)
+	err = fakeClient.Get(ctx, client.ObjectKey{Namespace: testNamespaceKubeSystem, Name: "calico-node-bad"}, remainingPod)
 	if err == nil {
 		t.Errorf("expected unready calico-node pod to be deleted")
 	}
@@ -224,8 +232,8 @@ func TestCNIModule_Remediate_StuckPodEviction(t *testing.T) {
 	// Stuck workload pod
 	stuckPod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:              "backend-stuck",
-			Namespace:         "default",
+			Name:              testStuckPodNameBackend,
+			Namespace:         testNamespaceDefault,
 			CreationTimestamp: metav1.NewTime(time.Now().Add(-2 * time.Minute)),
 		},
 		Spec: corev1.PodSpec{NodeName: "worker-1"},
@@ -244,12 +252,12 @@ func TestCNIModule_Remediate_StuckPodEviction(t *testing.T) {
 	// Warning event on the stuck pod
 	event := &corev1.Event{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "backend-stuck-cni-err",
-			Namespace: "default",
+			Name:      testStuckPodNameBackend + "-cni-err",
+			Namespace: testNamespaceDefault,
 		},
 		InvolvedObject: corev1.ObjectReference{
-			Name:      "backend-stuck",
-			Namespace: "default",
+			Name:      testStuckPodNameBackend,
+			Namespace: testNamespaceDefault,
 		},
 		Reason:  "FailedCreatePodSandBox",
 		Message: "plugin type=\"calico\" failed (add): No IPs available in pools",
@@ -265,7 +273,7 @@ func TestCNIModule_Remediate_StuckPodEviction(t *testing.T) {
 	evalResult := &module.EvalResult{
 		IsHealthy:        false,
 		NeedsRemediation: true,
-		Severity:         "critical",
+		Severity:         testSeverityCritical,
 		Reason:           "stuck pods with IPAM exhaustion",
 	}
 
@@ -280,7 +288,7 @@ func TestCNIModule_Remediate_StuckPodEviction(t *testing.T) {
 
 	// Verify the stuck workload pod was deleted
 	checkPod := &corev1.Pod{}
-	err = fakeClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "backend-stuck"}, checkPod)
+	err = fakeClient.Get(ctx, client.ObjectKey{Namespace: testNamespaceDefault, Name: testStuckPodNameBackend}, checkPod)
 	if err == nil {
 		t.Errorf("expected stuck pod to be evicted")
 	}
