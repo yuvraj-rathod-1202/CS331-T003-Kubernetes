@@ -47,16 +47,20 @@ import (
 
 // Signal keys stored in CheckResult.Signals.
 const (
-	signalCalicoNodeUnready  = "calicoNodeUnready"  // []string  — names of unready calico-node pods
-	signalStuckPods          = "stuckPods"          // []StuckPod
-	signalIPAMUsageByPool    = "ipamUsageByPool"    // map[string]float64 — block CIDR → usage %
-	signalIPAMExhaustedPools = "ipamExhaustedPools" // []string — block CIDRs at 100 %
-	signalDisabledIPPools    = "disabledIPPools"    // []string — names of disabled Calico IPPools
+	signalCalicoNodeUnready    = "calicoNodeUnready"    // []string  - names of unready calico-node pods
+	signalStuckPods            = "stuckPods"            // []StuckPod
+	signalIPAMUsageByPool      = "ipamUsageByPool"      // map[string]float64 - block CIDR → usage %
+	signalIPAMExhaustedPools   = "ipamExhaustedPools"   // []string - block CIDRs at 100 %
+	signalDisabledIPPools      = "disabledIPPools"      // []string - names of disabled Calico IPPools
+	signalIPAMThresholdPercent = "ipamThresholdPercent" // int - configured IPAM usage threshold %
 
 	kubeSystemNamespace = "kube-system"
 	calicoCRDGroup      = "crd.projectcalico.org"
 	severityCritical    = "critical"
+	severityWarning     = "warning"
 	severityNone        = "none"
+
+	defaultIPAMThresholdPercent = 80
 
 	defaultCalicoDaemonSetName = "calico-node"
 	k8sAppLabel                = "k8s-app"
@@ -95,8 +99,9 @@ type StuckPod struct {
 
 // CNIModule monitors CNI plugin health and remediates detected failures.
 type CNIModule struct {
-	Client        client.Client
-	pendingTarget *remediationTarget
+	Client               client.Client
+	pendingTarget        *remediationTarget
+	ipamThresholdPercent int
 }
 
 // New returns a configured CNIModule.
@@ -105,14 +110,16 @@ func New(c client.Client) *CNIModule {
 }
 
 // Name satisfies module.Module.
-func (m *CNIModule) Name() string { return "CNI" }
+func (m *CNIModule) Name() string { return "cni" }
 
-// --------------------------------------------------------------------------
-// Check
-// --------------------------------------------------------------------------
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;delete
+// +kubebuilder:rbac:groups="",resources=events,verbs=get;list;watch
+// +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch
+// +kubebuilder:rbac:groups=crd.projectcalico.org,resources=ippools,verbs=get;list;watch;patch;update
+// +kubebuilder:rbac:groups=crd.projectcalico.org,resources=ipamblocks,verbs=get;list;watch
 
 // Check collects raw health signals from the Kubernetes API and stores them in
-// CheckResult.Signals. It does NOT make any pass/fail decision — that is left
+// CheckResult.Signals. It does NOT make any pass/fail decision - that is left
 // to Evaluate.
 func (m *CNIModule) Check(
 	ctx context.Context,
@@ -134,20 +141,19 @@ func (m *CNIModule) Check(
 	if spec.CNI.StuckPodThresholdSeconds > 0 {
 		stuckThreshold = spec.CNI.StuckPodThresholdSeconds
 	}
+	ipamThreshold := defaultIPAMThresholdPercent
+	if spec.CNI.IPAMUsageThresholdPercent > 0 {
+		ipamThreshold = spec.CNI.IPAMUsageThresholdPercent
+	}
+	m.ipamThresholdPercent = ipamThreshold
+	signals[signalIPAMThresholdPercent] = ipamThreshold
 
-	// ------------------------------------------------------------------ 1 --
-	// Calico-node DaemonSet readiness
-	// ------------------------------------------------------------------ 1 --
 	unreadyPods, err := m.checkCalicoDaemonSet(ctx, calicoNS, calicoDSName)
 	if err != nil {
-		logger.Error(err, "failed to check calico-node DaemonSet")
-		unreadyPods = []string{}
+		return nil, fmt.Errorf("check calico DaemonSet %s/%s: %w", calicoNS, calicoDSName, err)
 	}
 	signals[signalCalicoNodeUnready] = unreadyPods
 
-	// ------------------------------------------------------------------ 2 --
-	// Pods stuck in ContainerCreating with CNI errors
-	// ------------------------------------------------------------------ 2 --
 	stuckPods, err := m.checkStuckPods(ctx, time.Duration(stuckThreshold)*time.Second)
 	if err != nil {
 		logger.Error(err, "failed to check stuck pods")
@@ -155,9 +161,6 @@ func (m *CNIModule) Check(
 	}
 	signals[signalStuckPods] = stuckPods
 
-	// ------------------------------------------------------------------ 3 --
-	// IPAM pool utilisation via Calico IPAMBlock and IPPool CRDs
-	// ------------------------------------------------------------------ 3 --
 	usageByPool, exhausted, disabledPools, err := m.checkIPAMUsage(ctx)
 	if err != nil {
 		logger.Error(err, "failed to query Calico IPAM resources")
@@ -191,18 +194,29 @@ func (m *CNIModule) checkCalicoDaemonSet(ctx context.Context, ns, dsName string)
 		return nil, fmt.Errorf("get DaemonSet %s/%s: %w", ns, dsName, err)
 	}
 
-	desired, _, _ := unstructured.NestedInt64(ds.Object, "status", "desiredNumberScheduled")
-	ready, _, _ := unstructured.NestedInt64(ds.Object, "status", "numberReady")
+	desired, foundDesired, errDesired := unstructured.NestedInt64(ds.Object, "status", "desiredNumberScheduled")
+	ready, foundReady, errReady := unstructured.NestedInt64(ds.Object, "status", "numberReady")
+	if errDesired != nil {
+		return nil, fmt.Errorf("parse DaemonSet %s/%s status.desiredNumberScheduled: %w", ns, dsName, errDesired)
+	}
+	if errReady != nil {
+		return nil, fmt.Errorf("parse DaemonSet %s/%s status.numberReady: %w", ns, dsName, errReady)
+	}
 
-	if desired == 0 || desired == ready {
+	if foundDesired && foundReady && desired > 0 && desired == ready {
 		return []string{}, nil // all nodes covered and ready
 	}
 
+	listOpts := []client.ListOption{client.InNamespace(ns)}
+	matchLabels, foundSelector, _ := unstructured.NestedStringMap(ds.Object, "spec", "selector", "matchLabels")
+	if foundSelector && len(matchLabels) > 0 {
+		listOpts = append(listOpts, client.MatchingLabels(matchLabels))
+	} else {
+		listOpts = append(listOpts, client.MatchingLabels{k8sAppLabel: dsName})
+	}
+
 	podList := &corev1.PodList{}
-	if err := m.Client.List(ctx, podList,
-		client.InNamespace(ns),
-		client.MatchingLabels{k8sAppLabel: dsName},
-	); err != nil {
+	if err := m.Client.List(ctx, podList, listOpts...); err != nil {
 		return nil, fmt.Errorf("list calico-node pods: %w", err)
 	}
 
@@ -290,7 +304,7 @@ func (m *CNIModule) findCNIEvent(ctx context.Context, ns, podName string) (errMs
 	}
 
 	for _, ev := range evList.Items {
-		if ev.InvolvedObject.Name != podName {
+		if ev.InvolvedObject.Name != podName || ev.InvolvedObject.Namespace != ns {
 			continue
 		}
 		if ev.Reason != "FailedCreatePodSandBox" {
@@ -364,30 +378,25 @@ func (m *CNIModule) checkIPAMUsage(ctx context.Context) (map[string]float64, []s
 		allocations, _, _ := unstructured.NestedSlice(item.Object, "spec", "allocations")
 		unallocated, _, _ := unstructured.NestedSlice(item.Object, "spec", "unallocated")
 
-		total := len(allocations) + len(unallocated)
+		total := len(allocations)
 		if total == 0 {
 			continue
 		}
 
-		used := 0
-		for _, a := range allocations {
-			if a != nil {
-				used++
-			}
+		free := len(unallocated)
+		if free > total {
+			free = total
 		}
+		used := total - free
 
 		pct := float64(used) / float64(total) * 100
 		usageByPool[cidr] = pct
-		if pct >= 100 {
+		if used == total {
 			exhausted = append(exhausted, cidr)
 		}
 	}
 	return usageByPool, exhausted, disabledPools, nil
 }
-
-// --------------------------------------------------------------------------
-// Evaluate
-// --------------------------------------------------------------------------
 
 // Evaluate analyses the signals collected by Check and decides whether the CNI
 // plugin is healthy and whether remediation is required.
@@ -407,11 +416,15 @@ func (m *CNIModule) Evaluate(
 	exhaustedPools := signalStringSlice(checkResult, signalIPAMExhaustedPools)
 	disabledPools := signalStringSlice(checkResult, signalDisabledIPPools)
 	usageByPool, _ := checkResult.Signals[signalIPAMUsageByPool].(map[string]float64)
+	ipamThreshold := signalInt(checkResult, signalIPAMThresholdPercent, m.ipamThresholdPercent)
+	if ipamThreshold <= 0 {
+		ipamThreshold = defaultIPAMThresholdPercent
+	}
 
 	// ---- calico-node crash (highest severity) ----
 	if len(unreadyPods) > 0 {
 		reason := fmt.Sprintf(
-			"%d calico-node pod(s) not ready: %s — CNI may be unavailable on those nodes",
+			"%d calico-node pod(s) not ready: %s - CNI may be unavailable on those nodes",
 			len(unreadyPods), strings.Join(unreadyPods, ", "),
 		)
 		logger.Info("CNI unhealthy: calico-node pods not ready", "pods", unreadyPods)
@@ -428,7 +441,7 @@ func (m *CNIModule) Evaluate(
 	}
 
 	// ---- disabled IPPools causing IP allocation failure ----
-	if len(disabledPools) > 0 && (len(stuckPods) > 0 || hasIPAMStuck(stuckPods)) {
+	if len(disabledPools) > 0 && (len(stuckPods) > 0) {
 		reason := fmt.Sprintf(
 			"Calico IPPool(s) disabled [%s] while %d pod(s) are failing to acquire IPs",
 			strings.Join(disabledPools, ", "), countIPAMStuck(stuckPods),
@@ -480,18 +493,33 @@ func (m *CNIModule) Evaluate(
 			IsHealthy:        false,
 			NeedsRemediation: true,
 			Reason:           reason,
-			Severity:         "warning",
+			Severity:         severityWarning,
 		}, nil
 	}
 
 	// ---- IPAM usage warning only ----
+	var elevatedPools []string
 	for cidr, pct := range usageByPool {
-		if pct >= 80 {
-			logger.Info("IPAM usage elevated", "block", cidr, "usagePct", fmt.Sprintf("%.1f%%", pct))
+		if pct >= float64(ipamThreshold) {
+			logger.Info("IPAM usage elevated",
+				"block", cidr,
+				"usagePct", fmt.Sprintf("%.1f%%", pct),
+				"thresholdPct", fmt.Sprintf("%d%%", ipamThreshold),
+			)
+			elevatedPools = append(elevatedPools, fmt.Sprintf("%s (%.1f%%)", cidr, pct))
 		}
 	}
 
 	m.pendingTarget = nil
+	if len(elevatedPools) > 0 {
+		return &module.EvalResult{
+			IsHealthy:        true,
+			NeedsRemediation: false,
+			Reason:           fmt.Sprintf("CNI plugin is healthy, but IPAM usage elevated above %d%%: %s", ipamThreshold, strings.Join(elevatedPools, ", ")),
+			Severity:         severityWarning,
+		}, nil
+	}
+
 	return &module.EvalResult{
 		IsHealthy:        true,
 		NeedsRemediation: false,
@@ -499,10 +527,6 @@ func (m *CNIModule) Evaluate(
 		Severity:         severityNone,
 	}, nil
 }
-
-// --------------------------------------------------------------------------
-// Remediate
-// --------------------------------------------------------------------------
 
 // Remediate applies targeted automated fixes based on the specific failure:
 //   - ActionRestartCalicoNode: only deletes unready calico-node pods.
@@ -650,9 +674,34 @@ func (m *CNIModule) Remediate(
 	}, nil
 }
 
-// --------------------------------------------------------------------------
-// helpers
-// --------------------------------------------------------------------------
+func signalInt(cr *module.CheckResult, key string, fallback int) int {
+	if cr == nil || cr.Signals == nil {
+		return fallback
+	}
+	v, ok := cr.Signals[key]
+	if !ok {
+		return fallback
+	}
+	switch val := v.(type) {
+	case int:
+		if val > 0 {
+			return val
+		}
+	case int32:
+		if val > 0 {
+			return int(val)
+		}
+	case int64:
+		if val > 0 {
+			return int(val)
+		}
+	case float64:
+		if val > 0 {
+			return int(val)
+		}
+	}
+	return fallback
+}
 
 func signalStringSlice(cr *module.CheckResult, key string) []string {
 	if cr == nil {

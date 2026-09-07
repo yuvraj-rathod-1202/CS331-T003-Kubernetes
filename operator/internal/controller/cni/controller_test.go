@@ -2,6 +2,7 @@ package cni
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -59,6 +60,271 @@ func TestCNIModule_Evaluate_Healthy(t *testing.T) {
 	}
 	if evalResult.NeedsRemediation {
 		t.Errorf("expected no remediation needed, got: %v", evalResult.NeedsRemediation)
+	}
+}
+
+func TestCNIModule_Evaluate_ElevatedIPAMUsage_DefaultThreshold(t *testing.T) {
+	m := New(nil)
+	ctx := context.Background()
+
+	checkResult := &module.CheckResult{
+		Signals: map[string]any{
+			signalCalicoNodeUnready:  []string{},
+			signalStuckPods:          []StuckPod{},
+			signalIPAMUsageByPool:    map[string]float64{testPoolCIDR: 85.0},
+			signalIPAMExhaustedPools: []string{},
+			signalDisabledIPPools:    []string{},
+		},
+	}
+
+	evalResult, err := m.Evaluate(ctx, checkResult)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !evalResult.IsHealthy {
+		t.Errorf("expected healthy with warning, got unhealthy: %s", evalResult.Reason)
+	}
+	if evalResult.NeedsRemediation {
+		t.Errorf("expected no remediation needed for usage warning, got: %v", evalResult.NeedsRemediation)
+	}
+	if evalResult.Severity != severityWarning {
+		t.Errorf("expected severity '%s', got '%s'", severityWarning, evalResult.Severity)
+	}
+	if !strings.Contains(evalResult.Reason, "IPAM usage elevated") {
+		t.Errorf("expected reason to mention elevated IPAM usage, got: %s", evalResult.Reason)
+	}
+}
+
+func TestCNIModule_Evaluate_ElevatedIPAMUsage_CustomThreshold(t *testing.T) {
+	m := New(nil)
+	ctx := context.Background()
+
+	// Scenario 1: custom threshold = 90%. Usage = 85%. Should be healthy with severity none.
+	checkResultHealthy := &module.CheckResult{
+		Signals: map[string]any{
+			signalCalicoNodeUnready:    []string{},
+			signalStuckPods:            []StuckPod{},
+			signalIPAMUsageByPool:      map[string]float64{testPoolCIDR: 85.0},
+			signalIPAMExhaustedPools:   []string{},
+			signalDisabledIPPools:      []string{},
+			signalIPAMThresholdPercent: 90,
+		},
+	}
+
+	evalResult, err := m.Evaluate(ctx, checkResultHealthy)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !evalResult.IsHealthy {
+		t.Errorf("expected healthy, got unhealthy: %s", evalResult.Reason)
+	}
+	if evalResult.Severity != severityNone {
+		t.Errorf("expected severity '%s' when below custom threshold 90%%, got '%s'", severityNone, evalResult.Severity)
+	}
+
+	// Scenario 2: custom threshold = 90%. Usage = 92%. Should trigger warning.
+	checkResultElevated := &module.CheckResult{
+		Signals: map[string]any{
+			signalCalicoNodeUnready:    []string{},
+			signalStuckPods:            []StuckPod{},
+			signalIPAMUsageByPool:      map[string]float64{testPoolCIDR: 92.0},
+			signalIPAMExhaustedPools:   []string{},
+			signalDisabledIPPools:      []string{},
+			signalIPAMThresholdPercent: 90,
+		},
+	}
+
+	evalResult2, err := m.Evaluate(ctx, checkResultElevated)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !evalResult2.IsHealthy {
+		t.Errorf("expected healthy with warning, got unhealthy: %s", evalResult2.Reason)
+	}
+	if evalResult2.Severity != severityWarning {
+		t.Errorf("expected severity '%s' when above custom threshold 90%%, got '%s'", severityWarning, evalResult2.Severity)
+	}
+	if !strings.Contains(evalResult2.Reason, "90%") {
+		t.Errorf("expected reason to mention configured threshold 90%%, got: %s", evalResult2.Reason)
+	}
+}
+
+func TestCNIModule_Check_PropagatesIPAMUsageThresholdPercent(t *testing.T) {
+	scheme := newTestScheme()
+	calicoDS := &unstructured.Unstructured{}
+	calicoDS.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "apps",
+		Version: "v1",
+		Kind:    "DaemonSet",
+	})
+	calicoDS.SetName("calico-node")
+	calicoDS.SetNamespace("kube-system")
+	_ = unstructured.SetNestedField(calicoDS.Object, int64(1), "status", "desiredNumberScheduled")
+	_ = unstructured.SetNestedField(calicoDS.Object, int64(1), "status", "numberReady")
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(calicoDS).Build()
+	m := New(fakeClient)
+	ctx := context.Background()
+
+	// Default threshold when spec is 0 / empty
+	specDefault := &remediationv1alpha1.NetworkRemediationSpec{
+		CNI: remediationv1alpha1.CNISpec{
+			Enabled:                   true,
+			IPAMUsageThresholdPercent: 0,
+		},
+	}
+	crDefault, err := m.Check(ctx, specDefault)
+	if err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+	if crDefault.Signals[signalIPAMThresholdPercent] != 80 {
+		t.Errorf("expected default threshold 80 in signals, got: %v", crDefault.Signals[signalIPAMThresholdPercent])
+	}
+	if m.ipamThresholdPercent != 80 {
+		t.Errorf("expected default threshold 80 on module, got: %d", m.ipamThresholdPercent)
+	}
+
+	// Custom threshold
+	specCustom := &remediationv1alpha1.NetworkRemediationSpec{
+		CNI: remediationv1alpha1.CNISpec{
+			Enabled:                   true,
+			IPAMUsageThresholdPercent: 65,
+		},
+	}
+	crCustom, err := m.Check(ctx, specCustom)
+	if err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+	if crCustom.Signals[signalIPAMThresholdPercent] != 65 {
+		t.Errorf("expected custom threshold 65 in signals, got: %v", crCustom.Signals[signalIPAMThresholdPercent])
+	}
+	if m.ipamThresholdPercent != 65 {
+		t.Errorf("expected custom threshold 65 on module, got: %d", m.ipamThresholdPercent)
+	}
+}
+
+func TestCNIModule_CheckCalicoDaemonSet_Healthy(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+
+	ds := &unstructured.Unstructured{}
+	ds.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "apps",
+		Version: "v1",
+		Kind:    "DaemonSet",
+	})
+	ds.SetName("calico-node")
+	ds.SetNamespace(testNamespaceKubeSystem)
+	_ = unstructured.SetNestedField(ds.Object, int64(2), "status", "desiredNumberScheduled")
+	_ = unstructured.SetNestedField(ds.Object, int64(2), "status", "numberReady")
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ds).Build()
+	m := New(fakeClient)
+
+	unready, err := m.checkCalicoDaemonSet(ctx, testNamespaceKubeSystem, "calico-node")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(unready) != 0 {
+		t.Errorf("expected 0 unready pods when desired == ready, got: %v", unready)
+	}
+}
+
+func TestCNIModule_CheckCalicoDaemonSet_CustomSelector(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+
+	ds := &unstructured.Unstructured{}
+	ds.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "apps",
+		Version: "v1",
+		Kind:    "DaemonSet",
+	})
+	ds.SetName("calico-node-custom")
+	ds.SetNamespace(testNamespaceKubeSystem)
+	_ = unstructured.SetNestedField(ds.Object, int64(2), "status", "desiredNumberScheduled")
+	_ = unstructured.SetNestedField(ds.Object, int64(1), "status", "numberReady")
+	_ = unstructured.SetNestedStringMap(ds.Object, map[string]string{
+		"k8s-app": "calico-node",
+	}, "spec", "selector", "matchLabels")
+
+	readyPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "calico-node-node1",
+			Namespace: testNamespaceKubeSystem,
+			Labels:    map[string]string{"k8s-app": "calico-node"},
+		},
+		Status: corev1.PodStatus{
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+
+	unreadyPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "calico-node-node2",
+			Namespace: testNamespaceKubeSystem,
+			Labels:    map[string]string{"k8s-app": "calico-node"},
+		},
+		Status: corev1.PodStatus{
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionFalse},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ds, readyPod, unreadyPod).Build()
+	m := New(fakeClient)
+
+	unready, err := m.checkCalicoDaemonSet(ctx, testNamespaceKubeSystem, "calico-node-custom")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(unready) != 1 || unready[0] != "calico-node-node2" {
+		t.Errorf("expected [calico-node-node2] using spec.selector.matchLabels, got: %v", unready)
+	}
+}
+
+func TestCNIModule_CheckCalicoDaemonSet_MissingStatusDoesNotDefaultToHealthy(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+
+	ds := &unstructured.Unstructured{}
+	ds.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "apps",
+		Version: "v1",
+		Kind:    "DaemonSet",
+	})
+	ds.SetName("calico-node")
+	ds.SetNamespace(testNamespaceKubeSystem)
+	_ = unstructured.SetNestedStringMap(ds.Object, map[string]string{
+		"k8s-app": "calico-node",
+	}, "spec", "selector", "matchLabels")
+
+	unreadyPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "calico-node-failing",
+			Namespace: testNamespaceKubeSystem,
+			Labels:    map[string]string{"k8s-app": "calico-node"},
+		},
+		Status: corev1.PodStatus{
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionFalse},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ds, unreadyPod).Build()
+	m := New(fakeClient)
+
+	unready, err := m.checkCalicoDaemonSet(ctx, testNamespaceKubeSystem, "calico-node")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(unready) != 1 || unready[0] != "calico-node-failing" {
+		t.Errorf("expected [calico-node-failing] when status is missing, got: %v", unready)
 	}
 }
 

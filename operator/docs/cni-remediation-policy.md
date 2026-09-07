@@ -94,8 +94,8 @@ flowchart TD
     %% Evaluate Phase
     Evaluate{"Evaluate Health:<br/>code: Evaluate()<br/>Are there active CNI failures?"}
     
-    Evaluate -- "No Failures<br/>(Usage < 80%)" --> MarkHealthy["Set Status: Healthy<br/>Severity: none"]
-    Evaluate -- "Usage >= 80% only" --> MarkWarning["Log Warning: IPAM usage elevated<br/>Severity: warning (No pod disruption)"]
+    Evaluate -- "No Failures<br/>(Usage < Threshold)" --> MarkHealthy["Set Status: Healthy<br/>Severity: none"]
+    Evaluate -- "Usage >= Threshold only" --> MarkWarning["Log Warning: IPAM usage elevated<br/>Severity: warning (No pod disruption)"]
     Evaluate -- "Failures Detected<br/>(NeedsRemediation: true)" --> RemediateAction{"Determine Remediation Actions<br/>code: Remediate()"}
 
     %% Remediation Actions
@@ -120,7 +120,7 @@ flowchart TD
 
 Every decision and action in the workflow diagram maps directly to a specific function in [`operator/internal/controller/cni/controller.go`](../internal/controller/cni/controller.go):
 
-### Step 1: `Check()` Phase — Raw Signal Gathering
+### Step 1: `Check()` Phase - Raw Signal Gathering
 In `Check(ctx context.Context, spec *remediationv1alpha1.NetworkRemediationSpec)`:
 
 | Diagram Step | Code Function & Location | How It Works |
@@ -132,7 +132,7 @@ In `Check(ctx context.Context, spec *remediationv1alpha1.NetworkRemediationSpec)
 
 ---
 
-### Step 2: `Evaluate()` Phase — Heuristic Decision Engine & Action Planning
+### Step 2: `Evaluate()` Phase - Heuristic Decision Engine & Action Planning
 In `Evaluate(ctx context.Context, checkResult *module.CheckResult)` ([`controller.go#L388-L500`](../internal/controller/cni/controller.go#L388-L500)):
 
 ```go
@@ -176,7 +176,7 @@ if len(exhaustedPools) > 0 || len(stuckPods) > 0 {
 
 ---
 
-### Step 3: `Remediate()` Phase — Targeted Branching Recovery
+### Step 3: `Remediate()` Phase - Targeted Branching Recovery
 In `Remediate(ctx context.Context, evalResult *module.EvalResult)` ([`controller.go#L506-L620`](../internal/controller/cni/controller.go#L506-L620)):
 
 The controller executes **only** the selective branch matching the detected failure via `switch actionType`:
@@ -219,5 +219,5 @@ case ActionEvictStuckPods:
 | **Disabled IPPool with stuck pods** | `signalDisabledIPPools` + `signalStuckPods` | `critical` | `Client.Patch()` setting `spec.disabled = false` |
 | **IPAM address pool exhaustion** | `signalIPAMExhaustedPools` (100% usage) | `critical` | `Client.Delete()` on stuck workload pods to reschedule |
 | **Isolated sandbox creation timeout** | `signalStuckPods` (> 60s without IP) | `warning` | `Client.Delete()` on stuck pods for clean sandbox retry |
-| **Elevated IP pool usage (>= 80%)** | `signalIPAMUsageByPool >= 80%` | `warning` | Emits capacity warning log (no disruptive restart) |
-| **Cluster healthy** | 0 unready, 0 stuck, usage < 80% | `none` | Updates status `Healthy = true`, sleeps until next cycle |
+| **Elevated IP pool usage (>= Threshold%)** | `signalIPAMUsageByPool >= IPAMUsageThresholdPercent` (default 80%) | `warning` | Emits capacity warning log (no disruptive restart). Configured via `spec.cni.ipamUsageThresholdPercent`. |
+| **Cluster healthy** | 0 unready, 0 stuck, usage < Threshold% | `none` | Updates status `Healthy = true`, sleeps until next cycle |
