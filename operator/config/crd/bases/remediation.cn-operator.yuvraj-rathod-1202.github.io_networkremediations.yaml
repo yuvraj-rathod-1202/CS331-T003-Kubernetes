@@ -77,9 +77,42 @@ spec:
               coreDNS:
                 description: CoreDNS configures DNS health monitoring and remediation.
                 properties:
+                  autoHealConfigMap:
+                    default: true
+                    description: AutoHealConfigMap automatically repairs corrupted
+                      upstream resolvers in the CoreDNS ConfigMap.
+                    type: boolean
+                  autoHealReplicas:
+                    default: true
+                    description: AutoHealReplicas automatically restores deployment
+                      replicas if scaled down or missing.
+                    type: boolean
                   enabled:
                     default: true
                     description: Enabled toggles the CoreDNS monitoring module.
+                    type: boolean
+                  expectedReplicas:
+                    default: 2
+                    description: 'ExpectedReplicas defines the desired number of CoreDNS
+                      replicas (default: 2).'
+                    format: int32
+                    type: integer
+                  fallbackUpstreamServers:
+                    description: FallbackUpstreamServers are the fallback upstream
+                      DNS resolvers to inject if upstream is corrupted.
+                    items:
+                      type: string
+                    type: array
+                  latencyThresholdMs:
+                    default: 150
+                    description: 'LatencyThresholdMs defines the maximum acceptable
+                      DNS latency in milliseconds (default: 150).'
+                    format: int64
+                    type: integer
+                  upstreamDnsValidation:
+                    default: true
+                    description: UpstreamDNSValidation toggles validation of the CoreDNS
+                      ConfigMap upstream forward directive.
                     type: boolean
                 required:
                 - enabled
