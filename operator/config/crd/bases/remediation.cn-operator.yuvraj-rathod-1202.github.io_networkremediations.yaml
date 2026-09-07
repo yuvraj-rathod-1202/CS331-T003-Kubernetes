@@ -99,39 +99,24 @@ spec:
                 description: NetworkPolicy configures NetworkPolicy drift detection
                   and enforcement verification.
                 properties:
-                  autoRestore:
+                  autoHeal:
                     default: true
                     description: |-
-                      AutoRestore automatically recreates deleted policies and reverts drifted
-                      policies back to their baseline. When false, drift is only reported.
+                      AutoHeal automatically restarts degraded or crashlooping calico-node enforcement
+                      agent pods so that felix re-syncs and repopulates kernel packet-filtering rules.
+                      When false, enforcement degradation is only reported in status/events.
                     type: boolean
+                  cooldownSeconds:
+                    default: 60
+                    description: |-
+                      CooldownSeconds specifies the minimum cooldown period in seconds between
+                      enforcement agent pod restarts to avoid restart-thrashing.
+                    format: int32
+                    type: integer
                   enabled:
                     default: true
-                    description: Enabled toggles the NetworkPolicy monitoring module.
-                    type: boolean
-                  protectedLabel:
-                    default: remediation.cn-operator.yuvraj-rathod-1202.github.io/protected
-                    description: |-
-                      ProtectedLabel is the label key a NetworkPolicy must carry (with value
-                      "true") to be watched and auto-healed by this module.
-                    type: string
-                  snapshotConfigMapName:
-                    default: networkpolicy-baseline
-                    description: |-
-                      SnapshotConfigMapName is the name of the ConfigMap used to store the
-                      baseline (desired) spec of each protected NetworkPolicy.
-                    type: string
-                  snapshotNamespace:
-                    default: kube-system
-                    description: SnapshotNamespace is the namespace that holds the
-                      baseline ConfigMap.
-                    type: string
-                  verifyEnforcement:
-                    default: true
-                    description: |-
-                      VerifyEnforcement enables checking the Calico enforcement agent
-                      (calico-node / felix) health, since a crashed agent leaves policy
-                      enforcement stale even while Kubernetes reports the pod as fine.
+                    description: Enabled toggles the NetworkPolicy enforcement monitoring
+                      module.
                     type: boolean
                 required:
                 - enabled

@@ -9,7 +9,6 @@ rules:
   resources:
   - configmaps
   verbs:
-  - create
   - get
   - list
   - patch
@@ -29,18 +28,6 @@ rules:
   resources:
   - deployments
   verbs:
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - networking.k8s.io
-  resources:
-  - networkpolicies
-  verbs:
-  - create
-  - delete
   - get
   - list
   - patch

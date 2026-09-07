@@ -18,11 +18,10 @@ package networkpolicy
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -32,71 +31,56 @@ import (
 	remediationv1alpha1 "CS331-CN-Project-1/operator/api/v1alpha1"
 )
 
-const (
-	testNS       = "default"
-	testPolicy   = "deny-all-ingress"
-	testPolicyNN = testNS + "/" + testPolicy
-)
-
 func newScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
 	_ = corev1.AddToScheme(s)
-	_ = networkingv1.AddToScheme(s)
 	_ = remediationv1alpha1.AddToScheme(s)
 	return s
 }
 
-// denySpec is a simple deny-all-ingress policy spec.
-func denySpec() networkingv1.NetworkPolicySpec {
-	return networkingv1.NetworkPolicySpec{
-		PodSelector: metav1.LabelSelector{},
-		PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
-	}
-}
-
-// allowSpec is a different spec used to simulate drift.
-func allowSpec() networkingv1.NetworkPolicySpec {
-	return networkingv1.NetworkPolicySpec{
-		PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"role": "allowed"}},
-		PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
-		Ingress:     []networkingv1.NetworkPolicyIngressRule{{}},
-	}
-}
-
-func mustJSON(t *testing.T, spec networkingv1.NetworkPolicySpec) string {
-	t.Helper()
-	b, err := json.Marshal(spec)
-	if err != nil {
-		t.Fatalf("failed to marshal spec: %v", err)
-	}
-	return string(b)
-}
-
-func protectedNP(spec networkingv1.NetworkPolicySpec) *networkingv1.NetworkPolicy {
-	return &networkingv1.NetworkPolicy{
+func healthyCalicoPod(name string) *corev1.Pod {
+	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace: testNS,
-			Name:      testPolicy,
-			Labels:    map[string]string{defaultProtectedLabel: labelValueTrue},
+			Namespace: calicoNamespace,
+			Name:      name,
+			Labels:    map[string]string{calicoLabelKey: calicoLabelValue},
 		},
-		Spec: spec,
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:         "calico-node",
+				Ready:        true,
+				RestartCount: 0,
+			}},
+		},
 	}
 }
 
-func baselineCM(data map[string]string) *corev1.ConfigMap {
-	return &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Namespace: defaultSnapshotNamespace, Name: defaultSnapshotConfigMap},
-		Data:       data,
+func crashingCalicoPod(name string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: calicoNamespace,
+			Name:      name,
+			Labels:    map[string]string{calicoLabelKey: calicoLabelValue},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:         "calico-node",
+				Ready:        false,
+				RestartCount: 5,
+				State:        corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
+			}},
+		},
 	}
 }
 
-// specFor enables the NetworkPolicy module with the given toggles.
-func specFor(autoRestore, verifyEnforcement bool) *remediationv1alpha1.NetworkRemediationSpec {
+func specFor(autoHeal bool) *remediationv1alpha1.NetworkRemediationSpec {
 	return &remediationv1alpha1.NetworkRemediationSpec{
 		NetworkPolicy: remediationv1alpha1.NetworkPolicySpec{
-			Enabled:           true,
-			AutoRestore:       autoRestore,
-			VerifyEnforcement: verifyEnforcement,
+			Enabled:         true,
+			AutoHeal:        autoHeal,
+			CooldownSeconds: 60,
 		},
 	}
 }
@@ -107,46 +91,16 @@ func TestNetworkPolicyModule_Name(t *testing.T) {
 	}
 }
 
-func TestNetworkPolicy_BaselineCapture(t *testing.T) {
-	ctx := context.Background()
-	fc := fake.NewClientBuilder().WithScheme(newScheme()).
-		WithObjects(protectedNP(denySpec())).Build()
-	mod := New(fc)
-
-	check, err := mod.Check(ctx, specFor(true, false))
-	if err != nil {
-		t.Fatalf("Check failed: %v", err)
-	}
-	eval, err := mod.Evaluate(ctx, check)
-	if err != nil {
-		t.Fatalf("Evaluate failed: %v", err)
-	}
-	if eval.ActionType != ActionSyncBaseline {
-		t.Fatalf("expected action %s, got %s", ActionSyncBaseline, eval.ActionType)
-	}
-	if _, err := mod.Remediate(ctx, eval); err != nil {
-		t.Fatalf("Remediate failed: %v", err)
-	}
-
-	var cm corev1.ConfigMap
-	if err := fc.Get(ctx, types.NamespacedName{Namespace: defaultSnapshotNamespace, Name: defaultSnapshotConfigMap}, &cm); err != nil {
-		t.Fatalf("baseline configmap not created: %v", err)
-	}
-	if cm.Data[testPolicyNN] != mustJSON(t, denySpec()) {
-		t.Fatalf("baseline did not record the protected policy spec, got: %q", cm.Data[testPolicyNN])
-	}
-}
-
-func TestNetworkPolicy_Healthy(t *testing.T) {
+func TestNetworkPolicy_AllHealthy(t *testing.T) {
 	ctx := context.Background()
 	fc := fake.NewClientBuilder().WithScheme(newScheme()).
 		WithObjects(
-			protectedNP(denySpec()),
-			baselineCM(map[string]string{testPolicyNN: mustJSON(t, denySpec())}),
+			healthyCalicoPod("calico-node-node1"),
+			healthyCalicoPod("calico-node-node2"),
 		).Build()
 	mod := New(fc)
 
-	check, err := mod.Check(ctx, specFor(true, true))
+	check, err := mod.Check(ctx, specFor(true))
 	if err != nil {
 		t.Fatalf("Check failed: %v", err)
 	}
@@ -160,125 +114,14 @@ func TestNetworkPolicy_Healthy(t *testing.T) {
 	}
 }
 
-func TestNetworkPolicy_DeletedPolicy_Recreated(t *testing.T) {
-	ctx := context.Background()
-	// Baseline knows the policy, but the live policy is gone.
-	fc := fake.NewClientBuilder().WithScheme(newScheme()).
-		WithObjects(baselineCM(map[string]string{testPolicyNN: mustJSON(t, denySpec())})).Build()
-	mod := New(fc)
-
-	check, err := mod.Check(ctx, specFor(true, false))
-	if err != nil {
-		t.Fatalf("Check failed: %v", err)
-	}
-	eval, err := mod.Evaluate(ctx, check)
-	if err != nil {
-		t.Fatalf("Evaluate failed: %v", err)
-	}
-	if eval.ActionType != ActionRestoreDeleted || !eval.NeedsRemediation {
-		t.Fatalf("expected restore_deleted needing remediation, got action=%s needs=%v", eval.ActionType, eval.NeedsRemediation)
-	}
-	res, err := mod.Remediate(ctx, eval)
-	if err != nil || !res.Success {
-		t.Fatalf("Remediate failed: err=%v success=%v", err, res.Success)
-	}
-
-	var np networkingv1.NetworkPolicy
-	if err := fc.Get(ctx, types.NamespacedName{Namespace: testNS, Name: testPolicy}, &np); err != nil {
-		t.Fatalf("expected policy to be recreated: %v", err)
-	}
-	if np.Labels[defaultProtectedLabel] != labelValueTrue {
-		t.Fatalf("recreated policy missing protected label")
-	}
-	if mustJSON(t, np.Spec) != mustJSON(t, denySpec()) {
-		t.Fatalf("recreated policy spec does not match baseline")
-	}
-}
-
-func TestNetworkPolicy_DeletedPolicy_AutoRestoreDisabled(t *testing.T) {
-	ctx := context.Background()
-	fc := fake.NewClientBuilder().WithScheme(newScheme()).
-		WithObjects(baselineCM(map[string]string{testPolicyNN: mustJSON(t, denySpec())})).Build()
-	mod := New(fc)
-
-	check, err := mod.Check(ctx, specFor(false, false))
-	if err != nil {
-		t.Fatalf("Check failed: %v", err)
-	}
-	eval, err := mod.Evaluate(ctx, check)
-	if err != nil {
-		t.Fatalf("Evaluate failed: %v", err)
-	}
-	if eval.IsHealthy {
-		t.Fatalf("expected unhealthy (drift detected)")
-	}
-	if eval.NeedsRemediation {
-		t.Fatalf("expected NeedsRemediation=false when AutoRestore is disabled")
-	}
-}
-
-func TestNetworkPolicy_DriftedPolicy_Reverted(t *testing.T) {
-	ctx := context.Background()
-	// Live policy has allowSpec, baseline says it should be denySpec.
-	fc := fake.NewClientBuilder().WithScheme(newScheme()).
-		WithObjects(
-			protectedNP(allowSpec()),
-			baselineCM(map[string]string{testPolicyNN: mustJSON(t, denySpec())}),
-		).Build()
-	mod := New(fc)
-
-	check, err := mod.Check(ctx, specFor(true, false))
-	if err != nil {
-		t.Fatalf("Check failed: %v", err)
-	}
-	eval, err := mod.Evaluate(ctx, check)
-	if err != nil {
-		t.Fatalf("Evaluate failed: %v", err)
-	}
-	if eval.ActionType != ActionRestoreDrift || !eval.NeedsRemediation {
-		t.Fatalf("expected restore_drifted, got action=%s needs=%v", eval.ActionType, eval.NeedsRemediation)
-	}
-	if _, err := mod.Remediate(ctx, eval); err != nil {
-		t.Fatalf("Remediate failed: %v", err)
-	}
-
-	var np networkingv1.NetworkPolicy
-	if err := fc.Get(ctx, types.NamespacedName{Namespace: testNS, Name: testPolicy}, &np); err != nil {
-		t.Fatalf("failed to fetch policy: %v", err)
-	}
-	if mustJSON(t, np.Spec) != mustJSON(t, denySpec()) {
-		t.Fatalf("policy was not reverted to baseline spec")
-	}
-}
-
 func TestNetworkPolicy_EnforcementAgentUnhealthy_Restarted(t *testing.T) {
 	ctx := context.Background()
-	crashing := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: calicoNamespace,
-			Name:      "calico-node-abcde",
-			Labels:    map[string]string{calicoLabelKey: calicoLabelValue},
-		},
-		Status: corev1.PodStatus{
-			Phase: corev1.PodRunning,
-			ContainerStatuses: []corev1.ContainerStatus{{
-				Name:         "calico-node",
-				Ready:        false,
-				RestartCount: 5,
-				State:        corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
-			}},
-		},
-	}
-	// Policy matches baseline so the felix path is reached.
+	crashing := crashingCalicoPod("calico-node-abcde")
 	fc := fake.NewClientBuilder().WithScheme(newScheme()).
-		WithObjects(
-			protectedNP(denySpec()),
-			baselineCM(map[string]string{testPolicyNN: mustJSON(t, denySpec())}),
-			crashing,
-		).Build()
+		WithObjects(crashing).Build()
 	mod := New(fc)
 
-	check, err := mod.Check(ctx, specFor(true, true))
+	check, err := mod.Check(ctx, specFor(true))
 	if err != nil {
 		t.Fatalf("Check failed: %v", err)
 	}
@@ -289,13 +132,74 @@ func TestNetworkPolicy_EnforcementAgentUnhealthy_Restarted(t *testing.T) {
 	if eval.ActionType != ActionRestartFelix {
 		t.Fatalf("expected restart_enforcement_agent, got %s (reason: %s)", eval.ActionType, eval.Reason)
 	}
-	if _, err := mod.Remediate(ctx, eval); err != nil {
-		t.Fatalf("Remediate failed: %v", err)
+	if !eval.NeedsRemediation {
+		t.Fatalf("expected NeedsRemediation=true when autoHeal=true")
+	}
+	res, err := mod.Remediate(ctx, eval)
+	if err != nil || !res.Success {
+		t.Fatalf("Remediate failed: err=%v success=%v", err, res.Success)
 	}
 
 	var pod corev1.Pod
 	err = fc.Get(ctx, types.NamespacedName{Namespace: calicoNamespace, Name: "calico-node-abcde"}, &pod)
 	if !apierrors.IsNotFound(err) {
 		t.Fatalf("expected crashing calico-node pod to be deleted, got err=%v", err)
+	}
+}
+
+func TestNetworkPolicy_EnforcementAgentUnhealthy_AutoHealDisabled(t *testing.T) {
+	ctx := context.Background()
+	crashing := crashingCalicoPod("calico-node-abcde")
+	fc := fake.NewClientBuilder().WithScheme(newScheme()).
+		WithObjects(crashing).Build()
+	mod := New(fc)
+
+	check, err := mod.Check(ctx, specFor(false))
+	if err != nil {
+		t.Fatalf("Check failed: %v", err)
+	}
+	eval, err := mod.Evaluate(ctx, check)
+	if err != nil {
+		t.Fatalf("Evaluate failed: %v", err)
+	}
+	if eval.IsHealthy {
+		t.Fatalf("expected unhealthy evaluation")
+	}
+	if eval.NeedsRemediation {
+		t.Fatalf("expected NeedsRemediation=false when autoHeal=false")
+	}
+}
+
+func TestNetworkPolicy_CooldownActive(t *testing.T) {
+	ctx := context.Background()
+	pod1 := crashingCalicoPod("calico-node-1")
+	pod2 := crashingCalicoPod("calico-node-2")
+	fc := fake.NewClientBuilder().WithScheme(newScheme()).
+		WithObjects(pod1, pod2).Build()
+	mod := New(fc)
+
+	// Set last restart timestamp to just 10 seconds ago (cooldown is 60s)
+	mod.lastFelixRestart = time.Now().Add(-10 * time.Second)
+
+	check, err := mod.Check(ctx, specFor(true))
+	if err != nil {
+		t.Fatalf("Check failed: %v", err)
+	}
+	eval, err := mod.Evaluate(ctx, check)
+	if err != nil {
+		t.Fatalf("Evaluate failed: %v", err)
+	}
+	res, err := mod.Remediate(ctx, eval)
+	if err != nil {
+		t.Fatalf("Remediate failed: %v", err)
+	}
+	if res.Action != "enforcement-agent restart on cooldown; skipping to avoid thrashing" {
+		t.Fatalf("expected cooldown message, got %q", res.Action)
+	}
+
+	// Neither pod should have been deleted because of cooldown
+	var p corev1.Pod
+	if err := fc.Get(ctx, types.NamespacedName{Namespace: calicoNamespace, Name: "calico-node-1"}, &p); err != nil {
+		t.Fatalf("expected pod1 to still exist during cooldown: %v", err)
 	}
 }
