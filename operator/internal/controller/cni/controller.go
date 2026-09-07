@@ -56,7 +56,33 @@ const (
 	kubeSystemNamespace = "kube-system"
 	calicoCRDGroup      = "crd.projectcalico.org"
 	severityCritical    = "critical"
+	severityNone        = "none"
+
+	defaultCalicoDaemonSetName = "calico-node"
+	k8sAppLabel                = "k8s-app"
+	calicoIPPoolKind           = "IPPool"
 )
+
+// RemediationActionType specifies the targeted remediation branch.
+type RemediationActionType string
+
+const (
+	// ActionNone indicates no remediation action is needed.
+	ActionNone RemediationActionType = "none"
+	// ActionRestartCalicoNode restarts unready calico-node pods.
+	ActionRestartCalicoNode RemediationActionType = "restart_calico_node"
+	// ActionReenableIPPool re-enables disabled Calico IPPools.
+	ActionReenableIPPool RemediationActionType = "reenable_ippool"
+	// ActionEvictStuckPods evicts workload pods stuck with CNI/IPAM errors.
+	ActionEvictStuckPods RemediationActionType = "evict_stuck_pods"
+)
+
+type remediationTarget struct {
+	actionType    RemediationActionType
+	unreadyPods   []string
+	disabledPools []string
+	stuckPods     []StuckPod
+}
 
 // StuckPod records a pod that is stuck in ContainerCreating with a CNI error.
 type StuckPod struct {
@@ -69,7 +95,8 @@ type StuckPod struct {
 
 // CNIModule monitors CNI plugin health and remediates detected failures.
 type CNIModule struct {
-	Client client.Client
+	Client        client.Client
+	pendingTarget *remediationTarget
 }
 
 // New returns a configured CNIModule.
@@ -96,7 +123,7 @@ func (m *CNIModule) Check(
 	signals := map[string]any{}
 
 	calicoNS := kubeSystemNamespace
-	calicoDSName := "calico-node"
+	calicoDSName := defaultCalicoDaemonSetName
 	if spec.CNI.CalicoNamespace != "" {
 		calicoNS = spec.CNI.CalicoNamespace
 	}
@@ -174,7 +201,7 @@ func (m *CNIModule) checkCalicoDaemonSet(ctx context.Context, ns, dsName string)
 	podList := &corev1.PodList{}
 	if err := m.Client.List(ctx, podList,
 		client.InNamespace(ns),
-		client.MatchingLabels{"k8s-app": dsName},
+		client.MatchingLabels{k8sAppLabel: dsName},
 	); err != nil {
 		return nil, fmt.Errorf("list calico-node pods: %w", err)
 	}
@@ -371,6 +398,7 @@ func (m *CNIModule) Evaluate(
 	logger := log.FromContext(ctx).WithName("cni-evaluate")
 
 	if checkResult == nil {
+		m.pendingTarget = nil
 		return &module.EvalResult{IsHealthy: true, NeedsRemediation: false, Reason: "no check result"}, nil
 	}
 
@@ -387,6 +415,10 @@ func (m *CNIModule) Evaluate(
 			len(unreadyPods), strings.Join(unreadyPods, ", "),
 		)
 		logger.Info("CNI unhealthy: calico-node pods not ready", "pods", unreadyPods)
+		m.pendingTarget = &remediationTarget{
+			actionType:  ActionRestartCalicoNode,
+			unreadyPods: unreadyPods,
+		}
 		return &module.EvalResult{
 			IsHealthy:        false,
 			NeedsRemediation: true,
@@ -402,6 +434,11 @@ func (m *CNIModule) Evaluate(
 			strings.Join(disabledPools, ", "), countIPAMStuck(stuckPods),
 		)
 		logger.Info("CNI unhealthy: disabled IPPools causing pod creation failure", "disabledPools", disabledPools)
+		m.pendingTarget = &remediationTarget{
+			actionType:    ActionReenableIPPool,
+			disabledPools: disabledPools,
+			stuckPods:     stuckPods,
+		}
 		return &module.EvalResult{
 			IsHealthy:        false,
 			NeedsRemediation: true,
@@ -417,6 +454,10 @@ func (m *CNIModule) Evaluate(
 			len(exhaustedPools), strings.Join(exhaustedPools, ", "), countIPAMStuck(stuckPods),
 		)
 		logger.Info("CNI unhealthy: IPAM exhaustion", "exhaustedPools", exhaustedPools)
+		m.pendingTarget = &remediationTarget{
+			actionType: ActionEvictStuckPods,
+			stuckPods:  stuckPods,
+		}
 		return &module.EvalResult{
 			IsHealthy:        false,
 			NeedsRemediation: true,
@@ -431,6 +472,10 @@ func (m *CNIModule) Evaluate(
 			"%d pod(s) stuck in ContainerCreating with CNI errors", len(stuckPods),
 		)
 		logger.Info("CNI degraded: stuck pods", "count", len(stuckPods))
+		m.pendingTarget = &remediationTarget{
+			actionType: ActionEvictStuckPods,
+			stuckPods:  stuckPods,
+		}
 		return &module.EvalResult{
 			IsHealthy:        false,
 			NeedsRemediation: true,
@@ -446,11 +491,12 @@ func (m *CNIModule) Evaluate(
 		}
 	}
 
+	m.pendingTarget = nil
 	return &module.EvalResult{
 		IsHealthy:        true,
 		NeedsRemediation: false,
 		Reason:           "CNI plugin is healthy",
-		Severity:         "none",
+		Severity:         severityNone,
 	}, nil
 }
 
@@ -458,10 +504,10 @@ func (m *CNIModule) Evaluate(
 // Remediate
 // --------------------------------------------------------------------------
 
-// Remediate applies automated fixes for detected CNI failures:
-//   - Unready calico-node pods → delete (DaemonSet recreates them).
-//   - Workload pods stuck with CNI errors → delete (scheduler retries).
-//   - Disabled IPPools → automatically re-enable them to unblock pod scheduling.
+// Remediate applies targeted automated fixes based on the specific failure:
+//   - ActionRestartCalicoNode: only deletes unready calico-node pods.
+//   - ActionReenableIPPool: only re-enables the disabled IPPool(s) and evicts pods waiting for them.
+//   - ActionEvictStuckPods: only evicts workload pods stuck with CNI/IPAM errors.
 func (m *CNIModule) Remediate(
 	ctx context.Context,
 	evalResult *module.EvalResult,
@@ -475,15 +521,42 @@ func (m *CNIModule) Remediate(
 		return &module.RemediateResult{Action: "none (healthy)", Success: true}, nil
 	}
 
+	actionType := ActionNone
+	var unreadyPods []string
+	var disabledPools []string
+	var stuckPods []StuckPod
+
+	if m.pendingTarget != nil {
+		actionType = m.pendingTarget.actionType
+		unreadyPods = m.pendingTarget.unreadyPods
+		disabledPools = m.pendingTarget.disabledPools
+		stuckPods = m.pendingTarget.stuckPods
+		m.pendingTarget = nil // reset after consuming
+	} else {
+		// Fallback for direct invocations (e.g. unit tests without prior Evaluate call)
+		reason := evalResult.Reason
+		switch {
+		case strings.Contains(reason, "calico-node") && strings.Contains(reason, "not ready"):
+			actionType = ActionRestartCalicoNode
+		case strings.Contains(reason, "disabled"):
+			actionType = ActionReenableIPPool
+		case strings.Contains(reason, "IPAM exhaustion"),
+			strings.Contains(reason, "stuck in ContainerCreating"),
+			strings.Contains(reason, "stuck pods"):
+			actionType = ActionEvictStuckPods
+		}
+	}
+
 	var actions []string
 	var lastErr error
 
-	// ---- 1. Restart unready calico-node pods ----
-	calicoUnready, err := m.checkCalicoDaemonSet(ctx, kubeSystemNamespace, "calico-node")
-	if err != nil {
-		logger.Error(err, "could not re-check calico-node pods for remediation")
-	} else {
-		for _, podName := range calicoUnready {
+	switch actionType {
+	case ActionRestartCalicoNode:
+		// TARGETED ACTION 1: Restart unready calico-node pods only
+		if len(unreadyPods) == 0 {
+			unreadyPods, _ = m.checkCalicoDaemonSet(ctx, kubeSystemNamespace, "calico-node")
+		}
+		for _, podName := range unreadyPods {
 			pod := &corev1.Pod{}
 			pod.Name = podName
 			pod.Namespace = kubeSystemNamespace
@@ -495,39 +568,54 @@ func (m *CNIModule) Remediate(
 				actions = append(actions, "restarted calico-node/"+podName)
 			}
 		}
-	}
 
-	// ---- 2. Re-enable any disabled IPPools if pods are stuck without IPs ----
-	poolList := &unstructured.UnstructuredList{}
-	poolList.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   calicoCRDGroup,
-		Version: "v1",
-		Kind:    "IPPoolList",
-	})
-	if err := m.Client.List(ctx, poolList); err == nil {
-		for _, item := range poolList.Items {
-			disabled, _, _ := unstructured.NestedBool(item.Object, "spec", "disabled")
-			if disabled {
-				patch := item.DeepCopy()
+	case ActionReenableIPPool:
+		// TARGETED ACTION 2: Re-enable the specific disabled IPPools and evict waiting pods
+		if len(disabledPools) == 0 {
+			_, _, disabledPools, _ = m.checkIPAMUsage(ctx)
+		}
+		for _, poolName := range disabledPools {
+			pool := &unstructured.Unstructured{}
+			pool.SetGroupVersionKind(schema.GroupVersionKind{
+				Group:   calicoCRDGroup,
+				Version: "v1",
+				Kind:    calicoIPPoolKind,
+			})
+			if err := m.Client.Get(ctx, types.NamespacedName{Name: poolName}, pool); err == nil {
+				patch := pool.DeepCopy()
 				if err := unstructured.SetNestedField(patch.Object, false, "spec", "disabled"); err == nil {
-					if err := m.Client.Patch(ctx, patch, client.MergeFrom(&item)); err != nil {
-						logger.Error(err, "failed to re-enable disabled IPPool", "pool", item.GetName())
+					if err := m.Client.Patch(ctx, patch, client.MergeFrom(pool)); err != nil {
+						logger.Error(err, "failed to re-enable disabled IPPool", "pool", poolName)
 						lastErr = err
 					} else {
-						logger.Info("re-enabled disabled IPPool", "pool", item.GetName())
-						actions = append(actions, "re-enabled IPPool "+item.GetName())
+						logger.Info("re-enabled disabled IPPool", "pool", poolName)
+						actions = append(actions, "re-enabled IPPool "+poolName)
 					}
 				}
 			}
 		}
-	}
 
-	// ---- 3. Delete workload pods stuck with CNI errors ----
-	// threshold=0 means include all CNI-stuck pods regardless of age.
-	stuckPods, err := m.checkStuckPods(ctx, 0)
-	if err != nil {
-		logger.Error(err, "could not re-check stuck pods for remediation")
-	} else {
+		if len(stuckPods) == 0 {
+			stuckPods, _ = m.checkStuckPods(ctx, 0)
+		}
+		for _, sp := range stuckPods {
+			pod := &corev1.Pod{}
+			pod.Name = sp.Name
+			pod.Namespace = sp.Namespace
+			if err := m.Client.Delete(ctx, pod); err != nil {
+				logger.Error(err, "failed to delete CNI-stuck pod after IPPool re-enable", "pod", sp.Name, "ns", sp.Namespace)
+				lastErr = err
+			} else {
+				logger.Info("evicted CNI-stuck pod to acquire unblocked IP", "pod", sp.Name, "ns", sp.Namespace)
+				actions = append(actions, fmt.Sprintf("evicted %s/%s", sp.Namespace, sp.Name))
+			}
+		}
+
+	case ActionEvictStuckPods:
+		// TARGETED ACTION 3: Evict stuck workload pods only
+		if len(stuckPods) == 0 {
+			stuckPods, _ = m.checkStuckPods(ctx, 0)
+		}
 		for _, sp := range stuckPods {
 			pod := &corev1.Pod{}
 			pod.Name = sp.Name
@@ -540,6 +628,12 @@ func (m *CNIModule) Remediate(
 				actions = append(actions, fmt.Sprintf("evicted %s/%s", sp.Namespace, sp.Name))
 			}
 		}
+
+	default:
+		return &module.RemediateResult{
+			Action:  "none",
+			Success: true,
+		}, nil
 	}
 
 	if len(actions) == 0 && lastErr == nil {

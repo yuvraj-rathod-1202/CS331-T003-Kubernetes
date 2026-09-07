@@ -23,6 +23,9 @@ const (
 	testNamespaceDefault    = "default"
 	testStuckPodNameBackend = "backend-stuck"
 	testNamespaceKubeSystem = "kube-system"
+	testCalicoDSName        = "calico-node"
+	testCalicoNodeFailing   = "calico-node-failing"
+	testIPPoolKind          = "IPPool"
 )
 
 func newTestScheme() *runtime.Scheme {
@@ -169,7 +172,7 @@ func TestCNIModule_Remediate_UnreadyCalicoPod(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "calico-node-bad",
 			Namespace: testNamespaceKubeSystem,
-			Labels:    map[string]string{"k8s-app": "calico-node"},
+			Labels:    map[string]string{k8sAppLabel: testCalicoDSName},
 		},
 		Status: corev1.PodStatus{
 			Phase: corev1.PodRunning,
@@ -291,5 +294,94 @@ func TestCNIModule_Remediate_StuckPodEviction(t *testing.T) {
 	err = fakeClient.Get(ctx, client.ObjectKey{Namespace: testNamespaceDefault, Name: testStuckPodNameBackend}, checkPod)
 	if err == nil {
 		t.Errorf("expected stuck pod to be evicted")
+	}
+}
+
+func TestCNIModule_Remediate_TargetedBranching(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+
+	// 1. Unready calico pod
+	unreadyCalicoPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testCalicoNodeFailing,
+			Namespace: testNamespaceKubeSystem,
+			Labels:    map[string]string{k8sAppLabel: testCalicoDSName},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionFalse,
+				},
+			},
+		},
+	}
+
+	// 2. An intentionally disabled IPPool that should NOT be modified when only calico-node crashed
+	disabledPool := &unstructured.Unstructured{}
+	disabledPool.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   calicoCRDGroup,
+		Version: "v1",
+		Kind:    testIPPoolKind,
+	})
+	disabledPool.SetName("intentionally-disabled-pool")
+	_ = unstructured.SetNestedField(disabledPool.Object, true, "spec", "disabled")
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(unreadyCalicoPod, disabledPool).
+		Build()
+
+	m := New(fakeClient)
+
+	// Simulate Check result showing only calico-node unready
+	checkResult := &module.CheckResult{
+		Signals: map[string]any{
+			signalCalicoNodeUnready:  []string{testCalicoNodeFailing},
+			signalStuckPods:          []StuckPod{},
+			signalIPAMUsageByPool:    map[string]float64{},
+			signalIPAMExhaustedPools: []string{},
+			signalDisabledIPPools:    []string{"intentionally-disabled-pool"},
+		},
+	}
+
+	// Run Evaluate
+	evalResult, err := m.Evaluate(ctx, checkResult)
+	if err != nil {
+		t.Fatalf("unexpected evaluate error: %v", err)
+	}
+
+	// Run Remediate
+	res, err := m.Remediate(ctx, evalResult)
+	if err != nil {
+		t.Fatalf("unexpected remediate error: %v", err)
+	}
+	if !res.Success {
+		t.Errorf("expected success: %v", res.Err)
+	}
+
+	// Verify the calico pod was deleted
+	remPod := &corev1.Pod{}
+	err = fakeClient.Get(ctx, client.ObjectKey{Namespace: testNamespaceKubeSystem, Name: testCalicoNodeFailing}, remPod)
+	if err == nil {
+		t.Errorf("expected failing calico-node pod to be deleted")
+	}
+
+	// Verify the intentionally disabled IPPool was NOT touched and remains disabled!
+	checkPool := &unstructured.Unstructured{}
+	checkPool.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   calicoCRDGroup,
+		Version: "v1",
+		Kind:    testIPPoolKind,
+	})
+	err = fakeClient.Get(ctx, client.ObjectKey{Name: "intentionally-disabled-pool"}, checkPool)
+	if err != nil {
+		t.Fatalf("failed to fetch pool: %v", err)
+	}
+	disabled, _, _ := unstructured.NestedBool(checkPool.Object, "spec", "disabled")
+	if !disabled {
+		t.Errorf("expected intentionally disabled IPPool to remain disabled during a calico-node crash remediation!")
 	}
 }
