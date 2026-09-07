@@ -11,3 +11,7 @@ spec:
     enabled: true
   podConnectivity:
     enabled: true
+    targetNamespace: "default"
+    sourcePodLabel: ""
+    targetIP: "8.8.8.8"
+    maxFailures: 1

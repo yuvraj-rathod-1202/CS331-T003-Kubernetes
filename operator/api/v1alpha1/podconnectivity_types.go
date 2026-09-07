@@ -23,4 +23,20 @@ type PodConnectivitySpec struct {
 	// Enabled toggles the pod connectivity monitoring module.
 	// +kubebuilder:default=true
 	Enabled bool `json:"enabled"`
+
+	// TargetNamespace is the namespace where the probing will occur.
+	// +kubebuilder:default="default"
+	TargetNamespace string `json:"targetNamespace,omitempty"`
+
+	// SourcePodLabel is the label selector to find the pod that will execute the ping.
+	// +kubebuilder:default="app=frontend"
+	SourcePodLabel string `json:"sourcePodLabel,omitempty"`
+
+	// TargetIP is the IP address the source pod will try to ping.
+	// +kubebuilder:validation:Optional
+	TargetIP string `json:"targetIP,omitempty"`
+
+	// MaxFailures is the number of consecutive failed pings before triggering remediation.
+	// +kubebuilder:default=3
+	MaxFailures int `json:"maxFailures,omitempty"`
 }

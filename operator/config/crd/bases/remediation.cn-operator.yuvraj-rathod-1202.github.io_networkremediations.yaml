@@ -81,6 +81,25 @@ spec:
                     default: true
                     description: Enabled toggles the pod connectivity monitoring module.
                     type: boolean
+                  maxFailures:
+                    default: 3
+                    description: MaxFailures is the number of consecutive failed pings
+                      before triggering remediation.
+                    type: integer
+                  sourcePodLabel:
+                    default: app=frontend
+                    description: SourcePodLabel is the label selector to find the
+                      pod that will execute the ping.
+                    type: string
+                  targetIP:
+                    description: TargetIP is the IP address the source pod will try
+                      to ping.
+                    type: string
+                  targetNamespace:
+                    default: default
+                    description: TargetNamespace is the namespace where the probing
+                      will occur.
+                    type: string
                 required:
                 - enabled
                 type: object

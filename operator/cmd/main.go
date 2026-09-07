@@ -211,7 +211,7 @@ func main() {
 		},
 	)
 	reconciler.RegisterModule(
-		podconnmod.New(mgr.GetClient()),
+		podconnmod.New(mgr.GetClient(), mgr.GetConfig()),
 		func(spec *remediationv1alpha1.NetworkRemediationSpec) bool { return spec.PodConnectivity.Enabled },
 		func(status *remediationv1alpha1.NetworkRemediationStatus, ms remediationv1alpha1.ModuleStatus) {
 			status.PodConnectivity = ms
