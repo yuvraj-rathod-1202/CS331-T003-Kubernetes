@@ -18,6 +18,7 @@ package coredns
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -188,6 +189,56 @@ func TestCoreDNSModule_ScaleToZero_DetectionAndRemediation(t *testing.T) {
 	}
 }
 
+func TestCoreDNSModule_ScaleToZero_AutoHealDisabled(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+
+	zeroReplicas := int32(0)
+	deploy := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: corednsNamespace,
+			Name:      corednsName,
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &zeroReplicas,
+		},
+		Status: appsv1.DeploymentStatus{
+			Replicas:          0,
+			ReadyReplicas:     0,
+			AvailableReplicas: 0,
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(deploy).Build()
+	mod := New(fakeClient)
+
+	// User relies on default ExpectedReplicas (0 in Go struct) and explicitly sets AutoHealReplicas: false
+	spec := &remediationv1alpha1.NetworkRemediationSpec{
+		CoreDNS: remediationv1alpha1.CoreDNSSpec{
+			Enabled:          true,
+			ExpectedReplicas: 0,
+			AutoHealReplicas: false,
+		},
+	}
+
+	checkResult, err := mod.Check(ctx, spec)
+	if err != nil {
+		t.Fatalf("Check failed: %v", err)
+	}
+
+	evalResult, err := mod.Evaluate(ctx, checkResult)
+	if err != nil {
+		t.Fatalf("Evaluate failed: %v", err)
+	}
+
+	if evalResult.IsHealthy {
+		t.Fatalf("expected unhealthy for 0 replicas")
+	}
+	if evalResult.NeedsRemediation {
+		t.Fatalf("expected NeedsRemediation=false when AutoHealReplicas is false, got true")
+	}
+}
+
 func TestCoreDNSModule_CorruptedUpstreamConfigMap_DetectionAndRemediation(t *testing.T) {
 	scheme := newTestScheme()
 	ctx := context.Background()
@@ -224,9 +275,10 @@ func TestCoreDNSModule_CorruptedUpstreamConfigMap_DetectionAndRemediation(t *tes
 
 	spec := &remediationv1alpha1.NetworkRemediationSpec{
 		CoreDNS: remediationv1alpha1.CoreDNSSpec{
-			Enabled:           true,
-			ExpectedReplicas:  2,
-			AutoHealConfigMap: true,
+			Enabled:               true,
+			ExpectedReplicas:      2,
+			UpstreamDNSValidation: true,
+			AutoHealConfigMap:     true,
 		},
 	}
 
@@ -267,6 +319,69 @@ func TestCoreDNSModule_CorruptedUpstreamConfigMap_DetectionAndRemediation(t *tes
 	match := forwardRegex.FindStringSubmatch(updatedCM.Data[corefileName])
 	if len(match) < 2 || match[1] != "/etc/resolv.conf" {
 		t.Fatalf("expected forward target /etc/resolv.conf, got %v", match)
+	}
+}
+
+func TestCoreDNSModule_CorruptedUpstreamConfigMap_ValidationDisabled(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+
+	twoReplicas := int32(2)
+	deploy := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: corednsNamespace,
+			Name:      corednsName,
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &twoReplicas,
+		},
+		Status: appsv1.DeploymentStatus{
+			Replicas:          2,
+			ReadyReplicas:     2,
+			AvailableReplicas: 2,
+		},
+	}
+
+	// Bad configmap pointing to unreachable test-net IP 192.0.2.1
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: corednsNamespace,
+			Name:      corednsName,
+		},
+		Data: map[string]string{
+			corefileName: ".:53 {\n    forward . 192.0.2.1 {\n       max_concurrent 1000\n    }\n}\n",
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(deploy, cm).Build()
+	mod := New(fakeClient)
+
+	// User explicitly disables upstream DNS validation
+	spec := &remediationv1alpha1.NetworkRemediationSpec{
+		CoreDNS: remediationv1alpha1.CoreDNSSpec{
+			Enabled:               true,
+			ExpectedReplicas:      2,
+			UpstreamDNSValidation: false,
+			AutoHealConfigMap:     true,
+		},
+	}
+
+	checkResult, err := mod.Check(ctx, spec)
+	if err != nil {
+		t.Fatalf("Check failed: %v", err)
+	}
+
+	evalResult, err := mod.Evaluate(ctx, checkResult)
+	if err != nil {
+		t.Fatalf("Evaluate failed: %v", err)
+	}
+
+	// Because UpstreamDNSValidation is false, bad Corefile must NOT be marked unhealthy
+	if !evalResult.IsHealthy {
+		t.Fatalf("expected IsHealthy=true when UpstreamDNSValidation=false, got reason: %s", evalResult.Reason)
+	}
+	if evalResult.NeedsRemediation {
+		t.Fatalf("expected NeedsRemediation=false when UpstreamDNSValidation=false, got true")
 	}
 }
 
@@ -358,5 +473,143 @@ func TestCoreDNSModule_CPUThrottled_DetectionAndRemediation(t *testing.T) {
 	cpuReq := updatedDeploy.Spec.Template.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]
 	if cpuReq.MilliValue() != 100 {
 		t.Fatalf("expected CPU request restored to 100m, got %v", cpuReq.String())
+	}
+}
+
+func TestCoreDNSModule_CustomExpectedReplicas_HonoredInRemediation(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+
+	zeroReplicas := int32(0)
+	deploy := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: corednsNamespace,
+			Name:      corednsName,
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &zeroReplicas,
+		},
+		Status: appsv1.DeploymentStatus{
+			Replicas:          0,
+			ReadyReplicas:     0,
+			AvailableReplicas: 0,
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(deploy).Build()
+	mod := New(fakeClient)
+
+	// User specifies custom expectedReplicas = 3
+	spec := &remediationv1alpha1.NetworkRemediationSpec{
+		CoreDNS: remediationv1alpha1.CoreDNSSpec{
+			Enabled:          true,
+			ExpectedReplicas: 3,
+			AutoHealReplicas: true,
+		},
+	}
+
+	checkResult, err := mod.Check(ctx, spec)
+	if err != nil {
+		t.Fatalf("Check failed: %v", err)
+	}
+
+	evalResult, err := mod.Evaluate(ctx, checkResult)
+	if err != nil {
+		t.Fatalf("Evaluate failed: %v", err)
+	}
+
+	if evalResult.ActionType != ActionScaleReplicas {
+		t.Fatalf("expected ActionType %s, got %s", ActionScaleReplicas, evalResult.ActionType)
+	}
+
+	remedResult, err := mod.Remediate(ctx, evalResult)
+	if err != nil {
+		t.Fatalf("Remediate failed: %v", err)
+	}
+	if !remedResult.Success {
+		t.Fatalf("expected remediation to succeed")
+	}
+
+	var updatedDeploy appsv1.Deployment
+	if err := fakeClient.Get(ctx, types.NamespacedName{Namespace: corednsNamespace, Name: corednsName}, &updatedDeploy); err != nil {
+		t.Fatalf("failed to fetch updated deployment: %v", err)
+	}
+	if updatedDeploy.Spec.Replicas == nil || *updatedDeploy.Spec.Replicas != 3 {
+		t.Fatalf("expected replicas scaled to 3 (custom user config), got %v", updatedDeploy.Spec.Replicas)
+	}
+}
+
+func TestCoreDNSModule_CustomFallbackDNS_HonoredInRemediation(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+
+	twoReplicas := int32(2)
+	deploy := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: corednsNamespace,
+			Name:      corednsName,
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &twoReplicas,
+		},
+		Status: appsv1.DeploymentStatus{
+			Replicas:          2,
+			ReadyReplicas:     2,
+			AvailableReplicas: 2,
+		},
+	}
+
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: corednsNamespace,
+			Name:      corednsName,
+		},
+		Data: map[string]string{
+			corefileName: ".:53 {\n    forward . 192.0.2.1 {\n       max_concurrent 1000\n    }\n}\n",
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(deploy, cm).Build()
+	mod := New(fakeClient)
+
+	// User specifies custom fallback upstream servers: 8.8.8.8 and 1.1.1.1
+	spec := &remediationv1alpha1.NetworkRemediationSpec{
+		CoreDNS: remediationv1alpha1.CoreDNSSpec{
+			Enabled:                 true,
+			ExpectedReplicas:        2,
+			UpstreamDNSValidation:   true,
+			AutoHealConfigMap:       true,
+			FallbackUpstreamServers: []string{"8.8.8.8", "1.1.1.1"},
+		},
+	}
+
+	checkResult, err := mod.Check(ctx, spec)
+	if err != nil {
+		t.Fatalf("Check failed: %v", err)
+	}
+
+	evalResult, err := mod.Evaluate(ctx, checkResult)
+	if err != nil {
+		t.Fatalf("Evaluate failed: %v", err)
+	}
+
+	if evalResult.ActionType != ActionRepairConfigMap {
+		t.Fatalf("expected ActionType %s, got %s", ActionRepairConfigMap, evalResult.ActionType)
+	}
+
+	remedResult, err := mod.Remediate(ctx, evalResult)
+	if err != nil {
+		t.Fatalf("Remediate failed: %v", err)
+	}
+	if !remedResult.Success {
+		t.Fatalf("expected remediation to succeed")
+	}
+
+	var updatedCM corev1.ConfigMap
+	if err := fakeClient.Get(ctx, types.NamespacedName{Namespace: corednsNamespace, Name: corednsName}, &updatedCM); err != nil {
+		t.Fatalf("failed to fetch updated configmap: %v", err)
+	}
+	if !strings.Contains(updatedCM.Data[corefileName], "forward . 8.8.8.8 1.1.1.1") {
+		t.Fatalf("expected custom fallback resolvers 'forward . 8.8.8.8 1.1.1.1', got: %s", updatedCM.Data[corefileName])
 	}
 }

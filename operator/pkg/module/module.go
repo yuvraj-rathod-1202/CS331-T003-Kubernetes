@@ -45,6 +45,10 @@ type EvalResult struct {
 	Reason string
 	// Severity indicates how critical the issue is ("info", "warning", "critical").
 	Severity string
+	// ActionType is an identifier for the remediation action (e.g., "scale_replicas", "repair_configmap").
+	ActionType string
+	// ActionData holds structured parameters needed by the Remediate phase (e.g. target replicas, fallback servers).
+	ActionData map[string]any
 }
 
 // RemediateResult holds the outcome of a remediation action.

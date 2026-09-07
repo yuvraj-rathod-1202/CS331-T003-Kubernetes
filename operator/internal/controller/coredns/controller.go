@@ -49,8 +49,20 @@ const (
 	actionFetchDeployment = "fetch coredns deployment"
 
 	// Default values
-	defaultExpectedReplicas   int32 = 2
-	defaultLatencyThresholdMs int64 = 150
+	defaultExpectedReplicas      int32 = 2
+	defaultLatencyThresholdMs    int64 = 150
+	defaultAutoHealReplicas      bool  = true
+	defaultAutoHealConfigMap     bool  = true
+	defaultUpstreamDNSValidation bool  = true
+	defaultFallbackUpstream            = "/etc/resolv.conf"
+)
+
+const (
+	// Action types for remediation dispatch
+	ActionScaleReplicas     = "scale_replicas"
+	ActionRepairConfigMap   = "repair_configmap"
+	ActionRestoreResources  = "restore_resources"
+	ActionRestartDeployment = "restart_deployment"
 )
 
 // Regex to detect forward directives in Corefile
@@ -62,6 +74,10 @@ type CoreDNSModule struct {
 	Client client.Client
 	// lastRemediatedAt tracks the timestamp of the last executed remediation to enforce a cooldown window.
 	lastRemediatedAt time.Time
+	// expectedReplicas tracks the configured target replica count.
+	expectedReplicas int32
+	// fallbackDNS tracks the configured fallback upstream resolvers.
+	fallbackDNS []string
 }
 
 // New creates a new CoreDNSModule instance.
@@ -89,24 +105,38 @@ func (m *CoreDNSModule) Check(ctx context.Context, spec *remediationv1alpha1.Net
 		expectedReplicas = spec.CoreDNS.ExpectedReplicas
 	}
 	signals["expectedReplicas"] = expectedReplicas
+	m.expectedReplicas = expectedReplicas
 
-	autoHealReplicas := true
-	if spec != nil && spec.CoreDNS.ExpectedReplicas > 0 {
+	autoHealReplicas := defaultAutoHealReplicas
+	if spec != nil {
 		autoHealReplicas = spec.CoreDNS.AutoHealReplicas
 	}
 	signals["autoHealReplicas"] = autoHealReplicas
 
-	autoHealConfigMap := true
+	autoHealConfigMap := defaultAutoHealConfigMap
 	if spec != nil {
 		autoHealConfigMap = spec.CoreDNS.AutoHealConfigMap
 	}
 	signals["autoHealConfigMap"] = autoHealConfigMap
 
-	fallbackDNS := []string{"/etc/resolv.conf"}
+	upstreamDNSValidation := defaultUpstreamDNSValidation
+	if spec != nil {
+		upstreamDNSValidation = spec.CoreDNS.UpstreamDNSValidation
+	}
+	signals["upstreamDnsValidation"] = upstreamDNSValidation
+
+	latencyThresholdMs := defaultLatencyThresholdMs
+	if spec != nil && spec.CoreDNS.LatencyThresholdMs > 0 {
+		latencyThresholdMs = spec.CoreDNS.LatencyThresholdMs
+	}
+	signals["latencyThresholdMs"] = latencyThresholdMs
+
+	fallbackDNS := []string{defaultFallbackUpstream}
 	if spec != nil && len(spec.CoreDNS.FallbackUpstreamServers) > 0 {
 		fallbackDNS = spec.CoreDNS.FallbackUpstreamServers
 	}
 	signals["fallbackDNS"] = fallbackDNS
+	m.fallbackDNS = fallbackDNS
 
 	// 1. Check CoreDNS Deployment
 	if err := m.checkDeployment(ctx, signals); err != nil {
@@ -221,19 +251,26 @@ func (m *CoreDNSModule) checkConfigMap(ctx context.Context, signals map[string]a
 	corefile := cm.Data[corefileName]
 	signals["corefileLength"] = len(corefile)
 
-	matches := forwardRegex.FindStringSubmatch(corefile)
+	upstreamValidationEnabled := defaultUpstreamDNSValidation
+	if uv, ok := signals["upstreamDnsValidation"].(bool); ok {
+		upstreamValidationEnabled = uv
+	}
+
 	upstreamCorrupted := false
 	var forwardTarget string
-	if len(matches) > 1 {
-		forwardTarget = strings.TrimSpace(matches[1])
-		signals["forwardTarget"] = forwardTarget
+	if upstreamValidationEnabled {
+		matches := forwardRegex.FindStringSubmatch(corefile)
+		if len(matches) > 1 {
+			forwardTarget = strings.TrimSpace(matches[1])
+			signals["forwardTarget"] = forwardTarget
 
-		if strings.HasPrefix(forwardTarget, "192.0.2.") ||
-			strings.HasPrefix(forwardTarget, "198.51.100.") ||
-			strings.HasPrefix(forwardTarget, "203.0.113.") ||
-			forwardTarget == "0.0.0.0" ||
-			forwardTarget == "127.0.0.1" {
-			upstreamCorrupted = true
+			if strings.HasPrefix(forwardTarget, "192.0.2.") ||
+				strings.HasPrefix(forwardTarget, "198.51.100.") ||
+				strings.HasPrefix(forwardTarget, "203.0.113.") ||
+				forwardTarget == "0.0.0.0" ||
+				forwardTarget == "127.0.0.1" {
+				upstreamCorrupted = true
+			}
 		}
 	}
 	signals["upstreamCorrupted"] = upstreamCorrupted
@@ -266,6 +303,16 @@ func (m *CoreDNSModule) Evaluate(ctx context.Context, checkResult *module.CheckR
 		expectedReplicas = er
 	}
 
+	fallbackDNS := []string{defaultFallbackUpstream}
+	if fd, ok := signals["fallbackDNS"].([]string); ok && len(fd) > 0 {
+		fallbackDNS = fd
+	}
+
+	upstreamValidationEnabled := defaultUpstreamDNSValidation
+	if uv, ok := signals["upstreamDnsValidation"].(bool); ok {
+		upstreamValidationEnabled = uv
+	}
+
 	availableReplicas, _ := signals["availableReplicas"].(int32)
 	readyReplicas, _ := signals["readyReplicas"].(int32)
 	desiredReplicas, _ := signals["desiredReplicas"].(int32)
@@ -283,6 +330,10 @@ func (m *CoreDNSModule) Evaluate(ctx context.Context, checkResult *module.CheckR
 			NeedsRemediation: autoHealReplicas,
 			Reason:           fmt.Sprintf("CoreDNS deployment has 0 available replicas (expected %d, desired %d); all cluster DNS resolution is unavailable", expectedReplicas, desiredReplicas),
 			Severity:         severityCritical,
+			ActionType:       ActionScaleReplicas,
+			ActionData: map[string]any{
+				"targetReplicas": expectedReplicas,
+			},
 		}, nil
 	}
 
@@ -293,16 +344,24 @@ func (m *CoreDNSModule) Evaluate(ctx context.Context, checkResult *module.CheckR
 			NeedsRemediation: autoHealReplicas,
 			Reason:           fmt.Sprintf("CoreDNS deployment is degraded: %d/%d available replicas ready", availableReplicas, expectedReplicas),
 			Severity:         severityWarning,
+			ActionType:       ActionScaleReplicas,
+			ActionData: map[string]any{
+				"targetReplicas": expectedReplicas,
+			},
 		}, nil
 	}
 
 	// Scenario 3: Corrupted Upstream DNS Configuration (Experiment 2.3)
-	if upstreamCorrupted {
+	if upstreamValidationEnabled && upstreamCorrupted {
 		return &module.EvalResult{
 			IsHealthy:        false,
 			NeedsRemediation: autoHealConfigMap,
 			Reason:           fmt.Sprintf("CoreDNS upstream resolver corrupted (forward directive points to unreachable '%s'); external DNS lookups failing", forwardTarget),
 			Severity:         severityCritical,
+			ActionType:       ActionRepairConfigMap,
+			ActionData: map[string]any{
+				"fallbackDNS": fallbackDNS,
+			},
 		}, nil
 	}
 
@@ -313,6 +372,7 @@ func (m *CoreDNSModule) Evaluate(ctx context.Context, checkResult *module.CheckR
 			NeedsRemediation: true,
 			Reason:           "CoreDNS deployment CPU is severely throttled (<= 5m CPU request/limit), causing DNS latency spikes",
 			Severity:         severityWarning,
+			ActionType:       ActionRestoreResources,
 		}, nil
 	}
 
@@ -327,6 +387,7 @@ func (m *CoreDNSModule) Evaluate(ctx context.Context, checkResult *module.CheckR
 			NeedsRemediation: true,
 			Reason:           fmt.Sprintf("Prometheus metric query detected DNS latency (%.2f ms) exceeding threshold (%d ms)", promLatencyMs, latencyThresholdMs),
 			Severity:         severityWarning,
+			ActionType:       ActionRestoreResources,
 		}, nil
 	}
 
@@ -337,6 +398,7 @@ func (m *CoreDNSModule) Evaluate(ctx context.Context, checkResult *module.CheckR
 			NeedsRemediation: true,
 			Reason:           fmt.Sprintf("%d CoreDNS pod(s) are crashlooping", crashLoopingPods),
 			Severity:         severityCritical,
+			ActionType:       ActionRestartDeployment,
 		}, nil
 	}
 
@@ -352,7 +414,10 @@ func (m *CoreDNSModule) Evaluate(ctx context.Context, checkResult *module.CheckR
 // Remediate executes corrective actions for CoreDNS failures.
 func (m *CoreDNSModule) Remediate(ctx context.Context, evalResult *module.EvalResult) (*module.RemediateResult, error) {
 	log := logf.FromContext(ctx).WithName(corednsName)
-	reason := evalResult.Reason
+
+	if evalResult == nil {
+		return &module.RemediateResult{Action: "none", Success: true}, nil
+	}
 
 	// Enforce 30s remediation cooldown window to prevent restart-thrashing
 	cooldownWindow := 30 * time.Second
@@ -363,131 +428,188 @@ func (m *CoreDNSModule) Remediate(ctx context.Context, evalResult *module.EvalRe
 		return &module.RemediateResult{Action: msg, Success: true}, nil
 	}
 
-	// Remediation 1: Fix Scale to Zero or Degraded Replicas
-	if strings.Contains(reason, "available replicas") || strings.Contains(reason, "0 available replicas") {
-		var deploy appsv1.Deployment
-		deployKey := types.NamespacedName{Namespace: corednsNamespace, Name: corednsName}
-		if err := m.Client.Get(ctx, deployKey, &deploy); err != nil {
-			return &module.RemediateResult{Action: actionFetchDeployment, Success: false, Err: err}, err
-		}
-
-		targetReplicas := defaultExpectedReplicas
-		deploy.Spec.Replicas = &targetReplicas
-
-		if err := m.Client.Update(ctx, &deploy); err != nil {
-			log.Error(err, "Failed to scale coredns deployment back up")
-			return &module.RemediateResult{Action: "scale coredns deployment", Success: false, Err: err}, err
-		}
-
-		m.lastRemediatedAt = time.Now()
-		msg := fmt.Sprintf("Scaled CoreDNS deployment back up to %d replicas", targetReplicas)
-		log.Info(msg)
-		return &module.RemediateResult{Action: msg, Success: true}, nil
+	action := evalResult.ActionType
+	if action == "" {
+		action = inferActionFromReason(evalResult.Reason)
 	}
 
-	// Remediation 2: Fix Corrupted ConfigMap Upstream Forward Directive
-	if strings.Contains(reason, "upstream resolver corrupted") || strings.Contains(reason, "forward directive") {
-		var cm corev1.ConfigMap
-		cmKey := types.NamespacedName{Namespace: corednsNamespace, Name: corednsName}
-		if err := m.Client.Get(ctx, cmKey, &cm); err != nil {
-			return &module.RemediateResult{Action: "fetch coredns configmap", Success: false, Err: err}, err
-		}
+	switch action {
+	case ActionScaleReplicas:
+		return m.remediateScaleReplicas(ctx, evalResult)
+	case ActionRepairConfigMap:
+		return m.remediateRepairConfigMap(ctx, evalResult)
+	case ActionRestoreResources:
+		return m.remediateRestoreResources(ctx)
+	case ActionRestartDeployment:
+		return m.remediateRestartDeployment(ctx)
+	default:
+		return &module.RemediateResult{
+			Action:  "none",
+			Success: true,
+		}, nil
+	}
+}
 
-		corefile := cm.Data[corefileName]
-		repairedCorefile := forwardRegex.ReplaceAllString(corefile, "forward . /etc/resolv.conf")
-		cm.Data[corefileName] = repairedCorefile
-
-		if err := m.Client.Update(ctx, &cm); err != nil {
-			log.Error(err, "Failed to update coredns configmap Corefile")
-			return &module.RemediateResult{Action: "repair coredns configmap", Success: false, Err: err}, err
-		}
-
-		// Wait briefly / verify ConfigMap commit before triggering rolling restart
-		for range 5 {
-			var checkCM corev1.ConfigMap
-			if err := m.Client.Get(ctx, cmKey, &checkCM); err == nil {
-				if strings.Contains(checkCM.Data[corefileName], "forward . /etc/resolv.conf") {
-					break
-				}
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-
-		// Rollout restart CoreDNS deployment so pods pick up the corrected ConfigMap
-		var deploy appsv1.Deployment
-		deployKey := types.NamespacedName{Namespace: corednsNamespace, Name: corednsName}
-		if err := m.Client.Get(ctx, deployKey, &deploy); err == nil {
-			if deploy.Spec.Template.Annotations == nil {
-				deploy.Spec.Template.Annotations = map[string]string{}
-			}
-			deploy.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"] = time.Now().Format(time.RFC3339)
-			_ = m.Client.Update(ctx, &deploy)
-		}
-
-		m.lastRemediatedAt = time.Now()
-		msg := "Repaired CoreDNS ConfigMap forward directive to /etc/resolv.conf and initiated rolling restart"
-		log.Info(msg)
-		return &module.RemediateResult{Action: msg, Success: true}, nil
+// remediateScaleReplicas scales CoreDNS back to the target replica count.
+func (m *CoreDNSModule) remediateScaleReplicas(ctx context.Context, evalResult *module.EvalResult) (*module.RemediateResult, error) {
+	log := logf.FromContext(ctx).WithName(corednsName)
+	var deploy appsv1.Deployment
+	deployKey := types.NamespacedName{Namespace: corednsNamespace, Name: corednsName}
+	if err := m.Client.Get(ctx, deployKey, &deploy); err != nil {
+		return &module.RemediateResult{Action: actionFetchDeployment, Success: false, Err: err}, err
 	}
 
-	// Remediation 3: Fix CPU Throttling (restore baseline CPU resources)
-	if strings.Contains(reason, "throttled") {
-		var deploy appsv1.Deployment
-		deployKey := types.NamespacedName{Namespace: corednsNamespace, Name: corednsName}
-		if err := m.Client.Get(ctx, deployKey, &deploy); err != nil {
-			return &module.RemediateResult{Action: actionFetchDeployment, Success: false, Err: err}, err
+	targetReplicas := defaultExpectedReplicas
+	if evalResult != nil && evalResult.ActionData != nil {
+		if tr, ok := evalResult.ActionData["targetReplicas"].(int32); ok && tr > 0 {
+			targetReplicas = tr
 		}
+	} else if m.expectedReplicas > 0 {
+		targetReplicas = m.expectedReplicas
+	}
+	deploy.Spec.Replicas = &targetReplicas
 
-		if len(deploy.Spec.Template.Spec.Containers) > 0 {
-			deploy.Spec.Template.Spec.Containers[0].Resources = corev1.ResourceRequirements{
-				Requests: corev1.ResourceList{
-					corev1.ResourceCPU:    resource.MustParse("100m"),
-					corev1.ResourceMemory: resource.MustParse("70Mi"),
-				},
-				Limits: corev1.ResourceList{
-					corev1.ResourceCPU:    resource.MustParse("100m"),
-					corev1.ResourceMemory: resource.MustParse("170Mi"),
-				},
-			}
-		}
-
-		if err := m.Client.Update(ctx, &deploy); err != nil {
-			log.Error(err, "Failed to restore CoreDNS CPU resources")
-			return &module.RemediateResult{Action: "restore coredns resources", Success: false, Err: err}, err
-		}
-
-		m.lastRemediatedAt = time.Now()
-		msg := "Restored CoreDNS CPU resources (100m CPU limit/request) to remove throttling"
-		log.Info(msg)
-		return &module.RemediateResult{Action: msg, Success: true}, nil
+	if err := m.Client.Update(ctx, &deploy); err != nil {
+		log.Error(err, "Failed to scale coredns deployment back up")
+		return &module.RemediateResult{Action: "scale coredns deployment", Success: false, Err: err}, err
 	}
 
-	// Remediation 4: Pods CrashLooping - restart deployment
-	if strings.Contains(reason, "crashlooping") {
-		var deploy appsv1.Deployment
-		deployKey := types.NamespacedName{Namespace: corednsNamespace, Name: corednsName}
-		if err := m.Client.Get(ctx, deployKey, &deploy); err != nil {
-			return &module.RemediateResult{Action: actionFetchDeployment, Success: false, Err: err}, err
-		}
+	m.lastRemediatedAt = time.Now()
+	msg := fmt.Sprintf("Scaled CoreDNS deployment back up to %d replicas", targetReplicas)
+	log.Info(msg)
+	return &module.RemediateResult{Action: msg, Success: true}, nil
+}
 
+// remediateRepairConfigMap rewrites the Corefile forward directive using the configured fallback upstream servers.
+func (m *CoreDNSModule) remediateRepairConfigMap(ctx context.Context, evalResult *module.EvalResult) (*module.RemediateResult, error) {
+	log := logf.FromContext(ctx).WithName(corednsName)
+	var cm corev1.ConfigMap
+	cmKey := types.NamespacedName{Namespace: corednsNamespace, Name: corednsName}
+	if err := m.Client.Get(ctx, cmKey, &cm); err != nil {
+		return &module.RemediateResult{Action: "fetch coredns configmap", Success: false, Err: err}, err
+	}
+
+	fallbackServers := []string{defaultFallbackUpstream}
+	if evalResult != nil && evalResult.ActionData != nil {
+		if fDNS, ok := evalResult.ActionData["fallbackDNS"].([]string); ok && len(fDNS) > 0 {
+			fallbackServers = fDNS
+		}
+	} else if len(m.fallbackDNS) > 0 {
+		fallbackServers = m.fallbackDNS
+	}
+
+	upstreamTarget := strings.Join(fallbackServers, " ")
+	replacementDirective := "forward . " + upstreamTarget
+
+	corefile := cm.Data[corefileName]
+	repairedCorefile := forwardRegex.ReplaceAllString(corefile, replacementDirective)
+	cm.Data[corefileName] = repairedCorefile
+
+	if err := m.Client.Update(ctx, &cm); err != nil {
+		log.Error(err, "Failed to update coredns configmap Corefile")
+		return &module.RemediateResult{Action: "repair coredns configmap", Success: false, Err: err}, err
+	}
+
+	// Wait briefly / verify ConfigMap commit before triggering rolling restart
+	for range 5 {
+		var checkCM corev1.ConfigMap
+		if err := m.Client.Get(ctx, cmKey, &checkCM); err == nil {
+			if strings.Contains(checkCM.Data[corefileName], replacementDirective) {
+				break
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// Rollout restart CoreDNS deployment so pods pick up the corrected ConfigMap
+	var deploy appsv1.Deployment
+	deployKey := types.NamespacedName{Namespace: corednsNamespace, Name: corednsName}
+	if err := m.Client.Get(ctx, deployKey, &deploy); err == nil {
 		if deploy.Spec.Template.Annotations == nil {
 			deploy.Spec.Template.Annotations = map[string]string{}
 		}
 		deploy.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"] = time.Now().Format(time.RFC3339)
-		if err := m.Client.Update(ctx, &deploy); err != nil {
-			return &module.RemediateResult{Action: "restart coredns deployment", Success: false, Err: err}, err
-		}
-
-		m.lastRemediatedAt = time.Now()
-		msg := "Triggered rolling restart of CoreDNS deployment to recover pods"
-		log.Info(msg)
-		return &module.RemediateResult{Action: msg, Success: true}, nil
+		_ = m.Client.Update(ctx, &deploy)
 	}
 
-	return &module.RemediateResult{
-		Action:  "none",
-		Success: true,
-	}, nil
+	m.lastRemediatedAt = time.Now()
+	msg := fmt.Sprintf("Repaired CoreDNS ConfigMap forward directive to '%s' and initiated rolling restart", upstreamTarget)
+	log.Info(msg)
+	return &module.RemediateResult{Action: msg, Success: true}, nil
+}
+
+// remediateRestoreResources restores baseline CPU requests/limits to relieve throttling.
+func (m *CoreDNSModule) remediateRestoreResources(ctx context.Context) (*module.RemediateResult, error) {
+	log := logf.FromContext(ctx).WithName(corednsName)
+	var deploy appsv1.Deployment
+	deployKey := types.NamespacedName{Namespace: corednsNamespace, Name: corednsName}
+	if err := m.Client.Get(ctx, deployKey, &deploy); err != nil {
+		return &module.RemediateResult{Action: actionFetchDeployment, Success: false, Err: err}, err
+	}
+
+	if len(deploy.Spec.Template.Spec.Containers) > 0 {
+		deploy.Spec.Template.Spec.Containers[0].Resources = corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("100m"),
+				corev1.ResourceMemory: resource.MustParse("70Mi"),
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("100m"),
+				corev1.ResourceMemory: resource.MustParse("170Mi"),
+			},
+		}
+	}
+
+	if err := m.Client.Update(ctx, &deploy); err != nil {
+		log.Error(err, "Failed to restore CoreDNS CPU resources")
+		return &module.RemediateResult{Action: "restore coredns resources", Success: false, Err: err}, err
+	}
+
+	m.lastRemediatedAt = time.Now()
+	msg := "Restored CoreDNS CPU resources (100m CPU limit/request) to remove throttling"
+	log.Info(msg)
+	return &module.RemediateResult{Action: msg, Success: true}, nil
+}
+
+// remediateRestartDeployment initiates a rolling restart of the CoreDNS deployment.
+func (m *CoreDNSModule) remediateRestartDeployment(ctx context.Context) (*module.RemediateResult, error) {
+	log := logf.FromContext(ctx).WithName(corednsName)
+	var deploy appsv1.Deployment
+	deployKey := types.NamespacedName{Namespace: corednsNamespace, Name: corednsName}
+	if err := m.Client.Get(ctx, deployKey, &deploy); err != nil {
+		return &module.RemediateResult{Action: actionFetchDeployment, Success: false, Err: err}, err
+	}
+
+	if deploy.Spec.Template.Annotations == nil {
+		deploy.Spec.Template.Annotations = map[string]string{}
+	}
+	deploy.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"] = time.Now().Format(time.RFC3339)
+	if err := m.Client.Update(ctx, &deploy); err != nil {
+		return &module.RemediateResult{Action: "restart coredns deployment", Success: false, Err: err}, err
+	}
+
+	m.lastRemediatedAt = time.Now()
+	msg := "Triggered rolling restart of CoreDNS deployment to recover pods"
+	log.Info(msg)
+	return &module.RemediateResult{Action: msg, Success: true}, nil
+}
+
+// inferActionFromReason provides a fallback mapper when ActionType is not explicitly set.
+func inferActionFromReason(reason string) string {
+	lower := strings.ToLower(reason)
+	if strings.Contains(lower, "available replicas") || strings.Contains(lower, "0 available replicas") || strings.Contains(lower, "replicas") {
+		return ActionScaleReplicas
+	}
+	if strings.Contains(lower, "upstream resolver corrupted") || strings.Contains(lower, "forward directive") {
+		return ActionRepairConfigMap
+	}
+	if strings.Contains(lower, "throttled") || strings.Contains(lower, "latency") {
+		return ActionRestoreResources
+	}
+	if strings.Contains(lower, "crashlooping") {
+		return ActionRestartDeployment
+	}
+	return ""
 }
 
 // queryPrometheusLatency queries Prometheus for CoreDNS query duration metric.
