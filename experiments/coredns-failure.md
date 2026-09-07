@@ -294,3 +294,141 @@ K8s is a config store - it doesn't validate what's inside ConfigMaps. A typo or 
 kubectl apply -f /tmp/coredns-backup.yaml
 kubectl rollout restart deployment coredns -n kube-system
 ```
+
+---
+
+## Experiment 2.4: CoreDNS Pod Crash with Replicas=2 (ReplicaSet Self-Healing & Transient Impact)
+
+**Goal:** Determine whether Kubernetes creates another pod when expected CoreDNS replicas is set to 2 and a pod crashes or is terminated, observe how the ReplicaSet reconciles the state, and evaluate the impact on DNS resolution during the failure.
+
+### What breaks / degrades
+
+- When one of the two CoreDNS pods crashes or is terminated:
+  - DNS query handling capacity drops by 50% immediately
+  - In-flight queries sent to the dying pod before kube-proxy / endpoint updates may experience transient timeouts (~2-5 seconds)
+  - The surviving replica experiences doubled query load
+  - If a systemic crash occurs (e.g., OOM or bad plugin), the pod enters `CrashLoopBackOff` with exponential delays (up to 5 minutes)
+
+### What Kubernetes does
+
+- **YES, Kubernetes creates another pod.**
+- CoreDNS is managed by a Kubernetes `Deployment`, which manages a `ReplicaSet`.
+- The ReplicaSet controller detects that actual healthy replicas (1) is less than desired replicas (2) and immediately issues an API call to schedule and create a replacement pod (`Pending` -> `ContainerCreating` -> `Running` -> `Ready`).
+- Once the new pod passes its readiness probe (`:8181/ready`), the Endpoints / EndpointSlice controller adds its IP back to the `kube-dns` service endpoints.
+
+### What Kubernetes does NOT do
+
+- Does NOT prevent dropped in-flight DNS queries between the moment the pod crashes and the moment endpoints/iptables rules are updated
+- Does NOT detect if the surviving replica is overwhelmed or CPU-throttled by the redirected traffic
+- Does NOT provide application-level alerting that DNS redundancy has been degraded to a single point of failure
+- Does NOT fix underlying root causes if the pod keeps crashing (enters `CrashLoopBackOff` with long delays)
+
+### Steps
+
+**1. Set expected CoreDNS replicas to 2 and verify both are running:**
+
+```bash
+kubectl scale deployment coredns -n kube-system --replicas=2
+kubectl rollout status deployment coredns -n kube-system
+```
+
+Verify two healthy pods and check their names and IPs:
+
+```bash
+kubectl get pods -n kube-system -l k8s-app=kube-dns -o wide
+```
+
+You should see 2 pods in `Running` status with `1/1 Ready`.
+
+**2. Inspect current endpoints of the kube-dns Service:**
+
+```bash
+kubectl get endpoints kube-dns -n kube-system
+```
+
+You will see 2 endpoint IPs corresponding to the two CoreDNS pods.
+
+**3. Open two terminals.**
+
+**Terminal 1 - watch dns-checker logs continuously:**
+
+```bash
+kubectl logs -f -l app=dns-checker
+```
+
+Verify that queries are succeeding (`INTERNAL | OK` and `EXTERNAL | OK`).
+
+**Terminal 2 - stream CoreDNS pod status changes in real-time:**
+
+```bash
+kubectl get pods -n kube-system -l k8s-app=kube-dns -w
+```
+
+**4. In Terminal 3, stop/crash one of the CoreDNS pods:**
+
+Simulate an abrupt crash / pod termination:
+
+```bash
+# Capture the name of one of the running CoreDNS pods
+TARGET_POD=$(kubectl get pods -n kube-system -l k8s-app=kube-dns -o jsonpath='{.items[0].metadata.name}')
+echo "Crashing pod: $TARGET_POD"
+
+# Delete the pod immediately (simulates pod kill / crash)
+kubectl delete pod $TARGET_POD -n kube-system --now
+```
+
+*(Optional alternative)*: You can also simulate an in-container process crash by killing the process:
+```bash
+kubectl exec -n kube-system $TARGET_POD -- kill -9 1
+```
+
+**5. Observe Terminal 2 (Pod Watcher) - Does it create another pod?**
+
+Watch the lifecycle events unfold immediately:
+
+```
+NAME                       READY   STATUS        RESTARTS   AGE
+coredns-668d6bf9bc-abcde   1/1     Terminating   0          5m
+coredns-668d6bf9bc-xyz12   0/1     Pending       0          0s     <-- NEW POD CREATED INSTANTLY
+coredns-668d6bf9bc-xyz12   0/1     ContainerCreating   0    1s
+coredns-668d6bf9bc-xyz12   1/1     Running             0    3s
+coredns-668d6bf9bc-abcde   0/1     Terminating   0          5m
+```
+
+- **Result:** The ReplicaSet controller detected `replicas = 1 < 2` and **immediately created a new pod** (`coredns-668d6bf9bc-xyz12`).
+- Inspect the ReplicaSet events to confirm:
+
+```bash
+kubectl describe replicaset -n kube-system -l k8s-app=kube-dns
+```
+
+Look for the event:
+```
+Normal  SuccessfulCreate  ...  Created pod: coredns-...
+```
+
+**7. Verify Service Endpoints updated:**
+
+```bash
+kubectl get endpoints kube-dns -n kube-system
+```
+
+The dead pod IP is removed and replaced by the newly created pod IP once it becomes `1/1 Ready`.
+
+### Key Takeaway
+
+- **Does Kubernetes create another pod? Yes.** CoreDNS is backed by a Deployment/ReplicaSet. When configured with `replicas = 2`, K8s actively reconciles pod deaths by creating replacement pods.
+- **Where Kubernetes falls short:**
+  1. During the failover window, cluster DNS runs with 50% capacity on a single pod. If cluster traffic is high, the surviving pod may experience latency degradation or OOM kills.
+  2. If the crash is recurring (e.g., OOM, poisoned cache, kernel issue), K8s enters `CrashLoopBackOff` with delays up to 300 seconds, and does not perform active root-cause remediation or alert operators.
+  3. Our custom operator continuously tracks CoreDNS replica health and query error rates to detect degraded redundancy and trigger faster remediation before cluster-wide DNS breaks.
+
+### Recovery
+
+Verify that both CoreDNS pods are healthy and running:
+
+```bash
+kubectl get deployment coredns -n kube-system
+kubectl get pods -n kube-system -l k8s-app=kube-dns
+```
+
