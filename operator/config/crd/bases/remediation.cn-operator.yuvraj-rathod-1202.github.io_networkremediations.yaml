@@ -86,19 +86,18 @@ spec:
                     description: MaxFailures is the number of consecutive failed pings
                       before triggering remediation.
                     type: integer
-                  sourcePodLabel:
-                    default: app=frontend
-                    description: SourcePodLabel is the label selector to find the
-                      pod that will execute the ping.
-                    type: string
-                  targetIP:
-                    description: TargetIP is the IP address the source pod will try
-                      to ping.
+                  sourcePod:
+                    description: SourcePod is the exact name of the pod that will
+                      execute the ping.
                     type: string
                   targetNamespace:
                     default: default
                     description: TargetNamespace is the namespace where the probing
                       will occur.
+                    type: string
+                  targetPod:
+                    description: TargetPod is the exact name of the pod the source
+                      pod will try to ping.
                     type: string
                 required:
                 - enabled

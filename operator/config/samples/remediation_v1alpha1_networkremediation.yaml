@@ -1,7 +1,8 @@
 apiVersion: remediation.cn-operator.yuvraj-rathod-1202.github.io/v1alpha1
 kind: NetworkRemediation
 metadata:
-  name: cluster-network-remediation
+  name: networkremediation-sample
+  namespace: default
 spec:
   cni:
     enabled: true
@@ -12,6 +13,6 @@ spec:
   podConnectivity:
     enabled: true
     targetNamespace: "default"
-    sourcePodLabel: ""
-    targetIP: "8.8.8.8"
+    sourcePod: ""
+    targetPod: ""
     maxFailures: 1

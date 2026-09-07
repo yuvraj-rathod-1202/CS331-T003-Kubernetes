@@ -28,13 +28,13 @@ type PodConnectivitySpec struct {
 	// +kubebuilder:default="default"
 	TargetNamespace string `json:"targetNamespace,omitempty"`
 
-	// SourcePodLabel is the label selector to find the pod that will execute the ping.
-	// +kubebuilder:default="app=frontend"
-	SourcePodLabel string `json:"sourcePodLabel,omitempty"`
-
-	// TargetIP is the IP address the source pod will try to ping.
+	// SourcePod is the exact name of the pod that will execute the ping.
 	// +kubebuilder:validation:Optional
-	TargetIP string `json:"targetIP,omitempty"`
+	SourcePod string `json:"sourcePod,omitempty"`
+
+	// TargetPod is the exact name of the pod the source pod will try to ping.
+	// +kubebuilder:validation:Optional
+	TargetPod string `json:"targetPod,omitempty"`
 
 	// MaxFailures is the number of consecutive failed pings before triggering remediation.
 	// +kubebuilder:default=3

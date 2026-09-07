@@ -87,43 +87,28 @@ func (m *PodConnectivityModule) Check(ctx context.Context, spec *remediationv1al
 	if m.targetNamespace == "" {
 		m.targetNamespace = "default"
 	}
-	m.sourcePodLabel = spec.PodConnectivity.SourcePodLabel
+	sourcePodName := spec.PodConnectivity.SourcePod
+	targetPodName := spec.PodConnectivity.TargetPod
 
-	targetIP := spec.PodConnectivity.TargetIP
-	if targetIP == "" {
-		targetIP = "8.8.8.8"
-	}
+	targetIP := "8.8.8.8" // Default target for internet ping test
 
-	podList := &corev1.PodList{}
-	listOpts := []client.ListOption{
-		client.InNamespace(m.targetNamespace),
-		client.MatchingLabels(parseLabels(m.sourcePodLabel)),
-	}
-	if err := m.Client.List(ctx, podList, listOpts...); err != nil {
-		return nil, fmt.Errorf("failed to list pods: %w", err)
-	}
-
-	if len(podList.Items) < 2 {
-		return &module.CheckResult{
-			Signals: map[string]any{"status": "insufficient_pods"},
-		}, nil
-	}
-
-	var sourcePod, targetPod *corev1.Pod
-	for i := range podList.Items {
-		p := &podList.Items[i]
-		if p.Labels["crash-source"] == "true" {
-			sourcePod = p
-		}
-		if p.Labels["crash-target"] == "true" {
-			targetPod = p
-		}
-	}
-
-	if sourcePod == nil || targetPod == nil {
+	if sourcePodName == "" || targetPodName == "" {
 		return &module.CheckResult{
 			Signals: map[string]any{"status": "healthy"},
 		}, nil
+	}
+
+	sourcePod := &corev1.Pod{}
+	targetPod := &corev1.Pod{}
+
+	err := m.Client.Get(ctx, client.ObjectKey{Name: sourcePodName, Namespace: m.targetNamespace}, sourcePod)
+	if err != nil {
+		return &module.CheckResult{Signals: map[string]any{"status": "insufficient_pods"}}, nil
+	}
+
+	err = m.Client.Get(ctx, client.ObjectKey{Name: targetPodName, Namespace: m.targetNamespace}, targetPod)
+	if err != nil {
+		return &module.CheckResult{Signals: map[string]any{"status": "insufficient_pods"}}, nil
 	}
 
 	log.Info("Detected test edge", "source", sourcePod.Name, "target", targetPod.Name)
