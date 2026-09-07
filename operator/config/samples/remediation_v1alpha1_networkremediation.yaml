@@ -9,5 +9,10 @@ spec:
     enabled: true
   networkPolicy:
     enabled: true
+    protectedLabel: remediation.cn-operator.yuvraj-rathod-1202.github.io/protected
+    snapshotNamespace: kube-system
+    snapshotConfigMapName: networkpolicy-baseline
+    autoRestore: true
+    verifyEnforcement: true
   podConnectivity:
     enabled: true
