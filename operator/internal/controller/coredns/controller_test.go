@@ -32,6 +32,11 @@ import (
 	remediationv1alpha1 "CS331-CN-Project-1/operator/api/v1alpha1"
 )
 
+const (
+	testHealthyCorefile   = ".:53 {\n    forward . /etc/resolv.conf\n}\n"
+	testCorruptedCorefile = ".:53 {\n    forward . 192.0.2.1 {\n       max_concurrent 1000\n    }\n}\n"
+)
+
 func newTestScheme() *runtime.Scheme {
 	scheme := runtime.NewScheme()
 	_ = appsv1.AddToScheme(scheme)
@@ -87,7 +92,7 @@ func TestCoreDNSModule_CheckAndEvaluate_Healthy(t *testing.T) {
 			Name:      corednsName,
 		},
 		Data: map[string]string{
-			corefileName: ".:53 {\n    forward . /etc/resolv.conf\n}\n",
+			corefileName: testHealthyCorefile,
 		},
 	}
 
@@ -266,7 +271,7 @@ func TestCoreDNSModule_CorruptedUpstreamConfigMap_DetectionAndRemediation(t *tes
 			Name:      corednsName,
 		},
 		Data: map[string]string{
-			corefileName: ".:53 {\n    forward . 192.0.2.1 {\n       max_concurrent 1000\n    }\n}\n",
+			corefileName: testCorruptedCorefile,
 		},
 	}
 
@@ -349,7 +354,7 @@ func TestCoreDNSModule_CorruptedUpstreamConfigMap_ValidationDisabled(t *testing.
 			Name:      corednsName,
 		},
 		Data: map[string]string{
-			corefileName: ".:53 {\n    forward . 192.0.2.1 {\n       max_concurrent 1000\n    }\n}\n",
+			corefileName: testCorruptedCorefile,
 		},
 	}
 
@@ -428,7 +433,7 @@ func TestCoreDNSModule_CPUThrottled_DetectionAndRemediation(t *testing.T) {
 			Name:      corednsName,
 		},
 		Data: map[string]string{
-			corefileName: ".:53 {\n    forward . /etc/resolv.conf\n}\n",
+			corefileName: testHealthyCorefile,
 		},
 	}
 
@@ -565,7 +570,7 @@ func TestCoreDNSModule_CustomFallbackDNS_HonoredInRemediation(t *testing.T) {
 			Name:      corednsName,
 		},
 		Data: map[string]string{
-			corefileName: ".:53 {\n    forward . 192.0.2.1 {\n       max_concurrent 1000\n    }\n}\n",
+			corefileName: testCorruptedCorefile,
 		},
 	}
 
