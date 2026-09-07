@@ -118,12 +118,26 @@ spec:
                 - enabled
                 type: object
               networkPolicy:
-                description: NetworkPolicy configures NetworkPolicy drift detection
-                  and enforcement verification.
+                description: NetworkPolicy configures NetworkPolicy enforcement verification.
                 properties:
+                  autoHeal:
+                    default: true
+                    description: |-
+                      AutoHeal automatically restarts degraded or crashlooping calico-node enforcement
+                      agent pods so that felix re-syncs and repopulates kernel packet-filtering rules.
+                      When false, enforcement degradation is only reported in status/events.
+                    type: boolean
+                  cooldownSeconds:
+                    default: 60
+                    description: |-
+                      CooldownSeconds specifies the minimum cooldown period in seconds between
+                      enforcement agent pod restarts to avoid restart-thrashing.
+                    format: int32
+                    type: integer
                   enabled:
                     default: true
-                    description: Enabled toggles the NetworkPolicy monitoring module.
+                    description: Enabled toggles the NetworkPolicy enforcement monitoring
+                      module.
                     type: boolean
                 required:
                 - enabled
