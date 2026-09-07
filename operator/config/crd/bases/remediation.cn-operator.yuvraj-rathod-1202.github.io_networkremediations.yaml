@@ -96,8 +96,7 @@ spec:
                 - enabled
                 type: object
               networkPolicy:
-                description: NetworkPolicy configures NetworkPolicy drift detection
-                  and enforcement verification.
+                description: NetworkPolicy configures NetworkPolicy enforcement verification.
                 properties:
                   autoHeal:
                     default: true

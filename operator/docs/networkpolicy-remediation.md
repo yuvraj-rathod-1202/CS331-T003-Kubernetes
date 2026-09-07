@@ -51,7 +51,7 @@ The `NetworkPolicySpec` struct defined in [`operator/api/v1alpha1/networkpolicy_
 * **Controller Behavior:**
   * In `Evaluate()`, if unhealthy enforcement pods are detected (`len(unhealthyFelix) > 0`), `evalResult.NeedsRemediation` takes the value of `autoHeal`.
   * If `autoHeal == true`: Controller returns `NeedsRemediation: true` and dispatches `ActionRestartFelix`.
-  * If `autoHeal == false`: Controller updates the CR status and emits a Kubernetes Warning Event, but performs **no mutating pod deletions**.
+  * If `autoHeal == false`: Controller updates the CR status (audit-only) and performs **no mutating pod deletions**.
 
 #### 3. `cooldownSeconds` (`int32`)
 * **Usage:** Configures the minimum duration (in seconds) that must elapse between consecutive enforcement agent pod restarts (default: `60s`).

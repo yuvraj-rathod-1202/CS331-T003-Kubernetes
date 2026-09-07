@@ -56,9 +56,6 @@ type npConfig struct {
 	cooldownSeconds int32
 }
 
-// NetworkPolicyModule implements the module.Module interface. It monitors the
-// health of the underlying CNI dataplane enforcement agent (Calico felix running inside
-// calico-node pods) to prevent stale packet-filtering rules in the Linux kernel.
 type NetworkPolicyModule struct {
 	// Client is the Kubernetes API client for interacting with cluster resources.
 	Client client.Client
