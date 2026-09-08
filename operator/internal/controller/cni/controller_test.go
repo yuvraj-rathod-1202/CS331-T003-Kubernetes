@@ -246,14 +246,14 @@ func TestCNIModule_CheckCalicoDaemonSet_CustomSelector(t *testing.T) {
 	_ = unstructured.SetNestedField(ds.Object, int64(2), "status", "desiredNumberScheduled")
 	_ = unstructured.SetNestedField(ds.Object, int64(1), "status", "numberReady")
 	_ = unstructured.SetNestedStringMap(ds.Object, map[string]string{
-		"k8s-app": testCalicoDSName,
+		k8sAppLabel: testCalicoDSName,
 	}, "spec", "selector", "matchLabels")
 
 	readyPod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "calico-node-node1",
 			Namespace: testNamespaceKubeSystem,
-			Labels:    map[string]string{"k8s-app": testCalicoDSName},
+			Labels:    map[string]string{k8sAppLabel: testCalicoDSName},
 		},
 		Status: corev1.PodStatus{
 			Conditions: []corev1.PodCondition{
@@ -266,7 +266,7 @@ func TestCNIModule_CheckCalicoDaemonSet_CustomSelector(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "calico-node-node2",
 			Namespace: testNamespaceKubeSystem,
-			Labels:    map[string]string{"k8s-app": testCalicoDSName},
+			Labels:    map[string]string{k8sAppLabel: testCalicoDSName},
 		},
 		Status: corev1.PodStatus{
 			Conditions: []corev1.PodCondition{
@@ -300,14 +300,14 @@ func TestCNIModule_CheckCalicoDaemonSet_MissingStatusDoesNotDefaultToHealthy(t *
 	ds.SetName(testCalicoDSName)
 	ds.SetNamespace(testNamespaceKubeSystem)
 	_ = unstructured.SetNestedStringMap(ds.Object, map[string]string{
-		"k8s-app": testCalicoDSName,
+		k8sAppLabel: testCalicoDSName,
 	}, "spec", "selector", "matchLabels")
 
 	unreadyPod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "calico-node-failing",
 			Namespace: testNamespaceKubeSystem,
-			Labels:    map[string]string{"k8s-app": testCalicoDSName},
+			Labels:    map[string]string{k8sAppLabel: testCalicoDSName},
 		},
 		Status: corev1.PodStatus{
 			Conditions: []corev1.PodCondition{
