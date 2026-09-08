@@ -22,8 +22,10 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -223,7 +225,7 @@ func (r *NetworkRemediationReconciler) reconcileModule(
 // SetupWithManager sets up the controller with the Manager.
 func (r *NetworkRemediationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&remediationv1alpha1.NetworkRemediation{}).
+		For(&remediationv1alpha1.NetworkRemediation{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Named("networkremediation").
 		Complete(r)
 }

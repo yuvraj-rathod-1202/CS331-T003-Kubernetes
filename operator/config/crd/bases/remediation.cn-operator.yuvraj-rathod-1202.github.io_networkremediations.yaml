@@ -146,10 +146,198 @@ spec:
                 description: PodConnectivity configures pod-to-pod and internode connectivity
                   probing.
                 properties:
+                  checkPolicy:
+                    description: CheckPolicy configures probing mechanics, topology,
+                      and probe intervals.
+                    properties:
+                      anchors:
+                        description: Anchors defines static external anchors for corroboration.
+                        items:
+                          description: AnchorTarget defines a static anchor for out-of-band
+                            triangulation.
+                          properties:
+                            address:
+                              type: string
+                            name:
+                              type: string
+                            port:
+                              type: integer
+                            protocol:
+                              type: string
+                          required:
+                          - address
+                          - name
+                          type: object
+                        type: array
+                      intervalSeconds:
+                        default: 10
+                        description: IntervalSeconds is how frequently probes execute.
+                        maximum: 300
+                        minimum: 2
+                        type: integer
+                      probePort:
+                        default: 9099
+                        description: ProbePort is the port on which the probe agent
+                          and responders listen.
+                        type: integer
+                      probeProtocol:
+                        default: tcp
+                        description: 'ProbeProtocol specifies network protocol: "tcp"
+                          or "http".'
+                        enum:
+                        - tcp
+                        - http
+                        type: string
+                      timeoutSeconds:
+                        default: 2
+                        description: TimeoutSeconds specifies timeout for each synthetic
+                          probe.
+                        maximum: 30
+                        minimum: 1
+                        type: integer
+                      topology:
+                        default: ring
+                        description: 'Topology defines the probing graph: "ring",
+                          "mesh", or "sampled".'
+                        enum:
+                        - ring
+                        - mesh
+                        - sampled
+                        type: string
+                    type: object
                   enabled:
                     default: true
                     description: Enabled toggles the pod connectivity monitoring module.
                     type: boolean
+                  evaluatePolicy:
+                    description: EvaluatePolicy configures triangulation thresholds
+                      and anchor validation.
+                    properties:
+                      anchorCorroborationEnabled:
+                        default: true
+                        description: AnchorCorroborationEnabled enables verification
+                          against static system anchors.
+                        type: boolean
+                      consecutiveFailureThreshold:
+                        default: 3
+                        description: ConsecutiveFailureThreshold specifies how many
+                          probe failures confirm an issue.
+                        type: integer
+                      localCNIValidationEnabled:
+                        default: true
+                        description: LocalCNIValidationEnabled enables host-to-pod
+                          loopback verification.
+                        type: boolean
+                      packetLossThresholdPercent:
+                        default: 20
+                        description: PacketLossThresholdPercent defines degradation
+                          threshold.
+                        type: integer
+                      triangulationEnabled:
+                        default: true
+                        description: TriangulationEnabled enables cross-node triangulation.
+                        type: boolean
+                    type: object
+                  remediationPolicy:
+                    description: RemediationPolicy specifies automated healing steps
+                      and escalation limits.
+                    properties:
+                      autoRemediationEnabled:
+                        default: true
+                        description: AutoRemediationEnabled permits the operator to
+                          execute corrective actions.
+                        type: boolean
+                      cniSubsystem:
+                        description: CNISubsystem configures restarts of the node's
+                          local CNI agent.
+                        properties:
+                          daemonSetName:
+                            default: calico-node
+                            description: DaemonSetName is the name of the CNI DaemonSet
+                              (e.g. "calico-node", "kindnet").
+                            type: string
+                          enabled:
+                            default: true
+                            description: Enabled allows restarting local CNI DaemonSet
+                              pod.
+                            type: boolean
+                          maxRestartAttempts:
+                            default: 2
+                            description: MaxRestartAttempts is the maximum attempts
+                              before escalating to drain.
+                            type: integer
+                          namespace:
+                            default: kube-system
+                            description: Namespace is the namespace where the CNI
+                              DaemonSet lives.
+                            type: string
+                          restartBackoffSeconds:
+                            default: 60
+                            description: RestartBackoffSeconds is cooldown between
+                              restarts.
+                            type: integer
+                        type: object
+                      nodeDrain:
+                        description: NodeDrain configures workload eviction when lower
+                          tiers fail.
+                        properties:
+                          deleteEmptyDirData:
+                            default: true
+                            description: DeleteEmptyDirData allows eviction of pods
+                              with emptyDir volumes.
+                            type: boolean
+                          drainTimeoutSeconds:
+                            default: 120
+                            description: DrainTimeoutSeconds is eviction timeout.
+                            type: integer
+                          enabled:
+                            default: true
+                            description: Enabled permits node draining.
+                            type: boolean
+                          escalateAfterFailedRestarts:
+                            default: 2
+                            description: EscalateAfterFailedRestarts triggers drain
+                              after CNI restarts fail.
+                            type: integer
+                          ignoreDaemonSets:
+                            default: true
+                            description: IgnoreDaemonSets skips DaemonSet pods during
+                              eviction.
+                            type: boolean
+                        type: object
+                      nodeIsolation:
+                        description: NodeIsolation configures taints and cordoning
+                          for degraded nodes.
+                        properties:
+                          cordonNode:
+                            default: true
+                            description: CordonNode marks the node unschedulable.
+                            type: boolean
+                          taintEffect:
+                            default: NoSchedule
+                            description: TaintEffect is the effect applied (NoSchedule,
+                              PreferNoSchedule).
+                            type: string
+                          taintKey:
+                            default: network-degraded
+                            description: TaintKey is the taint key applied to degraded
+                              nodes.
+                            type: string
+                          taintNode:
+                            default: true
+                            description: TaintNode adds a taint to faulty nodes.
+                            type: boolean
+                          taintValue:
+                            default: "true"
+                            description: TaintValue is the value of the taint.
+                            type: string
+                        type: object
+                    type: object
+                  targetNamespace:
+                    default: default
+                    description: TargetNamespace is the namespace where probing pods
+                      or responders are located.
+                    type: string
                 required:
                 - enabled
                 type: object
