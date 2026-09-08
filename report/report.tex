@@ -17,8 +17,7 @@
 \usepackage{enumitem}
 \usepackage{array}
 
-% Compact lists
-\setlist{nosep, leftmargin=*}
+\setlist{nosep, leftmargin=1.5em, labelindent=0pt, align=left}
 
 % TikZ styles
 \tikzset{
@@ -41,15 +40,21 @@
 \title{Extending Kubernetes Self-Healing for Networking Failure}
 
 \author{
-  \IEEEauthorblockN{Arpan Gupta,
-    Buha Deep Maheshbhai,
-    Param Tanna,\\%
-    Ramji Purwar,
-    Rathod Yuvraj Rajubhai,
-    Solanki Viraj Rajeshbhai}
-  \IEEEauthorblockA{Indian Institute of Technology Gandhinagar\\
-    \{24110051, 24110082, param.tanna,
-    ramji.purwar, yuvraj.rathod, viraj.solanki\}@iitgn.ac.in}
+\begin{tabular}{ccc}
+\textbf{Arpan Gupta} &
+\textbf{Buha Deep Maheshbhai} &
+\textbf{Param Tanna} \\[-1mm]
+24110051@iitgn.ac.in &
+24110082@iitgn.ac.in &
+param.tanna@iitgn.ac.in \\[4mm]
+
+\textbf{Ramji Purwar} &
+\textbf{Rathod Yuvraj Rajubhai} &
+\textbf{Solanki Viraj Rajeshbhai} \\[-1mm]
+ramji.purwar@iitgn.ac.in &
+yuvraj.rathod@iitgn.ac.in &
+viraj.solanki@iitgn.ac.in
+\end{tabular}
 }
 
 \maketitle
