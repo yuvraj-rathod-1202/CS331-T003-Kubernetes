@@ -13,6 +13,49 @@ spec:
   podConnectivity:
     enabled: true
     targetNamespace: "default"
-    sourcePod: ""
-    targetPod: ""
-    maxFailures: 1
+
+    # Probing & Topology Policy (Pingmesh O(N) ring + local CNI)
+    checkPolicy:
+      topology: "ring"
+      intervalSeconds: 10
+      timeoutSeconds: 2
+      probeProtocol: "tcp"
+      probePort: 9099
+      anchors:
+        - name: "cloud-gateway"
+          address: "192.168.49.1"
+          protocol: "icmp"
+        - name: "kubernetes-apiserver"
+          address: "10.96.0.1"
+          port: 443
+          protocol: "tcp"
+
+    # Evaluation & Pattern Triangulation Policy
+    evaluatePolicy:
+      triangulationEnabled: true
+      anchorCorroborationEnabled: true
+      localCNIValidationEnabled: true
+      consecutiveFailureThreshold: 2
+      packetLossThresholdPercent: 20
+
+    # Automated Hierarchical Remediation Policy
+    remediationPolicy:
+      autoRemediationEnabled: true
+      cniSubsystem:
+        enabled: true
+        daemonSetName: "calico-node"
+        namespace: "kube-system"
+        maxRestartAttempts: 2
+        restartBackoffSeconds: 60
+      nodeIsolation:
+        taintNode: true
+        taintKey: "network-degraded"
+        taintValue: "true"
+        taintEffect: "NoSchedule"
+        cordonNode: true
+      nodeDrain:
+        enabled: true
+        escalateAfterFailedRestarts: 2
+        drainTimeoutSeconds: 120
+        deleteEmptyDirData: true
+        ignoreDaemonSets: true

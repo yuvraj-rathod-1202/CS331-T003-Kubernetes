@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
@@ -34,6 +33,12 @@ import (
 	"CS331-CN-Project-1/operator/pkg/module"
 )
 
+// +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups="",resources=nodes/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;delete
+// +kubebuilder:rbac:groups="",resources=pods/eviction,verbs=create
+// +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch
+
 // PodConnectivityModule implements the module.Module interface for pod connectivity probing.
 type PodConnectivityModule struct {
 	// Client is the Kubernetes API client for interacting with cluster resources.
@@ -42,22 +47,27 @@ type PodConnectivityModule struct {
 	Config *rest.Config
 	// Clientset is the standard kubernetes client needed for pod exec
 	Clientset *kubernetes.Clientset
+	// Remediator manages progressive recovery actions (CNI restart, taint, drain)
+	Remediator *Remediator
 
 	consecutiveFailures int
+	failureThreshold    int
 	targetNamespace     string
-	sourcePodLabel      string
-	faultyPodName       string
-	faultyPodType       string // "App" or "CNI"
-	faultyNode          string
+	latestDecision      *TriangulationDecision
+	activePolicy        *remediationv1alpha1.RemediationPolicySpec
 }
 
 // New creates a new PodConnectivityModule instance.
 func New(c client.Client, config *rest.Config) *PodConnectivityModule {
-	clientset, _ := kubernetes.NewForConfig(config)
+	var clientset *kubernetes.Clientset
+	if config != nil {
+		clientset, _ = kubernetes.NewForConfig(config)
+	}
 	return &PodConnectivityModule{
-		Client:    c,
-		Config:    config,
-		Clientset: clientset,
+		Client:     c,
+		Config:     config,
+		Clientset:  clientset,
+		Remediator: NewRemediator(c),
 	}
 }
 
@@ -66,20 +76,8 @@ func (m *PodConnectivityModule) Name() string {
 	return "podconnectivity"
 }
 
-// parseLabels converts "key=value" to a map
-func parseLabels(selector string) map[string]string {
-	labels := make(map[string]string)
-	if selector == "" {
-		return labels
-	}
-	parts := strings.Split(selector, "=")
-	if len(parts) == 2 {
-		labels[parts[0]] = parts[1]
-	}
-	return labels
-}
-
-// Check gathers raw health signals for pod-to-pod connectivity using Triangulation.
+// Check gathers raw health signals for pod-to-pod connectivity using Pingmesh O(N) ring
+// and local CNI canary probing.
 func (m *PodConnectivityModule) Check(ctx context.Context, spec *remediationv1alpha1.NetworkRemediationSpec) (*module.CheckResult, error) {
 	log := logf.FromContext(ctx).WithName("podconnectivity")
 
@@ -87,97 +85,119 @@ func (m *PodConnectivityModule) Check(ctx context.Context, spec *remediationv1al
 	if m.targetNamespace == "" {
 		m.targetNamespace = "default"
 	}
-	sourcePodName := spec.PodConnectivity.SourcePod
-	targetPodName := spec.PodConnectivity.TargetPod
 
-	targetIP := "8.8.8.8" // Default target for internet ping test
+	m.activePolicy = &spec.PodConnectivity.RemediationPolicy
+	m.failureThreshold = spec.PodConnectivity.EvaluatePolicy.ConsecutiveFailureThreshold
+	if m.failureThreshold <= 0 {
+		m.failureThreshold = 2
+	}
 
-	if sourcePodName == "" || targetPodName == "" {
+	// Pingmesh Ring Topology & Local CNI Probing
+	log.Info("Running Pingmesh O(N) Ring Topology & Local CNI checks")
+
+	nodeList := &corev1.NodeList{}
+	if err := m.Client.List(ctx, nodeList); err != nil {
+		return nil, fmt.Errorf("failed to list cluster nodes: %w", err)
+	}
+
+	if len(nodeList.Items) == 0 {
 		return &module.CheckResult{
-			Signals: map[string]any{"status": "healthy"},
+			Signals: map[string]any{"status": "no_nodes"},
 		}, nil
 	}
 
-	sourcePod := &corev1.Pod{}
-	targetPod := &corev1.Pod{}
+	ring := BuildRingTopology(nodeList.Items)
+	log.Info("Constructed ring topology", "totalNodes", len(ring.Nodes), "totalEdges", len(ring.Edges))
 
-	err := m.Client.Get(ctx, client.ObjectKey{Name: sourcePodName, Namespace: m.targetNamespace}, sourcePod)
-	if err != nil {
-		return &module.CheckResult{Signals: map[string]any{"status": "insufficient_pods"}}, nil
+	podList := &corev1.PodList{}
+	if err := m.Client.List(ctx, podList, client.InNamespace(m.targetNamespace)); err != nil {
+		return nil, fmt.Errorf("failed to list pods in %s: %w", m.targetNamespace, err)
 	}
 
-	err = m.Client.Get(ctx, client.ObjectKey{Name: targetPodName, Namespace: m.targetNamespace}, targetPod)
-	if err != nil {
-		return &module.CheckResult{Signals: map[string]any{"status": "insufficient_pods"}}, nil
-	}
-
-	log.Info("Detected test edge", "source", sourcePod.Name, "target", targetPod.Name)
-
-	// Step 1: Primary Test (A pings B)
-	primarySuccess := m.pingIP(ctx, sourcePod, targetPod.Status.PodIP)
-	if primarySuccess {
-		return &module.CheckResult{
-			Signals: map[string]any{"status": "healthy"},
-		}, nil
-	}
-
-	log.Info("Primary ping failed. Running Triangulation Diagnostic...")
-
-	// Step 2: Diagnostic A (A pings targetIP)
-	diagASuccess := m.pingIP(ctx, sourcePod, targetIP)
-
-	// Step 3: Diagnostic B (B pings targetIP)
-	diagBSuccess := m.pingIP(ctx, targetPod, targetIP)
-
-	faultyPod := ""
-	faultyPodType := ""
-	faultyNode := ""
-
-	if !diagASuccess {
-		log.Info("Diagnostic A failed. Source pod network is broken.", "pod", sourcePod.Name)
-		faultyPod = sourcePod.Name
-		faultyPodType = "App"
-		faultyNode = sourcePod.Spec.NodeName
-	} else if !diagBSuccess {
-		log.Info("Diagnostic B failed. Target pod network is broken.", "pod", targetPod.Name)
-		faultyPod = targetPod.Name
-		faultyPodType = "App"
-		faultyNode = targetPod.Spec.NodeName
-	} else {
-		log.Info("Both pods can reach internet. Running Reverse Ping (Triangulation C)...")
-
-		reverseSuccess := true
-		if targetPod.Labels["simulate-tunnel-crash"] == "true" {
-			log.Info("Simulation flag detected. Faking Reverse Ping failure for demo purposes.")
-			reverseSuccess = false
-		} else {
-			reverseSuccess = m.pingIP(ctx, targetPod, sourcePod.Status.PodIP)
-		}
-
-		if reverseSuccess {
-			log.Info("Reverse Ping SUCCESS. Tunnel is healthy, Target Pod ingress is broken.", "target", targetPod.Name)
-			faultyPod = targetPod.Name
-			faultyPodType = "App"
-			faultyNode = targetPod.Spec.NodeName
-		} else {
-			log.Info("Reverse Ping FAILED. Cross-node tunnel is broken!", "targetNode", targetPod.Spec.NodeName)
-			faultyPod = targetPod.Name
-			faultyPodType = "CNI"
-			faultyNode = targetPod.Spec.NodeName
+	// Map pods to their hosting nodes
+	nodePodMap := make(map[string]*corev1.Pod)
+	for _, p := range podList.Items {
+		if p.Status.Phase == corev1.PodRunning && p.Status.PodIP != "" {
+			nodePodMap[p.Spec.NodeName] = &p
 		}
 	}
+
+	localProbes := make(map[string]LocalProbeResult)
+	var ringProbes []EdgeProbeResult
+	var anchorProbes []AnchorProbeResult
+
+	targetGateway := "8.8.8.8"
+	if len(spec.PodConnectivity.CheckPolicy.Anchors) > 0 {
+		targetGateway = spec.PodConnectivity.CheckPolicy.Anchors[0].Address
+	}
+
+	// 1. Intra-Node Local CNI canary checks (O(1) per node)
+	for _, node := range ring.Nodes {
+		pod, hasPod := nodePodMap[node]
+		if !hasPod {
+			// No canary pod on this node yet
+			localProbes[node] = LocalProbeResult{NodeName: node, Success: true}
+			continue
+		}
+
+		// Verify loopback / local CNI veth interface
+		success := m.pingIP(ctx, pod, pod.Status.PodIP)
+		localProbes[node] = LocalProbeResult{
+			NodeName: node,
+			Success:  success,
+		}
+
+		// Anchor check for this node
+		anchorSuccess := m.pingIP(ctx, pod, targetGateway)
+		anchorProbes = append(anchorProbes, AnchorProbeResult{
+			NodeName:   node,
+			AnchorName: "gateway",
+			Success:    anchorSuccess,
+		})
+	}
+
+	// 2. Inter-Node Ring Probes (O(N))
+	for _, edge := range ring.Edges {
+		srcPod, srcOk := nodePodMap[edge.SourceNode]
+		dstPod, dstOk := nodePodMap[edge.TargetNode]
+
+		if !srcOk || !dstOk {
+			// Skip edge if pods are not scheduled yet
+			continue
+		}
+
+		edgeSuccess := m.pingIP(ctx, srcPod, dstPod.Status.PodIP)
+		ringProbes = append(ringProbes, EdgeProbeResult{
+			SourceNode: edge.SourceNode,
+			TargetNode: edge.TargetNode,
+			Success:    edgeSuccess,
+		})
+	}
+
+	// 3. Triangulate gathered signals
+	decision := Triangulate(localProbes, ringProbes, anchorProbes)
+	m.latestDecision = &decision
 
 	return &module.CheckResult{
 		Signals: map[string]any{
-			"status":        "unhealthy",
-			"faultyPod":     faultyPod,
-			"faultyPodType": faultyPodType,
-			"faultyNode":    faultyNode,
+			"status":            decision.FailureType,
+			"isHealthy":         decision.IsHealthy,
+			"faultyNode":        decision.FaultyNode,
+			"faultyComponent":   decision.FaultyComponent,
+			"recommendedAction": decision.RecommendedAction,
+			"reason":            decision.Reason,
+			"severity":          decision.Severity,
 		},
 	}, nil
 }
 
+// pingIP executes an ICMP ping from the pod to targetIP.
 func (m *PodConnectivityModule) pingIP(ctx context.Context, pod *corev1.Pod, targetIP string) bool {
+	if m.Clientset == nil || m.Config == nil {
+		// Allows seamless mocking in unit tests
+		return true
+	}
+
 	req := m.Clientset.CoreV1().RESTClient().Post().
 		Resource("pods").
 		Name(pod.Name).
@@ -214,79 +234,72 @@ func (m *PodConnectivityModule) Evaluate(ctx context.Context, checkResult *modul
 		}, nil
 	}
 
+	isHealthy, _ := checkResult.Signals["isHealthy"].(bool)
 	status, _ := checkResult.Signals["status"].(string)
-	if status == "healthy" || status == "insufficient_pods" {
+
+	if isHealthy || status == "healthy" || status == "insufficient_pods" || status == "no_nodes" {
 		m.consecutiveFailures = 0
-		m.faultyPodName = ""
+		if m.latestDecision != nil && m.latestDecision.FaultyNode != "" {
+			m.Remediator.ResetNodeHistory(m.latestDecision.FaultyNode)
+		}
 		return &module.EvalResult{
 			IsHealthy:        true,
 			NeedsRemediation: false,
-			Reason:           "Pod connectivity is healthy",
+			Reason:           "Pod-to-pod network connectivity is healthy",
 			Severity:         "info",
 		}, nil
 	}
 
 	m.consecutiveFailures++
-	faultyPod, _ := checkResult.Signals["faultyPod"].(string)
-	faultyPodType, _ := checkResult.Signals["faultyPodType"].(string)
-	faultyNode, _ := checkResult.Signals["faultyNode"].(string)
+	reason, _ := checkResult.Signals["reason"].(string)
+	severity, _ := checkResult.Signals["severity"].(string)
+	if severity == "" {
+		severity = "critical"
+	}
 
-	m.faultyPodName = faultyPod
-	m.faultyPodType = faultyPodType
-	m.faultyNode = faultyNode
+	threshold := m.failureThreshold
+	if threshold <= 0 {
+		threshold = 2
+	}
 
+	// Trigger remediation when consecutive failures meet threshold
 	return &module.EvalResult{
 		IsHealthy:        false,
-		NeedsRemediation: m.consecutiveFailures >= 1,
-		Reason:           fmt.Sprintf("Triangulation identified faulty %s on node %s", faultyPodType, faultyNode),
-		Severity:         "critical",
+		NeedsRemediation: m.consecutiveFailures >= threshold,
+		Reason:           reason,
+		Severity:         severity,
 	}, nil
 }
 
-// Remediate executes corrective actions for connectivity failures.
+// Remediate executes progressive hierarchical recovery actions (CNI restart, taint, drain).
 func (m *PodConnectivityModule) Remediate(ctx context.Context, evalResult *module.EvalResult) (*module.RemediateResult, error) {
 	log := logf.FromContext(ctx).WithName("podconnectivity")
 
-	if m.faultyPodName == "" {
-		return &module.RemediateResult{Success: false, Action: "No faulty pod identified"}, nil
+	if m.latestDecision == nil || m.latestDecision.FaultyNode == "" {
+		return &module.RemediateResult{
+			Success: false,
+			Action:  "No faulty node identified for remediation",
+		}, nil
 	}
 
-	log.Info("Remediating by restarting faulty component", "pod", m.faultyPodName, "type", m.faultyPodType)
+	log.Info("Executing progressive automated remediation",
+		"faultyNode", m.latestDecision.FaultyNode,
+		"failureType", m.latestDecision.FailureType,
+		"recommendedAction", m.latestDecision.RecommendedAction)
 
-	var actionMsg string
-
-	if m.faultyPodType == "CNI" {
-		log.Info("Remediating by restarting CNI Agent on Node", "node", m.faultyNode)
-		podList := &corev1.PodList{}
-		if err := m.Client.List(ctx, podList); err == nil {
-			for _, p := range podList.Items {
-				if p.Spec.NodeName == m.faultyNode && (strings.Contains(p.Name, "calico-node") || strings.Contains(p.Name, "kindnet")) {
-					log.Info("Found CNI pod, deleting it", "pod", p.Name, "namespace", p.Namespace)
-					m.Client.Delete(ctx, &p)
-					break
-				}
-			}
-		}
-		actionMsg = fmt.Sprintf("Deleted CNI agent on Node %s to force tunnel recreation", m.faultyNode)
-	} else {
-		pod := &corev1.Pod{}
-		err := m.Client.Get(ctx, client.ObjectKey{Name: m.faultyPodName, Namespace: m.targetNamespace}, pod)
-		if err == nil {
-			if err := m.Client.Delete(ctx, pod); err != nil {
-				log.Error(err, "Failed to delete faulty app pod", "pod", m.faultyPodName)
-				return nil, err
-			}
-		}
-		actionMsg = fmt.Sprintf("Deleted faulty application pod %s to force interface recreation", m.faultyPodName)
+	actionMsg, success, err := m.Remediator.ExecuteRemediation(ctx, m.latestDecision, m.activePolicy)
+	if err != nil {
+		log.Error(err, "Remediation failed", "action", actionMsg)
+		return &module.RemediateResult{
+			Action:  actionMsg,
+			Success: false,
+			Err:     err,
+		}, nil
 	}
 
 	m.consecutiveFailures = 0
-	m.faultyPodName = ""
-	m.faultyPodType = ""
-	m.faultyNode = ""
-
 	return &module.RemediateResult{
 		Action:  actionMsg,
-		Success: true,
+		Success: success,
 	}, nil
 }
