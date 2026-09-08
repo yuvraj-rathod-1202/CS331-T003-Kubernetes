@@ -7,12 +7,21 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - configmaps
   - nodes
   verbs:
   - get
   - list
   - patch
   - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - get
+  - list
   - watch
 - apiGroups:
   - ""
@@ -44,6 +53,34 @@ rules:
   verbs:
   - get
   - list
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - crd.projectcalico.org
+  resources:
+  - ipamblocks
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - crd.projectcalico.org
+  resources:
+  - ippools
+  verbs:
+  - get
+  - list
+  - patch
+  - update
   - watch
 - apiGroups:
   - remediation.cn-operator.yuvraj-rathod-1202.github.io
