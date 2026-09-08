@@ -61,6 +61,10 @@ func (r *Remediator) ExecuteRemediation(
 		return "No target node identified for remediation", false, nil
 	}
 
+	if policy != nil && !policy.AutoRemediationEnabled {
+		return fmt.Sprintf("Auto remediation disabled by policy for node %s", nodeName), false, nil
+	}
+
 	attempts := r.RestartAttempts[nodeName]
 
 	// Determine defaults if policy is unset

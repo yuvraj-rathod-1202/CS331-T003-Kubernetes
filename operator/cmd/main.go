@@ -210,8 +210,13 @@ func main() {
 			status.NetworkPolicy = ms
 		},
 	)
+	podConnMod, err := podconnmod.New(mgr.GetClient(), mgr.GetConfig())
+	if err != nil {
+		setupLog.Error(err, "Failed to create pod connectivity module")
+		os.Exit(1)
+	}
 	reconciler.RegisterModule(
-		podconnmod.New(mgr.GetClient(), mgr.GetConfig()),
+		podConnMod,
 		func(spec *remediationv1alpha1.NetworkRemediationSpec) bool { return spec.PodConnectivity.Enabled },
 		func(status *remediationv1alpha1.NetworkRemediationStatus, ms remediationv1alpha1.ModuleStatus) {
 			status.PodConnectivity = ms

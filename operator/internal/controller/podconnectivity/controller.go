@@ -58,17 +58,21 @@ type PodConnectivityModule struct {
 }
 
 // New creates a new PodConnectivityModule instance.
-func New(c client.Client, config *rest.Config) *PodConnectivityModule {
+func New(c client.Client, config *rest.Config) (*PodConnectivityModule, error) {
 	var clientset *kubernetes.Clientset
 	if config != nil {
-		clientset, _ = kubernetes.NewForConfig(config)
+		var err error
+		clientset, err = kubernetes.NewForConfig(config)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create kubernetes clientset for pod connectivity: %w", err)
+		}
 	}
 	return &PodConnectivityModule{
 		Client:     c,
 		Config:     config,
 		Clientset:  clientset,
 		Remediator: NewRemediator(c),
-	}
+	}, nil
 }
 
 // Name returns the module name.
@@ -116,9 +120,10 @@ func (m *PodConnectivityModule) Check(ctx context.Context, spec *remediationv1al
 
 	// Map pods to their hosting nodes
 	nodePodMap := make(map[string]*corev1.Pod)
-	for _, p := range podList.Items {
+	for i := range podList.Items {
+		p := &podList.Items[i]
 		if p.Status.Phase == corev1.PodRunning && p.Status.PodIP != "" {
-			nodePodMap[p.Spec.NodeName] = &p
+			nodePodMap[p.Spec.NodeName] = p
 		}
 	}
 
@@ -180,7 +185,7 @@ func (m *PodConnectivityModule) Check(ctx context.Context, spec *remediationv1al
 
 	return &module.CheckResult{
 		Signals: map[string]any{
-			"status":            decision.FailureType,
+			"status":            string(decision.FailureType),
 			"isHealthy":         decision.IsHealthy,
 			"faultyNode":        decision.FaultyNode,
 			"faultyComponent":   decision.FaultyComponent,
@@ -193,8 +198,11 @@ func (m *PodConnectivityModule) Check(ctx context.Context, spec *remediationv1al
 
 // pingIP executes an ICMP ping from the pod to targetIP.
 func (m *PodConnectivityModule) pingIP(ctx context.Context, pod *corev1.Pod, targetIP string) bool {
+	log := logf.FromContext(ctx).WithName("podconnectivity")
+
 	if m.Clientset == nil || m.Config == nil {
-		// Allows seamless mocking in unit tests
+		// Allows seamless mocking in unit tests while logging so misconfiguration is visible
+		log.Info("Kubernetes Clientset or Config is nil; bypassing exec ping probe (mock mode enabled)", "pod", pod.Name, "targetIP", targetIP)
 		return true
 	}
 
@@ -211,6 +219,7 @@ func (m *PodConnectivityModule) pingIP(ctx context.Context, pod *corev1.Pod, tar
 
 	exec, err := remotecommand.NewSPDYExecutor(m.Config, "POST", req.URL())
 	if err != nil {
+		log.Error(err, "Failed to create SPDY executor for pod ping probe", "pod", pod.Name, "targetIP", targetIP)
 		return false
 	}
 
@@ -219,8 +228,12 @@ func (m *PodConnectivityModule) pingIP(ctx context.Context, pod *corev1.Pod, tar
 		Stdout: &stdout,
 		Stderr: &stderr,
 	})
+	if err != nil {
+		log.V(1).Info("Pod ping probe execution failed", "pod", pod.Name, "targetIP", targetIP, "stderr", stderr.String(), "error", err)
+		return false
+	}
 
-	return err == nil
+	return true
 }
 
 // Evaluate analyzes the connectivity check results to determine if there is an issue.

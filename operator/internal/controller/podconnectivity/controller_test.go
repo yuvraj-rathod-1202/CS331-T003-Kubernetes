@@ -24,6 +24,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	remediationv1alpha1 "CS331-CN-Project-1/operator/api/v1alpha1"
@@ -175,6 +176,7 @@ func TestRemediator_Tier1_CNIRestart(t *testing.T) {
 	}
 
 	policy := &remediationv1alpha1.RemediationPolicySpec{
+		AutoRemediationEnabled: true,
 		CNISubsystem: remediationv1alpha1.CNISubsystemRemediation{
 			Enabled:            true,
 			DaemonSetName:      "calico-node",
@@ -220,6 +222,7 @@ func TestRemediator_Tier2_NodeIsolation(t *testing.T) {
 	}
 
 	policy := &remediationv1alpha1.RemediationPolicySpec{
+		AutoRemediationEnabled: true,
 		NodeIsolation: remediationv1alpha1.NodeIsolationRemediation{
 			TaintNode:   true,
 			TaintKey:    "network-degraded",
@@ -285,6 +288,7 @@ func TestRemediator_Tier3_EscalationToDrain(t *testing.T) {
 	}
 
 	policy := &remediationv1alpha1.RemediationPolicySpec{
+		AutoRemediationEnabled: true,
 		CNISubsystem: remediationv1alpha1.CNISubsystemRemediation{
 			MaxRestartAttempts: 2,
 		},
@@ -340,7 +344,10 @@ func TestPodConnectivityModule_FullPipeline(t *testing.T) {
 	}
 
 	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node1, node2, cniPod).Build()
-	module := New(client, nil)
+	module, err := New(client, nil)
+	if err != nil {
+		t.Fatalf("failed to create pod connectivity module: %v", err)
+	}
 
 	spec := &remediationv1alpha1.NetworkRemediationSpec{
 		PodConnectivity: remediationv1alpha1.PodConnectivitySpec{
@@ -387,5 +394,17 @@ func TestPodConnectivityModule_FullPipeline(t *testing.T) {
 		if remRes == nil || !remRes.Success {
 			t.Fatalf("expected successful remediation")
 		}
+	}
+}
+
+func TestPodConnectivityModule_New_InvalidConfig(t *testing.T) {
+	scheme := runtime.NewScheme()
+	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+	invalidConfig := &rest.Config{
+		Host: "http://[invalid-host-url",
+	}
+	_, err := New(client, invalidConfig)
+	if err == nil {
+		t.Fatalf("expected error creating PodConnectivityModule with invalid config, got nil")
 	}
 }
