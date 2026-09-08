@@ -68,11 +68,11 @@ func (r *Remediator) ExecuteRemediation(
 	attempts := r.RestartAttempts[nodeName]
 
 	// Determine defaults if policy is unset
-	daemonSetName := "calico-node"
-	cniNamespace := "kube-system"
+	daemonSetName := defaultCalicoDaemonSetName
+	cniNamespace := kubeSystemNamespace
 	maxRestarts := 2
 	escalateAfter := 2
-	taintKey := "network-degraded"
+	taintKey := networkDegradedTaintKey
 	taintValue := "true"
 	taintEffect := "NoSchedule"
 
@@ -110,7 +110,7 @@ func (r *Remediator) ExecuteRemediation(
 	}
 
 	// Tier 2 Direct Trigger: Total egress failure / NIC dead
-	if decision.RecommendedAction == "node_isolation" {
+	if decision.RecommendedAction == actionNodeIsolation {
 		log.Info("Triggering Tier 2: Isolating degraded node", "node", nodeName)
 		err := r.IsolateNode(ctx, nodeName, taintKey, taintValue, taintEffect, true)
 		if err != nil {

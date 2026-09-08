@@ -154,11 +154,11 @@ func TestCNIModule_Check_PropagatesIPAMUsageThresholdPercent(t *testing.T) {
 	scheme := newTestScheme()
 	calicoDS := &unstructured.Unstructured{}
 	calicoDS.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "apps",
+		Group:   appsGroup,
 		Version: "v1",
-		Kind:    "DaemonSet",
+		Kind:    kindDaemonSet,
 	})
-	calicoDS.SetName("calico-node")
+	calicoDS.SetName(testCalicoDSName)
 	calicoDS.SetNamespace("kube-system")
 	_ = unstructured.SetNestedField(calicoDS.Object, int64(1), "status", "desiredNumberScheduled")
 	_ = unstructured.SetNestedField(calicoDS.Object, int64(1), "status", "numberReady")
@@ -210,11 +210,11 @@ func TestCNIModule_CheckCalicoDaemonSet_Healthy(t *testing.T) {
 
 	ds := &unstructured.Unstructured{}
 	ds.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "apps",
+		Group:   appsGroup,
 		Version: "v1",
-		Kind:    "DaemonSet",
+		Kind:    kindDaemonSet,
 	})
-	ds.SetName("calico-node")
+	ds.SetName(testCalicoDSName)
 	ds.SetNamespace(testNamespaceKubeSystem)
 	_ = unstructured.SetNestedField(ds.Object, int64(2), "status", "desiredNumberScheduled")
 	_ = unstructured.SetNestedField(ds.Object, int64(2), "status", "numberReady")
@@ -222,7 +222,7 @@ func TestCNIModule_CheckCalicoDaemonSet_Healthy(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ds).Build()
 	m := New(fakeClient)
 
-	unready, err := m.checkCalicoDaemonSet(ctx, testNamespaceKubeSystem, "calico-node")
+	unready, err := m.checkCalicoDaemonSet(ctx, testNamespaceKubeSystem, testCalicoDSName)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -237,23 +237,23 @@ func TestCNIModule_CheckCalicoDaemonSet_CustomSelector(t *testing.T) {
 
 	ds := &unstructured.Unstructured{}
 	ds.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "apps",
+		Group:   appsGroup,
 		Version: "v1",
-		Kind:    "DaemonSet",
+		Kind:    kindDaemonSet,
 	})
 	ds.SetName("calico-node-custom")
 	ds.SetNamespace(testNamespaceKubeSystem)
 	_ = unstructured.SetNestedField(ds.Object, int64(2), "status", "desiredNumberScheduled")
 	_ = unstructured.SetNestedField(ds.Object, int64(1), "status", "numberReady")
 	_ = unstructured.SetNestedStringMap(ds.Object, map[string]string{
-		"k8s-app": "calico-node",
+		"k8s-app": testCalicoDSName,
 	}, "spec", "selector", "matchLabels")
 
 	readyPod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "calico-node-node1",
 			Namespace: testNamespaceKubeSystem,
-			Labels:    map[string]string{"k8s-app": "calico-node"},
+			Labels:    map[string]string{"k8s-app": testCalicoDSName},
 		},
 		Status: corev1.PodStatus{
 			Conditions: []corev1.PodCondition{
@@ -266,7 +266,7 @@ func TestCNIModule_CheckCalicoDaemonSet_CustomSelector(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "calico-node-node2",
 			Namespace: testNamespaceKubeSystem,
-			Labels:    map[string]string{"k8s-app": "calico-node"},
+			Labels:    map[string]string{"k8s-app": testCalicoDSName},
 		},
 		Status: corev1.PodStatus{
 			Conditions: []corev1.PodCondition{
@@ -293,21 +293,21 @@ func TestCNIModule_CheckCalicoDaemonSet_MissingStatusDoesNotDefaultToHealthy(t *
 
 	ds := &unstructured.Unstructured{}
 	ds.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "apps",
+		Group:   appsGroup,
 		Version: "v1",
-		Kind:    "DaemonSet",
+		Kind:    kindDaemonSet,
 	})
-	ds.SetName("calico-node")
+	ds.SetName(testCalicoDSName)
 	ds.SetNamespace(testNamespaceKubeSystem)
 	_ = unstructured.SetNestedStringMap(ds.Object, map[string]string{
-		"k8s-app": "calico-node",
+		"k8s-app": testCalicoDSName,
 	}, "spec", "selector", "matchLabels")
 
 	unreadyPod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "calico-node-failing",
 			Namespace: testNamespaceKubeSystem,
-			Labels:    map[string]string{"k8s-app": "calico-node"},
+			Labels:    map[string]string{"k8s-app": testCalicoDSName},
 		},
 		Status: corev1.PodStatus{
 			Conditions: []corev1.PodCondition{
@@ -319,7 +319,7 @@ func TestCNIModule_CheckCalicoDaemonSet_MissingStatusDoesNotDefaultToHealthy(t *
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ds, unreadyPod).Build()
 	m := New(fakeClient)
 
-	unready, err := m.checkCalicoDaemonSet(ctx, testNamespaceKubeSystem, "calico-node")
+	unready, err := m.checkCalicoDaemonSet(ctx, testNamespaceKubeSystem, testCalicoDSName)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -454,11 +454,11 @@ func TestCNIModule_Remediate_UnreadyCalicoPod(t *testing.T) {
 	// Daemonset indicating 1 desired, 0 ready
 	ds := &unstructured.Unstructured{}
 	ds.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "apps",
+		Group:   appsGroup,
 		Version: "v1",
-		Kind:    "DaemonSet",
+		Kind:    kindDaemonSet,
 	})
-	ds.SetName("calico-node")
+	ds.SetName(testCalicoDSName)
 	ds.SetNamespace(testNamespaceKubeSystem)
 	_ = unstructured.SetNestedField(ds.Object, int64(1), "status", "desiredNumberScheduled")
 	_ = unstructured.SetNestedField(ds.Object, int64(0), "status", "numberReady")

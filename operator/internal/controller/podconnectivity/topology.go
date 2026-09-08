@@ -17,7 +17,7 @@ limitations under the License.
 package podconnectivity
 
 import (
-	"sort"
+	"slices"
 
 	corev1 "k8s.io/api/core/v1"
 )
@@ -40,7 +40,7 @@ type RingTopology struct {
 // BuildRingTopology constructs a deterministic O(N) ring topology from worker nodes.
 // For N nodes: Node[i] -> Node[(i+1)%N] (Forward) and Node[i] -> Node[(i-1+N)%N] (Reverse).
 func BuildRingTopology(nodeList []corev1.Node) RingTopology {
-	var nodeNames []string
+	nodeNames := make([]string, 0, len(nodeList))
 	nodeIPMap := make(map[string]string)
 
 	for _, n := range nodeList {
@@ -59,7 +59,7 @@ func BuildRingTopology(nodeList []corev1.Node) RingTopology {
 	}
 
 	// Sort lexicographically for deterministic ring order across all reconciliations
-	sort.Strings(nodeNames)
+	slices.Sort(nodeNames)
 
 	n := len(nodeNames)
 	if n < 2 {
@@ -70,7 +70,7 @@ func BuildRingTopology(nodeList []corev1.Node) RingTopology {
 	}
 
 	var edges []RingEdge
-	for i := 0; i < n; i++ {
+	for i := range n {
 		source := nodeNames[i]
 		nextIndex := (i + 1) % n
 		target := nodeNames[nextIndex]

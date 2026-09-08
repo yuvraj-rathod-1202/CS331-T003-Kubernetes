@@ -33,6 +33,20 @@ import (
 	"CS331-CN-Project-1/operator/pkg/module"
 )
 
+const (
+	defaultNamespace           = "default"
+	anchorGateway              = "gateway"
+	severityCritical           = "critical"
+	severityWarning            = "warning"
+	severityInfo               = "info"
+	defaultCalicoDaemonSetName = "calico-node"
+	kubeSystemNamespace        = "kube-system"
+	networkDegradedTaintKey    = "network-degraded"
+	actionNodeIsolation        = "node_isolation"
+	actionCNIRestart           = "cni_restart"
+	componentCNI               = "CNI"
+)
+
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups="",resources=nodes/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;delete
@@ -87,7 +101,7 @@ func (m *PodConnectivityModule) Check(ctx context.Context, spec *remediationv1al
 
 	m.targetNamespace = spec.PodConnectivity.TargetNamespace
 	if m.targetNamespace == "" {
-		m.targetNamespace = "default"
+		m.targetNamespace = defaultNamespace
 	}
 
 	m.activePolicy = &spec.PodConnectivity.RemediationPolicy
@@ -156,7 +170,7 @@ func (m *PodConnectivityModule) Check(ctx context.Context, spec *remediationv1al
 		anchorSuccess := m.pingIP(ctx, pod, targetGateway)
 		anchorProbes = append(anchorProbes, AnchorProbeResult{
 			NodeName:   node,
-			AnchorName: "gateway",
+			AnchorName: anchorGateway,
 			Success:    anchorSuccess,
 		})
 	}
@@ -243,7 +257,7 @@ func (m *PodConnectivityModule) Evaluate(ctx context.Context, checkResult *modul
 			IsHealthy:        false,
 			NeedsRemediation: false,
 			Reason:           "Check error: " + checkResult.Err.Error(),
-			Severity:         "warning",
+			Severity:         severityWarning,
 		}, nil
 	}
 
@@ -259,7 +273,7 @@ func (m *PodConnectivityModule) Evaluate(ctx context.Context, checkResult *modul
 			IsHealthy:        true,
 			NeedsRemediation: false,
 			Reason:           "Pod-to-pod network connectivity is healthy",
-			Severity:         "info",
+			Severity:         severityInfo,
 		}, nil
 	}
 
@@ -267,7 +281,7 @@ func (m *PodConnectivityModule) Evaluate(ctx context.Context, checkResult *modul
 	reason, _ := checkResult.Signals["reason"].(string)
 	severity, _ := checkResult.Signals["severity"].(string)
 	if severity == "" {
-		severity = "critical"
+		severity = severityCritical
 	}
 
 	threshold := m.failureThreshold

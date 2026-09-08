@@ -30,22 +30,29 @@ import (
 	remediationv1alpha1 "CS331-CN-Project-1/operator/api/v1alpha1"
 )
 
+const (
+	testNodeA = "node-a"
+	testNodeB = "node-b"
+	testNodeC = "node-c"
+	testNode2 = "node-2"
+)
+
 func TestBuildRingTopology(t *testing.T) {
 	nodes := []corev1.Node{
 		{
-			ObjectMeta: metav1.ObjectMeta{Name: "node-c"},
+			ObjectMeta: metav1.ObjectMeta{Name: testNodeC},
 			Status: corev1.NodeStatus{
 				Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "10.0.0.3"}},
 			},
 		},
 		{
-			ObjectMeta: metav1.ObjectMeta{Name: "node-a"},
+			ObjectMeta: metav1.ObjectMeta{Name: testNodeA},
 			Status: corev1.NodeStatus{
 				Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "10.0.0.1"}},
 			},
 		},
 		{
-			ObjectMeta: metav1.ObjectMeta{Name: "node-b"},
+			ObjectMeta: metav1.ObjectMeta{Name: testNodeB},
 			Status: corev1.NodeStatus{
 				Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "10.0.0.2"}},
 			},
@@ -55,7 +62,7 @@ func TestBuildRingTopology(t *testing.T) {
 	ring := BuildRingTopology(nodes)
 
 	// Verify lexicographical order
-	expectedNodes := []string{"node-a", "node-b", "node-c"}
+	expectedNodes := []string{testNodeA, testNodeB, testNodeC}
 	for i, name := range ring.Nodes {
 		if name != expectedNodes[i] {
 			t.Errorf("expected node %d to be %s, got %s", i, expectedNodes[i], name)
@@ -68,21 +75,21 @@ func TestBuildRingTopology(t *testing.T) {
 	}
 
 	// Forward edge: node-a -> node-b
-	if ring.Edges[0].SourceNode != "node-a" || ring.Edges[0].TargetNode != "node-b" {
+	if ring.Edges[0].SourceNode != testNodeA || ring.Edges[0].TargetNode != testNodeB {
 		t.Errorf("expected edge 0 to be node-a -> node-b, got %s -> %s", ring.Edges[0].SourceNode, ring.Edges[0].TargetNode)
 	}
 }
 
 func TestTriangulate_Tier1_LocalCNIFailure(t *testing.T) {
 	localProbes := map[string]LocalProbeResult{
-		"node-a": {NodeName: "node-a", Success: false}, // Local canary fails
-		"node-b": {NodeName: "node-b", Success: true},
+		testNodeA: {NodeName: testNodeA, Success: false}, // Local canary fails
+		testNodeB: {NodeName: testNodeB, Success: true},
 	}
 	ringProbes := []EdgeProbeResult{
-		{SourceNode: "node-a", TargetNode: "node-b", Success: true}, // External works!
+		{SourceNode: testNodeA, TargetNode: testNodeB, Success: true}, // External works!
 	}
 	anchorProbes := []AnchorProbeResult{
-		{NodeName: "node-a", AnchorName: "gateway", Success: true},
+		{NodeName: testNodeA, AnchorName: anchorGateway, Success: true},
 	}
 
 	decision := Triangulate(localProbes, ringProbes, anchorProbes)
@@ -93,29 +100,29 @@ func TestTriangulate_Tier1_LocalCNIFailure(t *testing.T) {
 	if decision.FailureType != FailureTypeLocalCNI {
 		t.Errorf("expected FailureType %s, got %s", FailureTypeLocalCNI, decision.FailureType)
 	}
-	if decision.FaultyNode != "node-a" {
+	if decision.FaultyNode != testNodeA {
 		t.Errorf("expected faulty node to be node-a, got %s", decision.FaultyNode)
 	}
-	if decision.RecommendedAction != "cni_restart" {
+	if decision.RecommendedAction != actionCNIRestart {
 		t.Errorf("expected cni_restart action, got %s", decision.RecommendedAction)
 	}
 }
 
 func TestTriangulate_Tier2_TargetIngressDead(t *testing.T) {
 	localProbes := map[string]LocalProbeResult{
-		"node-a": {NodeName: "node-a", Success: true},
-		"node-b": {NodeName: "node-b", Success: true},
-		"node-c": {NodeName: "node-c", Success: true},
+		testNodeA: {NodeName: testNodeA, Success: true},
+		testNodeB: {NodeName: testNodeB, Success: true},
+		testNodeC: {NodeName: testNodeC, Success: true},
 	}
 	// All nodes fail to reach node-b
 	ringProbes := []EdgeProbeResult{
-		{SourceNode: "node-a", TargetNode: "node-b", Success: false},
-		{SourceNode: "node-c", TargetNode: "node-b", Success: false},
-		{SourceNode: "node-a", TargetNode: "node-c", Success: true},
+		{SourceNode: testNodeA, TargetNode: testNodeB, Success: false},
+		{SourceNode: testNodeC, TargetNode: testNodeB, Success: false},
+		{SourceNode: testNodeA, TargetNode: testNodeC, Success: true},
 	}
 	anchorProbes := []AnchorProbeResult{
-		{NodeName: "node-a", AnchorName: "gateway", Success: true},
-		{NodeName: "node-b", AnchorName: "gateway", Success: true},
+		{NodeName: testNodeA, AnchorName: anchorGateway, Success: true},
+		{NodeName: testNodeB, AnchorName: anchorGateway, Success: true},
 	}
 
 	decision := Triangulate(localProbes, ringProbes, anchorProbes)
@@ -123,23 +130,23 @@ func TestTriangulate_Tier2_TargetIngressDead(t *testing.T) {
 	if decision.FailureType != FailureTypeNodeIngress {
 		t.Errorf("expected FailureType %s, got %s", FailureTypeNodeIngress, decision.FailureType)
 	}
-	if decision.FaultyNode != "node-b" {
+	if decision.FaultyNode != testNodeB {
 		t.Errorf("expected faulty node node-b, got %s", decision.FaultyNode)
 	}
 }
 
 func TestTriangulate_Tier3_AnchorCorroboration(t *testing.T) {
 	localProbes := map[string]LocalProbeResult{
-		"node-a": {NodeName: "node-a", Success: true},
-		"node-b": {NodeName: "node-b", Success: true},
+		testNodeA: {NodeName: testNodeA, Success: true},
+		testNodeB: {NodeName: testNodeB, Success: true},
 	}
 	// node-a cannot reach node-b
 	ringProbes := []EdgeProbeResult{
-		{SourceNode: "node-a", TargetNode: "node-b", Success: false},
+		{SourceNode: testNodeA, TargetNode: testNodeB, Success: false},
 	}
 	// node-a CAN reach gateway (proving physical NIC is alive)
 	anchorProbes := []AnchorProbeResult{
-		{NodeName: "node-a", AnchorName: "gateway", Success: true},
+		{NodeName: testNodeA, AnchorName: anchorGateway, Success: true},
 	}
 
 	decision := Triangulate(localProbes, ringProbes, anchorProbes)
@@ -148,7 +155,7 @@ func TestTriangulate_Tier3_AnchorCorroboration(t *testing.T) {
 	if decision.FailureType != FailureTypeTunnelCrash && decision.FailureType != FailureTypeNodeIngress {
 		t.Errorf("expected TunnelCrash or NodeIngress, got %s", decision.FailureType)
 	}
-	if decision.FaultyNode != "node-a" && decision.FaultyNode != "node-b" {
+	if decision.FaultyNode != testNodeA && decision.FaultyNode != testNodeB {
 		t.Errorf("expected faulty node node-a or node-b, got %s", decision.FaultyNode)
 	}
 }
@@ -160,10 +167,10 @@ func TestRemediator_Tier1_CNIRestart(t *testing.T) {
 	cniPod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "calico-node-12345",
-			Namespace: "kube-system",
+			Namespace: kubeSystemNamespace,
 		},
 		Spec: corev1.PodSpec{
-			NodeName: "node-2",
+			NodeName: testNode2,
 		},
 	}
 
@@ -171,16 +178,16 @@ func TestRemediator_Tier1_CNIRestart(t *testing.T) {
 	remediator := NewRemediator(client)
 
 	decision := &TriangulationDecision{
-		FaultyNode:        "node-2",
-		RecommendedAction: "cni_restart",
+		FaultyNode:        testNode2,
+		RecommendedAction: actionCNIRestart,
 	}
 
 	policy := &remediationv1alpha1.RemediationPolicySpec{
 		AutoRemediationEnabled: true,
 		CNISubsystem: remediationv1alpha1.CNISubsystemRemediation{
 			Enabled:            true,
-			DaemonSetName:      "calico-node",
-			Namespace:          "kube-system",
+			DaemonSetName:      defaultCalicoDaemonSetName,
+			Namespace:          kubeSystemNamespace,
 			MaxRestartAttempts: 2,
 		},
 	}
@@ -193,8 +200,8 @@ func TestRemediator_Tier1_CNIRestart(t *testing.T) {
 		t.Fatalf("expected remediation to succeed")
 	}
 
-	if remediator.RestartAttempts["node-2"] != 1 {
-		t.Errorf("expected restart attempts to be 1, got %d", remediator.RestartAttempts["node-2"])
+	if remediator.RestartAttempts[testNode2] != 1 {
+		t.Errorf("expected restart attempts to be 1, got %d", remediator.RestartAttempts[testNode2])
 	}
 
 	t.Logf("Action message: %s", actionMsg)
@@ -206,7 +213,7 @@ func TestRemediator_Tier2_NodeIsolation(t *testing.T) {
 
 	node := &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "node-2",
+			Name: testNode2,
 		},
 		Spec: corev1.NodeSpec{
 			Unschedulable: false,
@@ -217,15 +224,15 @@ func TestRemediator_Tier2_NodeIsolation(t *testing.T) {
 	remediator := NewRemediator(client)
 
 	decision := &TriangulationDecision{
-		FaultyNode:        "node-2",
-		RecommendedAction: "node_isolation",
+		FaultyNode:        testNode2,
+		RecommendedAction: actionNodeIsolation,
 	}
 
 	policy := &remediationv1alpha1.RemediationPolicySpec{
 		AutoRemediationEnabled: true,
 		NodeIsolation: remediationv1alpha1.NodeIsolationRemediation{
 			TaintNode:   true,
-			TaintKey:    "network-degraded",
+			TaintKey:    networkDegradedTaintKey,
 			TaintValue:  "true",
 			TaintEffect: "NoSchedule",
 			CordonNode:  true,
@@ -241,7 +248,7 @@ func TestRemediator_Tier2_NodeIsolation(t *testing.T) {
 	}
 
 	updatedNode := &corev1.Node{}
-	_ = client.Get(context.Background(), types.NamespacedName{Name: "node-2"}, updatedNode)
+	_ = client.Get(context.Background(), types.NamespacedName{Name: testNode2}, updatedNode)
 
 	if !updatedNode.Spec.Unschedulable {
 		t.Errorf("expected node to be cordoned (unschedulable = true)")
@@ -249,7 +256,7 @@ func TestRemediator_Tier2_NodeIsolation(t *testing.T) {
 
 	hasTaint := false
 	for _, taint := range updatedNode.Spec.Taints {
-		if taint.Key == "network-degraded" && taint.Effect == corev1.TaintEffectNoSchedule {
+		if taint.Key == networkDegradedTaintKey && taint.Effect == corev1.TaintEffectNoSchedule {
 			hasTaint = true
 			break
 		}
@@ -264,15 +271,15 @@ func TestRemediator_Tier3_EscalationToDrain(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	node := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{Name: "node-2"},
+		ObjectMeta: metav1.ObjectMeta{Name: testNode2},
 	}
 	appPod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "frontend-app",
-			Namespace: "default",
+			Namespace: defaultNamespace,
 		},
 		Spec: corev1.PodSpec{
-			NodeName: "node-2",
+			NodeName: testNode2,
 		},
 	}
 
@@ -280,11 +287,11 @@ func TestRemediator_Tier3_EscalationToDrain(t *testing.T) {
 	remediator := NewRemediator(client)
 
 	// Simulate that node-2 has already failed 2 CNI restarts
-	remediator.RestartAttempts["node-2"] = 2
+	remediator.RestartAttempts[testNode2] = 2
 
 	decision := &TriangulationDecision{
-		FaultyNode:        "node-2",
-		RecommendedAction: "cni_restart",
+		FaultyNode:        testNode2,
+		RecommendedAction: actionCNIRestart,
 	}
 
 	policy := &remediationv1alpha1.RemediationPolicySpec{
@@ -328,7 +335,7 @@ func TestPodConnectivityModule_FullPipeline(t *testing.T) {
 		},
 	}
 	node2 := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{Name: "node-2"},
+		ObjectMeta: metav1.ObjectMeta{Name: testNode2},
 		Status: corev1.NodeStatus{
 			Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "10.0.0.2"}},
 		},
@@ -336,10 +343,10 @@ func TestPodConnectivityModule_FullPipeline(t *testing.T) {
 	cniPod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "calico-node-abc",
-			Namespace: "kube-system",
+			Namespace: kubeSystemNamespace,
 		},
 		Spec: corev1.PodSpec{
-			NodeName: "node-2",
+			NodeName: testNode2,
 		},
 	}
 
@@ -352,7 +359,7 @@ func TestPodConnectivityModule_FullPipeline(t *testing.T) {
 	spec := &remediationv1alpha1.NetworkRemediationSpec{
 		PodConnectivity: remediationv1alpha1.PodConnectivitySpec{
 			Enabled:         true,
-			TargetNamespace: "default",
+			TargetNamespace: defaultNamespace,
 			CheckPolicy: remediationv1alpha1.CheckPolicySpec{
 				Topology: "ring",
 			},
@@ -360,8 +367,8 @@ func TestPodConnectivityModule_FullPipeline(t *testing.T) {
 				AutoRemediationEnabled: true,
 				CNISubsystem: remediationv1alpha1.CNISubsystemRemediation{
 					Enabled:       true,
-					DaemonSetName: "calico-node",
-					Namespace:     "kube-system",
+					DaemonSetName: defaultCalicoDaemonSetName,
+					Namespace:     kubeSystemNamespace,
 				},
 			},
 		},

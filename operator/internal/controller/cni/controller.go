@@ -56,6 +56,8 @@ const (
 
 	kubeSystemNamespace = "kube-system"
 	calicoCRDGroup      = "crd.projectcalico.org"
+	appsGroup           = "apps"
+	kindDaemonSet       = "DaemonSet"
 	severityCritical    = "critical"
 	severityWarning     = "warning"
 	severityNone        = "none"
@@ -186,9 +188,9 @@ func (m *CNIModule) Check(
 func (m *CNIModule) checkCalicoDaemonSet(ctx context.Context, ns, dsName string) ([]string, error) {
 	ds := &unstructured.Unstructured{}
 	ds.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "apps",
+		Group:   appsGroup,
 		Version: "v1",
-		Kind:    "DaemonSet",
+		Kind:    kindDaemonSet,
 	})
 	if err := m.Client.Get(ctx, types.NamespacedName{Namespace: ns, Name: dsName}, ds); err != nil {
 		return nil, fmt.Errorf("get DaemonSet %s/%s: %w", ns, dsName, err)
@@ -383,10 +385,7 @@ func (m *CNIModule) checkIPAMUsage(ctx context.Context) (map[string]float64, []s
 			continue
 		}
 
-		free := len(unallocated)
-		if free > total {
-			free = total
-		}
+		free := min(len(unallocated), total)
 		used := total - free
 
 		pct := float64(used) / float64(total) * 100

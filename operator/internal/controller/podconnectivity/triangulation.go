@@ -102,10 +102,10 @@ func Triangulate(
 					IsHealthy:         false,
 					FailureType:       FailureTypeLocalCNI,
 					FaultyNode:        node,
-					FaultyComponent:   "CNI",
-					RecommendedAction: "cni_restart",
+					FaultyComponent:   componentCNI,
+					RecommendedAction: actionCNIRestart,
 					Reason:            fmt.Sprintf("Local CNI probe failed on node %s while external egress is operational", node),
-					Severity:          "critical",
+					Severity:          severityCritical,
 				}
 			}
 		}
@@ -117,7 +117,7 @@ func Triangulate(
 			IsHealthy:         true,
 			FailureType:       FailureTypeNone,
 			Reason:            "No inter-node probes executed or single node cluster",
-			Severity:          "info",
+			Severity:          severityInfo,
 			RecommendedAction: "none",
 		}
 	}
@@ -145,7 +145,7 @@ func Triangulate(
 			IsHealthy:         true,
 			FailureType:       FailureTypeNone,
 			Reason:            "All inter-node ring probes are healthy",
-			Severity:          "info",
+			Severity:          severityInfo,
 			RecommendedAction: "none",
 		}
 	}
@@ -157,10 +157,10 @@ func Triangulate(
 				IsHealthy:         false,
 				FailureType:       FailureTypeNodeIngress,
 				FaultyNode:        target,
-				FaultyComponent:   "CNI",
-				RecommendedAction: "cni_restart",
+				FaultyComponent:   componentCNI,
+				RecommendedAction: actionCNIRestart,
 				Reason:            fmt.Sprintf("All peer nodes failed to reach node %s (Ingress/Tunnel failure)", target),
-				Severity:          "critical",
+				Severity:          severityCritical,
 			}
 		}
 	}
@@ -183,10 +183,10 @@ func Triangulate(
 					IsHealthy:         false,
 					FailureType:       FailureTypeTunnelCrash,
 					FaultyNode:        source,
-					FaultyComponent:   "CNI",
-					RecommendedAction: "cni_restart",
+					FaultyComponent:   componentCNI,
+					RecommendedAction: actionCNIRestart,
 					Reason:            fmt.Sprintf("Node %s can reach gateway but lost cross-node overlay connectivity", source),
-					Severity:          "critical",
+					Severity:          severityCritical,
 				}
 			}
 
@@ -195,9 +195,9 @@ func Triangulate(
 				FailureType:       FailureTypeNodeEgress,
 				FaultyNode:        source,
 				FaultyComponent:   "NIC",
-				RecommendedAction: "node_isolation",
+				RecommendedAction: actionNodeIsolation,
 				Reason:            fmt.Sprintf("Node %s cannot reach any peer nodes or external anchors (Total Egress failure)", source),
-				Severity:          "critical",
+				Severity:          severityCritical,
 			}
 		}
 	}
@@ -208,9 +208,9 @@ func Triangulate(
 		IsHealthy:         false,
 		FailureType:       FailureTypeAsymmetricPath,
 		FaultyNode:        firstFailure.TargetNode,
-		FaultyComponent:   "CNI",
-		RecommendedAction: "cni_restart",
+		FaultyComponent:   componentCNI,
+		RecommendedAction: actionCNIRestart,
 		Reason:            fmt.Sprintf("Asymmetric route/tunnel failure detected between %s and %s", firstFailure.SourceNode, firstFailure.TargetNode),
-		Severity:          "warning",
+		Severity:          severityWarning,
 	}
 }
