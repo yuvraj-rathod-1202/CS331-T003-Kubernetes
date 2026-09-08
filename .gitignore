@@ -17,6 +17,8 @@ cover.out
 # Go workspace and environment
 go.work
 go.work.sum
+/.gocache
+.gopath/
 
 # Kubernetes and secrets
 *.kubeconfig
@@ -40,3 +42,7 @@ desktop.ini
 *.log
 tmp/
 scratch/
+
+# Miscellaneous
+/.agents
+/graphify-out

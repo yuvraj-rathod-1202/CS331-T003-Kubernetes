@@ -10,6 +10,8 @@ spec:
     enabled: true
   networkPolicy:
     enabled: true
+    autoHeal: true
+    cooldownSeconds: 60
   podConnectivity:
     enabled: true
     targetNamespace: "default"

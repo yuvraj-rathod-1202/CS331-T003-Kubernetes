@@ -58,14 +58,15 @@ operator/
 │   ├── networkpolicy/                   # NetworkPolicy module
 │   └── podconnectivity/                 # PodConnectivity module
 ├── docs/
-│   └── architecture.md                  # Architecture guide (READ THIS FIRST)
+│   ├── architecture.md                  # Architecture guide (READ THIS FIRST)
+│   └── coredns-remediation.md           # CoreDNS Failure Modes & Remediation Policy Guide
 └── config/
     ├── crd/bases/                       # Generated CRD YAML
     ├── rbac/                            # Generated RBAC
     └── samples/                         # Sample CR manifests
 ```
 
-See [docs/architecture.md](docs/architecture.md) for the full architecture explanation and how to implement your module.
+See [docs/architecture.md](docs/architecture.md) and [docs/coredns-remediation.md](docs/coredns-remediation.md) for architecture explanation and CoreDNS remediation workflows.
 
 ## Development Workflow
 
