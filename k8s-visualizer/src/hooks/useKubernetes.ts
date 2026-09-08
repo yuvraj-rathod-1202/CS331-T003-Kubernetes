@@ -1,0 +1,314 @@
+import { useState, useEffect, useCallback } from 'react';
+
+export interface K8sNode {
+  name: string;
+  status: string;
+}
+
+export interface K8sPod {
+  name: string;
+  namespace: string;
+  nodeName: string;
+  status: string;
+  appLabel: string;
+  isCNI: boolean;
+  isCoreDNS: boolean;
+}
+
+export interface OperatorStatus {
+  cni: { healthy: boolean, enabled: boolean, message?: string };
+  coreDNS: { healthy: boolean, enabled: boolean, message?: string };
+  networkPolicy: { healthy: boolean, enabled: boolean, message?: string };
+  podConnectivity: { healthy: boolean, enabled: boolean, message?: string };
+}
+
+export function useKubernetes() {
+  const [nodes, setNodes] = useState<K8sNode[]>([]);
+  const [pods, setPods] = useState<K8sPod[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [operatorStatus, setOperatorStatus] = useState<OperatorStatus | null>(null);
+
+  const fetchClusterState = useCallback(async () => {
+    try {
+      const nodesRes = await fetch('/api/v1/nodes');
+      if (!nodesRes.ok) throw new Error('Failed to fetch nodes');
+      const nodesData = await nodesRes.json();
+      
+      const parsedNodes: K8sNode[] = nodesData.items.map((n: any) => ({
+        name: n.metadata.name,
+        status: n.status.conditions.find((c: any) => c.type === 'Ready')?.status === 'True' ? 'Ready' : 'NotReady',
+      }));
+
+      const podsRes = await fetch('/api/v1/pods');
+      if (!podsRes.ok) throw new Error('Failed to fetch pods');
+      const podsData = await podsRes.json();
+
+      const parsedPods: K8sPod[] = podsData.items
+        .filter((p: any) => {
+          const ns = p.metadata.namespace;
+          const name = p.metadata.name;
+          const isDefault = ns === 'default';
+          const isSystemCNI = (ns === 'kube-system' || ns === 'calico-system') && 
+                              (name.includes('calico-node') || name.includes('kindnet') || name.includes('flannel'));
+          const isCoreDNS = ns === 'kube-system' && name.includes('coredns');
+          return isDefault || isSystemCNI || isCoreDNS;
+        })
+        .map((p: any) => {
+          let status = p.status.phase;
+          if (p.metadata.deletionTimestamp) {
+            status = 'Terminating';
+          } else if (p.status.conditions?.some((c: any) => c.type === 'Ready' && c.status === 'False')) {
+            status = 'NotReady';
+          }
+          
+          let appLabel = p.metadata.labels?.app || p.metadata.labels?.run || p.metadata.labels?.['k8s-app'];
+          if (!appLabel) {
+            const parts = p.metadata.name.split('-');
+            if (parts.length >= 3) {
+              appLabel = parts.slice(0, -2).join('-');
+            } else {
+              appLabel = p.metadata.name;
+            }
+          }
+          
+          return {
+            name: p.metadata.name,
+            namespace: p.metadata.namespace,
+            nodeName: p.spec.nodeName || 'unassigned',
+            status: status,
+            appLabel: appLabel,
+            isCNI: (p.metadata.namespace === 'kube-system' || p.metadata.namespace === 'calico-system') && p.metadata.name.includes('calico-node'),
+            isCoreDNS: p.metadata.namespace === 'kube-system' && p.metadata.name.includes('coredns'),
+          };
+        });
+
+      setNodes(parsedNodes);
+      setPods(parsedPods);
+
+      // Fetch Operator Status
+      try {
+        const crdRes = await fetch('/apis/remediation.cn-operator.yuvraj-rathod-1202.github.io/v1alpha1/networkremediations/networkremediation-sample');
+        if (crdRes.ok) {
+          const crdData = await crdRes.json();
+          if (crdData.status) {
+             setOperatorStatus({
+               cni: crdData.status.cni || { healthy: false, enabled: false },
+               coreDNS: crdData.status.coreDNS || { healthy: false, enabled: false },
+               networkPolicy: crdData.status.networkPolicy || { healthy: false, enabled: false },
+               podConnectivity: crdData.status.podConnectivity || { healthy: false, enabled: false }
+             });
+          }
+        }
+      } catch (crdErr) {
+        console.warn("Operator CRD not found or reachable", crdErr);
+      }
+
+      setError(null);
+    } catch (err: any) {
+      console.error(err);
+      setError('Could not connect to Kubernetes API. Make sure kubectl proxy is running.');
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchClusterState();
+    const interval = setInterval(fetchClusterState, 1000);
+    return () => clearInterval(interval);
+  }, [fetchClusterState]);
+
+  // K8s API Wrappers for Experiments
+  const deletePod = async (namespace: string, name: string) => {
+    const res = await fetch(`/api/v1/namespaces/${namespace}/pods/${name}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error(await res.text());
+    return `kubectl delete pod ${name} -n ${namespace}`;
+  };
+
+  const scaleDeployment = async (namespace: string, name: string, replicas: number) => {
+    const patch = [{ op: 'replace', path: '/spec/replicas', value: replicas }];
+    const res = await fetch(`/apis/apps/v1/namespaces/${namespace}/deployments/${name}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json-patch+json' },
+      body: JSON.stringify(patch)
+    });
+    if (!res.ok) throw new Error(await res.text());
+    return `kubectl scale deployment ${name} -n ${namespace} --replicas=${replicas}`;
+  };
+
+  const applyNetworkPolicy = async (namespace: string, name: string, policy: any) => {
+    const check = await fetch(`/apis/networking.k8s.io/v1/namespaces/${namespace}/networkpolicies/${name}`);
+    if (check.ok) {
+       const res = await fetch(`/apis/networking.k8s.io/v1/namespaces/${namespace}/networkpolicies/${name}`, {
+         method: 'PUT',
+         headers: { 'Content-Type': 'application/json' },
+         body: JSON.stringify(policy)
+       });
+       if (!res.ok) throw new Error(await res.text());
+    } else {
+       const res = await fetch(`/apis/networking.k8s.io/v1/namespaces/${namespace}/networkpolicies`, {
+         method: 'POST',
+         headers: { 'Content-Type': 'application/json' },
+         body: JSON.stringify(policy)
+       });
+       if (!res.ok) throw new Error(await res.text());
+    }
+    return `kubectl apply -f [network-policy-manifest]`;
+  };
+
+  const deleteNetworkPolicy = async (namespace: string, name: string) => {
+    const res = await fetch(`/apis/networking.k8s.io/v1/namespaces/${namespace}/networkpolicies/${name}`, { method: 'DELETE' });
+    if (!res.ok && res.status !== 404) throw new Error(await res.text());
+    return `kubectl delete networkpolicy ${name} -n ${namespace}`;
+  };
+
+  const runNodeShellCommand = async (nodeName: string, command: string) => {
+    const podName = `node-shell-${Date.now()}`;
+    const podManifest = {
+      apiVersion: "v1",
+      kind: "Pod",
+      metadata: { name: podName, namespace: "default" },
+      spec: {
+        hostNetwork: true,
+        hostPID: true,
+        nodeName: nodeName,
+        containers: [{
+          name: "shell",
+          image: "alpine:3.18",
+          command: ["/bin/sh", "-c", `nsenter -t 1 -m -u -i -n -p -- ${command} && sleep 5`],
+          securityContext: { privileged: true }
+        }],
+        restartPolicy: "Never",
+        tolerations: [{ operator: "Exists" }]
+      }
+    };
+
+    const res = await fetch('/api/v1/namespaces/default/pods', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(podManifest)
+    });
+    
+    if (!res.ok) throw new Error(await res.text());
+    
+    setTimeout(() => {
+      fetch(`/api/v1/namespaces/default/pods/${podName}`, { method: 'DELETE' });
+    }, 8000);
+
+    return `kubectl run ${podName} --overrides='{"spec":{"hostNetwork":true,"hostPID":true,"nodeName":"${nodeName}"}}' --privileged -- nsenter -t 1 -m -u -i -n -p -- ${command}`;
+  };
+
+  const runCommandAndGetLogs = async (command: string, podLabel: string = "ping-job") => {
+    const jobName = `job-${Date.now()}`;
+    const jobManifest = {
+      apiVersion: "batch/v1",
+      kind: "Job",
+      metadata: { name: jobName, namespace: "default" },
+      spec: {
+        template: {
+          metadata: { labels: { app: podLabel } },
+          spec: {
+            containers: [{
+              name: "cmd",
+              image: "alpine:3.18",
+              command: ["/bin/sh", "-c", command]
+            }],
+            restartPolicy: "Never"
+          }
+        },
+        backoffLimit: 0
+      }
+    };
+
+    const res = await fetch('/apis/batch/v1/namespaces/default/jobs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(jobManifest)
+    });
+    
+    if (!res.ok) throw new Error(await res.text());
+
+    return new Promise<string>((resolve) => {
+      setTimeout(async () => {
+        try {
+          const podsRes = await fetch(`/api/v1/namespaces/default/pods?labelSelector=job-name=${jobName}`);
+          const podsData = await podsRes.json();
+          if (podsData.items && podsData.items.length > 0) {
+             const podName = podsData.items[0].metadata.name;
+             const logsRes = await fetch(`/api/v1/namespaces/default/pods/${podName}/log`);
+             const logs = await logsRes.text();
+             
+             fetch(`/apis/batch/v1/namespaces/default/jobs/${jobName}`, { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ propagationPolicy: "Background" }) });
+             
+             resolve(logs);
+          } else {
+             resolve("Command executed but could not fetch logs.");
+          }
+        } catch(e) {
+          resolve("Failed to fetch logs.");
+        }
+      }, 4000); // give it a few seconds to run ping -c 3
+    });
+  };
+
+  const deployCustomApp = async (appName: string, nodeName?: string) => {
+    try {
+      const deployment = {
+        apiVersion: 'apps/v1',
+        kind: 'Deployment',
+        metadata: { name: appName, namespace: 'default' },
+        spec: {
+          replicas: 1,
+          selector: { matchLabels: { app: appName } },
+          template: {
+            metadata: { labels: { app: appName } },
+            spec: {
+              ...(nodeName && { nodeSelector: { 'kubernetes.io/hostname': nodeName } }),
+              containers: [{
+                name: 'nginx',
+                image: 'nginx:alpine',
+                ports: [{ containerPort: 80 }]
+              }]
+            }
+          }
+        }
+      };
+
+      const res = await fetch('/apis/apps/v1/namespaces/default/deployments', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(deployment),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      await fetchClusterState();
+    } catch (err: any) {
+      setError(err.message);
+    }
+  };
+
+  const deleteCustomApp = async (appName: string) => {
+    try {
+      const res = await fetch(`/apis/apps/v1/namespaces/default/deployments/${appName}`, {
+        method: 'DELETE',
+      });
+      if (!res.ok) throw new Error(await res.text());
+      await fetchClusterState();
+    } catch (err: any) {
+      console.error(err);
+      setError(err.message);
+    }
+  };
+
+  return {
+    nodes,
+    pods,
+    error,
+    operatorStatus,
+    deletePod,
+    scaleDeployment,
+    applyNetworkPolicy,
+    deleteNetworkPolicy,
+    runNodeShellCommand,
+    runCommandAndGetLogs,
+    deployCustomApp,
+    deleteCustomApp,
+  };
+}
