@@ -161,23 +161,32 @@ if len(disabledPools) > 0 && (len(stuckPods) > 0 || hasIPAMStuck(stuckPods)) {
     }, nil
 }
 
-// 3. IPAM exhaustion / stuck workloads -> Plan: ActionEvictStuckPods
-if len(exhaustedPools) > 0 || len(stuckPods) > 0 {
-    m.pendingTarget = &remediationTarget{
-        actionType: ActionEvictStuckPods,
-        stuckPods:  stuckPods,
+// 3. IPAM threshold breached / pool exhaustion -> Plan: ActionEvictStuckPods with anti-churn throttling
+if len(exhaustedPools) > 0 || len(elevatedPools) > 0 || len(stuckPods) > 0 {
+    // Segregate actionable pods from workloads currently in eviction cooldown
+    if len(actionableStuckPods) > 0 {
+        m.pendingTarget = &remediationTarget{
+            actionType: ActionEvictStuckPods,
+            stuckPods:  actionableStuckPods,
+        }
+        return &module.EvalResult{
+            IsHealthy: false, NeedsRemediation: true, Severity: severity,
+            Reason: fmt.Sprintf("IPAM threshold breached/exhausted: evicting %d stuck pod(s)", len(actionableStuckPods)),
+        }, nil
+    } else if len(throttledStuckPods) > 0 {
+        // Workload was recently evicted and is recreating; suppress re-eviction to prevent ReplicaSet thrashing
+        return &module.EvalResult{
+            IsHealthy: false, NeedsRemediation: false, Severity: severity,
+            Reason: fmt.Sprintf("IPAM threshold breached: %d pod(s) waiting for IPs; eviction throttled to prevent ReplicaSet churn", len(throttledStuckPods)),
+        }, nil
     }
-    return &module.EvalResult{
-        IsHealthy: false, NeedsRemediation: true, Severity: severity,
-        Reason: "...",
-    }, nil
 }
 ```
 
 ---
 
 ### Step 3: `Remediate()` Phase - Targeted Branching Recovery
-In `Remediate(ctx context.Context, evalResult *module.EvalResult)` ([`controller.go#L506-L620`](../internal/controller/cni/controller.go#L506-L620)):
+In `Remediate(ctx context.Context, evalResult *module.EvalResult)` ([`controller.go#L560-L800`](../internal/controller/cni/controller.go)):
 
 The controller executes **only** the selective branch matching the detected failure via `switch actionType`:
 
@@ -201,10 +210,13 @@ case ActionReenableIPPool:
     }
 
 case ActionEvictStuckPods:
-    // TARGETED ACTION 3: Evict stuck workload pods only
+    // TARGETED ACTION 3: Evict stuck workload pods with workload cooldown tracking
+    now := time.Now()
     for _, sp := range stuckPods {
         pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: sp.Name, Namespace: sp.Namespace}}
-        _ = m.Client.Delete(ctx, pod)
+        if err := m.Client.Delete(ctx, pod); err == nil {
+            m.lastWorkloadEviction[sp.WorkloadKey] = now // Cooldown active for EvictionCooldownSeconds
+        }
     }
 }
 ```
@@ -213,11 +225,12 @@ case ActionEvictStuckPods:
 
 ## 4. Policy Summary Matrix
 
-| Failure Scenario | Signal Detected in Code | Evaluation Severity | Automated Remediation Function |
-|---|---|---|---|
-| **calico-node pod crash / BGP down** | `signalCalicoNodeUnready` | `critical` | `Client.Delete()` on unready `calico-node` pods |
-| **Disabled IPPool with stuck pods** | `signalDisabledIPPools` + `signalStuckPods` | `critical` | `Client.Patch()` setting `spec.disabled = false` |
-| **IPAM address pool exhaustion** | `signalIPAMExhaustedPools` (100% usage) | `critical` | `Client.Delete()` on stuck workload pods to reschedule |
+| Failure Scenario | Signal Detected in Code | Evaluation Severity | Automated Remediation Function | Anti-Churn Protection |
+|---|---|---|---|---|
+| **calico-node pod crash / BGP down** | `signalCalicoNodeUnready` | `critical` | `Client.Delete()` on unready `calico-node` pods | N/A (DaemonSet restart) |
+| **Disabled IPPool with stuck pods** | `signalDisabledIPPools` + `signalStuckPods` | `critical` | `Client.Patch()` setting `spec.disabled = false` | Unblocks IP allocation |
+| **IPAM address pool exhaustion** | `signalIPAMExhaustedPools` (100% usage) | `critical` | `Client.Delete()` on stuck workload pods | Cooldown per workload (`EvictionCooldownSeconds`) |
+| **IPAM usage above threshold** | `usageByPool >= ipamThresholdPercent` | `warning` | Alert emitted; evict stuck pods if any | Cooldown per workload to avoid ReplicaSet churn |
 | **Isolated sandbox creation timeout** | `signalStuckPods` (> 60s without IP) | `warning` | `Client.Delete()` on stuck pods for clean sandbox retry |
 | **Elevated IP pool usage (>= Threshold%)** | `signalIPAMUsageByPool >= IPAMUsageThresholdPercent` (default 80%) | `warning` | Emits capacity warning log (no disruptive restart). Configured via `spec.cni.ipamUsageThresholdPercent`. |
 | **Cluster healthy** | 0 unready, 0 stuck, usage < Threshold% | `none` | Updates status `Healthy = true`, sleeps until next cycle |

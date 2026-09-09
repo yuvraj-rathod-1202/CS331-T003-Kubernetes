@@ -59,6 +59,12 @@ spec:
                     default: true
                     description: Enabled toggles the CNI monitoring module.
                     type: boolean
+                  evictionCooldownSeconds:
+                    default: 180
+                    description: |-
+                      EvictionCooldownSeconds is the cooldown period (in seconds) during which the
+                      operator suppresses repeated evictions for the same workload to prevent churn.
+                    type: integer
                   ipamUsageThresholdPercent:
                     default: 80
                     description: |-

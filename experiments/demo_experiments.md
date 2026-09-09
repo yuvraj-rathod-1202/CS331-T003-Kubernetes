@@ -82,26 +82,25 @@ Open your browser at `http://localhost:5173`. You will see the cluster topology,
 
 ---
 
-## 2. Overview of the 12 Experiments
+## 2. Overview of Experiments
 
-| ID | Module | Experiment Name | Fault Injected | Native K8s Behavior | Operator Auto-Remediation |
-|---|---|---|---|---|---|
-| **E1** | **CNI** | `calico-node` Agent Crash | Delete `calico-node` pod on worker | Node marked `NotReady`; pods stuck | Restarts `calico-node` DaemonSet pod |
-| **E2** | **CNI** | IPAM Pool Exhaustion | Allocate all IPs in subnet pool | New pods stuck in `ContainerCreating` | Detects 100% IPAM usage; alerts & evicts stuck pods |
-| **E3** | **CNI** | IPPool Disabled | Set `spec.disabled: true` on IPPool | All new IP allocations fail cluster-wide | Patches IPPool `spec.disabled: false` |
-| **E4** | **CoreDNS** | Scale Replicas to Zero | `kubectl scale deployment coredns --replicas=0` | Cluster DNS completely down | Patches deployment replicas back to expected count (2) |
-| **E5** | **CoreDNS** | CPU Throttling Latency Spike | Set CoreDNS CPU limit to `5m` | DNS query latency spikes >1000ms | Detects latency breach; resets CPU limit to 100m |
-| **E6** | **CoreDNS** | Corrupted Upstream Forward | Point forward address to RFC 5737 bad IP | External domain resolution fails | Repairs Corefile ConfigMap & triggers rolling restart |
-| **E7** | **CoreDNS** | Pod `CrashLoopBackOff` | Inject invalid directive in Corefile | CoreDNS pods crash on startup | Reverts bad Corefile configuration & restarts pods |
-| **E8** | **NetPolicy** | Felix Agent Crash (Policy Drift) | Crash Felix while policy applied | K8s shows policy applied, but rules un-enforced | Restarts Felix agent; reprograms kernel iptables/ipset |
-| **E9** | **PodConn** | Local `veth` Interface Down | `ip link set vethXXXX down` | Pod appears `1/1 Ready`, but traffic drops | Tier 1 Triangulation: Restarts local CNI subsystem |
-| **E10**| **PodConn** | IPIP Tunnel Interface Crash | `ip link set tunl0 down` | Cross-node overlay pod traffic drops | Tier 2 Triangulation: Resets `tunl0` & CNI agent |
-| **E11**| **PodConn** | Host `iptables` FORWARD DROP | `iptables -I FORWARD -j DROP` | Silently drops forwarded pod packets | Ring prober fails; restarts CNI agent / taints node |
-| **E12**| **PodConn** | Inter-Node Overlay Break | Drop IPIP/VXLAN port between nodes | Pod ping times out across nodes | Pingmesh Ring Triangulation: Isolates path & heals link |
+| Module | Experiment Name | Fault Injected | Native K8s Behavior | Operator Auto-Remediation |
+|---|---|---|---|---|
+| **CNI** | `calico-node` Agent Crash | Delete `calico-node` pod on worker | Node marked `NotReady`; pods stuck | Restarts `calico-node` DaemonSet pod |
+| **CNI** | IPAM Pool Exhaustion | Allocate all IPs in subnet pool | New pods stuck in `ContainerCreating` | Detects IPAM threshold breach; alerts & evicts stuck pods with anti-churn cooldown |
+| **CNI** | IPPool Disabled | Set `spec.disabled: true` on IPPool | All new IP allocations fail cluster-wide | Patches IPPool `spec.disabled: false` |
+| **CoreDNS** | Scale Replicas to Zero | `kubectl scale deployment coredns --replicas=0` | Cluster DNS completely down | Patches deployment replicas back to expected count (2) |
+| **CoreDNS** | CPU Throttling Latency Spike | Set CoreDNS CPU limit to `5m` | DNS query latency spikes >1000ms | Detects latency breach; resets CPU limit to 100m |
+| **CoreDNS** | Corrupted Upstream Forward | Point forward address to RFC 5737 bad IP | External domain resolution fails | Repairs Corefile ConfigMap & triggers rolling restart |
+| **NetPolicy** | Felix Agent Crash (Policy Drift) | Crash Felix while policy applied | K8s shows policy applied, but rules un-enforced | Restarts Felix agent; reprograms kernel iptables/ipset |
+| **PodConn** | Local `veth` Interface Down | `ip link set vethXXXX down` | Pod appears `1/1 Ready`, but traffic drops | Tier 1 Triangulation: Restarts local CNI subsystem |
+| **PodConn** | IPIP Tunnel Interface Crash | `ip link set tunl0 down` | Cross-node overlay pod traffic drops | Tier 2 Triangulation: Resets `tunl0` & CNI agent |
+| **PodConn** | Host `iptables` FORWARD DROP | `iptables -I FORWARD -j DROP` | Silently drops forwarded pod packets | Ring prober fails; restarts CNI agent / taints node |
+| **PodConn** | Inter-Node Overlay Break | Drop IPIP/VXLAN port between nodes | Pod ping times out across nodes | Pingmesh Ring Triangulation: Isolates path & heals link |
 
 ---
 
-## 3. Detailed Step-by-Step Demo Flow for All 12 Experiments
+## 3. Detailed Step-by-Step Demo Flow
 
 ### Initial Setup & Baseline View
 1. Open the **k8s-visualizer** web app (`http://localhost:5173`).
@@ -110,9 +109,9 @@ Open your browser at `http://localhost:5173`. You will see the cluster topology,
 
 ---
 
-### Module 1: CNI Subsystem Experiments (E1 - E3)
+### Module 1: CNI Subsystem Experiments
 
-#### **Experiment E1: `calico-node` Agent Crash**
+#### **Experiment: `calico-node` Agent Crash**
 * **Goal**: Show that when a node's CNI agent crashes, new pods fail to schedule and the node becomes unready without native K8s auto-recovery.
 * **Demo Steps**:
   1. **Disable Operator** or show native behavior first: Click `[ Kill Calico Pod ]` on Node-2.
@@ -120,14 +119,14 @@ Open your browser at `http://localhost:5173`. You will see the cluster topology,
   3. **Enable Operator**: The operator's CNI Check phase detects `numberReady < desiredNumberScheduled`, evaluates `Severity: Critical`, deletes the unready CNI pod, triggering a fresh DaemonSet respawn.
   4. **Outcome**: Node returns to `Ready` status automatically within 30–45s.
 
-#### **Experiment E2: IPAM Pool Exhaustion**
+#### **Experiment: IPAM Pool Exhaustion**
 * **Goal**: Show that native Kubernetes scheduler has zero awareness of IP subnet capacity when IPAM pool is full.
 * **Demo Steps**:
   1. **Inject Fault**: Deploy pods until the `/28` IPPool has 0 free IPs remaining.
   2. **Observe Native K8s**: Subsequent pod creations stay stuck in `ContainerCreating` with warning event `FailedCreatePodSandBox: No IPs available in pools`.
-  3. **Operator Response**: The CNI module monitors IPAM block utilization, detects 100% capacity breach, updates the CR status to `Degraded`, and evicts stuck workload pods to force clean rescheduling while firing an alert.
+  3. **Operator Response**: The CNI module monitors IPAM block utilization, detects threshold/exhaustion breaches, updates CR status to `Degraded`, and evicts stuck workload pods while throttling re-evictions per workload (`EvictionCooldownSeconds`) to prevent ReplicaSet churn.
 
-#### **Experiment E3: IPPool Disabled (`spec.disabled: true`)**
+#### **Experiment: IPPool Disabled (`spec.disabled: true`)**
 * **Goal**: Show recovery from an inadvertently disabled Calico IPPool.
 * **Demo Steps**:
   1. **Inject Fault**: Run `kubectl patch ippool default-ipv4-ippool --type=merge -p '{"spec":{"disabled":true}}'`.
@@ -136,41 +135,34 @@ Open your browser at `http://localhost:5173`. You will see the cluster topology,
 
 ---
 
-### Module 2: CoreDNS Subsystem Experiments (E4 - E7)
+### Module 2: CoreDNS Subsystem Experiments
 
-#### **Experiment E4: Scale Replicas to Zero**
+#### **Experiment: Scale Replicas to Zero**
 * **Goal**: Demonstrate recovery when CoreDNS replicas are accidentally scaled to 0.
 * **Demo Steps**:
-  1. **Inject Fault**: Click `[ Scale CoreDNS to 0 ]` in the web app.
-  2. **Observe Native K8s**: All cluster DNS resolutions (`*.svc.cluster.local`) fail immediately. K8s respects desired state `replicas: 0`.
+  1. **Inject Fault**: Scale CoreDNS deployment down to 0 replicas (`kubectl scale deployment coredns -n kube-system --replicas=0`).
+  2. **Observe Native K8s**: Cluster DNS completely down. All inter-pod requests and external lookups fail immediately.
   3. **Operator Response**: CoreDNS Check phase flags `availableReplicas (0) < expectedReplicas (2)`. Operator automatically patches deployment replicas back to `2`.
 
-#### **Experiment E5: CPU Throttling Latency Spike ($\le$5m)**
+#### **Experiment: CPU Throttling Latency Spike ($\le$5m)**
 * **Goal**: Show detection and remediation of DNS query latency degradation caused by CPU starvation.
 * **Demo Steps**:
   1. **Inject Fault**: Patch CoreDNS deployment CPU limit to `5m` (`kubectl set resources deployment coredns -n kube-system --limits=cpu=5m`).
   2. **Observe Native K8s**: CoreDNS pods remain `Running (1/1 Ready)`, but DNS query duration spikes from ~2ms to >1000ms.
   3. **Operator Response**: CoreDNS Check phase measures average query duration over 1 min, evaluates metric breach (>150ms threshold), and resets CPU limits to baseline `100m`.
 
-#### **Experiment E6: Corrupted Upstream Forwarding**
+#### **Experiment: Corrupted Upstream Forwarding**
 * **Goal**: Demonstrate repair of corrupted external DNS forwarding in Corefile.
 * **Demo Steps**:
   1. **Inject Fault**: Edit `coredns` ConfigMap to forward external queries to unroutable IP `192.0.2.1` (RFC 5737).
   2. **Observe Native K8s**: Internal DNS works, but external name resolution (`ping google.com`) hangs and fails.
   3. **Operator Response**: Operator parses Corefile `forward` directives, detects RFC 5737 invalid upstream subnet, replaces it with fallback `/etc/resolv.conf`, and performs a rolling restart.
 
-#### **Experiment E7: Pod `CrashLoopBackOff` (Bad Corefile Plugin)**
-* **Goal**: Recover CoreDNS from an invalid plugin directive causing pod crash loops.
-* **Demo Steps**:
-  1. **Inject Fault**: Add invalid syntax to Corefile ConfigMap.
-  2. **Observe Native K8s**: CoreDNS pods enter `CrashLoopBackOff`.
-  3. **Operator Response**: Operator detects unready CoreDNS pods and invalid ConfigMap state, restores valid Corefile, and restarts pods.
-
 ---
 
-### Module 3: NetworkPolicy Enforcement Experiments (E8)
+### Module 3: NetworkPolicy Enforcement Experiments
 
-#### **Experiment E8: Felix Agent Crash (Silent Policy Drift)**
+#### **Experiment: Felix Agent Crash (Silent Policy Drift)**
 * **Goal**: Show that native Kubernetes leaves NetworkPolicies un-enforced when Calico's Felix agent crashes, whereas our operator restores enforcement.
 * **Demo Steps**:
   1. **Inject Fault**: Apply a `Deny-All` NetworkPolicy using `[ Deny All ]` button, then crash the Felix container (`calico-node`).
@@ -179,30 +171,30 @@ Open your browser at `http://localhost:5173`. You will see the cluster topology,
 
 ---
 
-### Module 4: Pod-to-Pod Connectivity Experiments (E9 - E12)
+### Module 4: Pod-to-Pod Connectivity Experiments
 
-#### **Experiment E9: Local `veth` Interface Down (Intra-Node Failure)**
+#### **Experiment: Local `veth` Interface Down (Intra-Node Failure)**
 * **Goal**: Isolate and fix local container virtual interface drops.
 * **Demo Steps**:
   1. **Inject Fault**: Run `ip link set vethXXXX down` inside host node shell.
   2. **Observe Native K8s**: Pod remains `1/1 Ready`, but local traffic drops.
   3. **Operator Response**: **Tier 1 Triangulation**: Operator local probe fails while external gateway anchors pass $\to$ Evaluates `FailureTypeLocalCNI` $\to$ Restarts local CNI agent.
 
-#### **Experiment E10: IPIP Tunnel Interface Crash (`tunl0` Down)**
+#### **Experiment: IPIP Tunnel Interface Crash (`tunl0` Down)**
 * **Goal**: Detect and recover broken overlay tunnels across nodes.
 * **Demo Steps**:
   1. **Inject Fault**: Run `ip link set tunl0 down` on Node-1.
   2. **Observe Native K8s**: Both nodes remain `Ready`, but cross-node pod traffic completely fails.
   3. **Operator Response**: **Tier 2 Triangulation**: Operator Pingmesh ring prober detects cross-node drop ($node_1 \not\to node_2$), isolates `tunl0` tunnel failure, and resets CNI overlay subsystem.
 
-#### **Experiment E11: Host `iptables` FORWARD DROP**
+#### **Experiment: Host `iptables` FORWARD DROP**
 * **Goal**: Recover from corrupted host-level packet forwarding rules.
 * **Demo Steps**:
   1. **Inject Fault**: Click `[ Drop IP-Tables ]` in web app (`iptables -I FORWARD -j DROP`).
   2. **Observe Native K8s**: Native K8s has zero visibility into host kernel iptables chains; pod traffic drops.
   3. **Operator Response**: Operator ring prober detects consecutive probe failures, triggers Tier 1 CNI restart, and if un-recovered, applies Tier 2 node taint (`network-degraded:NoSchedule`).
 
-#### **Experiment E12: Inter-Node Overlay Network Break**
+#### **Experiment: Inter-Node Overlay Network Break**
 * **Goal**: Demonstrate full Pingmesh $O(N)$ ring probing & 3-tier triangulation across multi-node topology.
 * **Demo Steps**:
   1. **Inject Fault**: Drop inter-node encapsulated traffic between `minikube` (Node-1) and `minikube-m02` (Node-2).

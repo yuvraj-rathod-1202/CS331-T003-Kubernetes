@@ -54,15 +54,6 @@ const CORRUPTED_UPSTREAM_COREFILE = `.:53 {
     loadbalance
 }`;
 
-const BAD_PLUGIN_COREFILE = `.:53 {
-    errors
-    invalid_plugin_directive_xyz
-    health
-    ready
-    kubernetes cluster.local in-addr.arpa ip6.arpa
-    forward . /etc/resolv.conf
-}`;
-
 export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorStatus, k8sApi, onOpenLogs }: ControlPanelProps) {
   const [newAppName, setNewAppName] = useState('');
   const [selectedNodeForDeploy, setSelectedNodeForDeploy] = useState<string>('');
@@ -78,10 +69,17 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
     }
   };
 
-  const handleDelete = () => {
+  const handleDeletePod = async () => {
     if (selectedPodObj && !selectedPodObj.isCNI && !selectedPodObj.isCoreDNS) {
-      onLog(`kubectl delete deployment ${selectedPodObj.appLabel} -n ${selectedPodObj.namespace}`, 'system');
-      k8sApi.deleteCustomApp(selectedPodObj.appLabel);
+      setIsProcessing(true);
+      try {
+        const cmd = await k8sApi.deletePod(selectedPodObj.namespace, selectedPodObj.name);
+        onLog(cmd, 'system');
+        onLog(`[Pod Deleted] Deleted pod ${selectedPodObj.name}.`, 'warning');
+      } catch (e: any) {
+        onLog(`Failed to delete pod: ${e.message}`, 'error');
+      }
+      setIsProcessing(false);
     }
   };
 
@@ -92,7 +90,7 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
     try {
       const cmd = await k8sApi.deletePod(selectedPodObj.namespace, selectedPodObj.name);
       onLog(cmd, 'system');
-      onLog(`[E1 CNI Crash] Killed CNI agent on node ${selectedPodObj.nodeName}. Watch for BGP route loss!`, 'warning');
+      onLog(`[CNI Crash] Killed CNI agent on node ${selectedPodObj.nodeName}. Watch for BGP route loss!`, 'warning');
     } catch (e: any) {
       onLog(`Failed: ${e.message}`, 'error');
     }
@@ -102,9 +100,16 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
   const exp2ExhaustIPAM = async () => {
     setIsProcessing(true);
     try {
-      onLog(`kubectl create deployment ipam-filler --image=nginx:alpine --replicas=20`, 'system');
-      await k8sApi.deployCustomApp('ipam-filler');
-      onLog(`[E2 IPAM Exhaustion] Scaled deployment to fill IPPool. Pods will become stuck in ContainerCreating!`, 'critical');
+      onLog(`1. Disabling default-ipv4-ippool...`, 'system');
+      await k8sApi.setIPPoolDisabled(true);
+
+      onLog(`2. Creating tiny /28 IPPool (14 usable IPs)...`, 'system');
+      await k8sApi.createTinyIPPool();
+
+      onLog(`3. Launching 20 replicas of ipam-filler...`, 'system');
+      await k8sApi.deployCustomApp('ipam-filler', undefined, 20);
+
+      onLog(`[IPAM Exhaustion] Pool exhausted! Surplus pods are now stuck in ContainerCreating with 'No IPs available in pools'.`, 'critical');
     } catch (e: any) {
       onLog(`Failed: ${e.message}`, 'error');
     }
@@ -114,9 +119,16 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
   const exp2CleanupIPAM = async () => {
     setIsProcessing(true);
     try {
-      onLog(`kubectl delete deployment ipam-filler`, 'system');
+      onLog(`1. Deleting deployment ipam-filler...`, 'system');
       await k8sApi.deleteCustomApp('ipam-filler');
-      onLog(`[E2 IPAM Cleanup] Cleaned up filler pods.`, 'success');
+
+      onLog(`2. Deleting tiny IPPool...`, 'system');
+      await k8sApi.deleteTinyIPPool();
+
+      onLog(`3. Re-enabling default-ipv4-ippool...`, 'system');
+      await k8sApi.setIPPoolDisabled(false);
+
+      onLog(`[IPAM Cleanup] Restored default IPPool and cleaned up filler pods.`, 'success');
     } catch (e: any) {
       onLog(`Note: ${e.message}`, 'info');
     }
@@ -129,9 +141,9 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
       const cmd = await k8sApi.setIPPoolDisabled(disable);
       onLog(cmd, 'system');
       if (disable) {
-        onLog(`[E3 IPPool Disabled] Patched IPPool spec.disabled = true. New IP allocations will fail!`, 'critical');
+        onLog(`[IPPool Disabled] Patched IPPool spec.disabled = true. New IP allocations will fail!`, 'critical');
       } else {
-        onLog(`[E3 IPPool Enabled] Re-enabled IPPool spec.disabled = false.`, 'success');
+        onLog(`[IPPool Enabled] Re-enabled IPPool spec.disabled = false.`, 'success');
       }
     } catch (e: any) {
       onLog(`Failed to patch IPPool: ${e.message}`, 'error');
@@ -139,16 +151,16 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
     setIsProcessing(false);
   };
 
-  // --- MODULE 2: CoreDNS Subsystem (E4 - E7) ---
+  // --- MODULE 2: CoreDNS Subsystem ---
   const exp4ScaleCoreDNS = async (replicas: number) => {
     setIsProcessing(true);
     try {
       const cmd = await k8sApi.scaleDeployment('kube-system', 'coredns', replicas);
       onLog(cmd, 'system');
       if (replicas === 0) {
-        onLog(`[E4 CoreDNS Scale 0] CoreDNS scaled to 0. All cluster DNS resolution will fail!`, 'critical');
+        onLog(`[CoreDNS Scale 0] CoreDNS scaled to 0. All cluster DNS resolution will fail!`, 'critical');
       } else {
-        onLog(`[E4 CoreDNS Scale Restore] Restored CoreDNS to ${replicas} replicas.`, 'success');
+        onLog(`[CoreDNS Scale Restore] Restored CoreDNS to ${replicas} replicas.`, 'success');
       }
     } catch (e: any) {
       onLog(`Failed to scale CoreDNS: ${e.message}`, 'error');
@@ -162,9 +174,9 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
       const cmd = await k8sApi.patchDeploymentResources('kube-system', 'coredns', throttle ? '5m' : null);
       onLog(cmd, 'system');
       if (throttle) {
-        onLog(`[E5 CPU Throttle] CoreDNS CPU limit set to 5m. Query latency will spike >1000ms!`, 'warning');
+        onLog(`[CPU Throttle] CoreDNS CPU limit set to 5m. Query latency will spike >1000ms!`, 'warning');
       } else {
-        onLog(`[E5 CPU Throttle] CoreDNS CPU limits restored.`, 'success');
+        onLog(`[CPU Throttle] CoreDNS CPU limits restored.`, 'success');
       }
     } catch (e: any) {
       onLog(`Failed to patch resources: ${e.message}`, 'error');
@@ -178,9 +190,9 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
       const cmd = await k8sApi.updateCoreDNSConfigMap(corrupt ? CORRUPTED_UPSTREAM_COREFILE : DEFAULT_COREFILE);
       onLog(cmd, 'system');
       if (corrupt) {
-        onLog(`[E6 Upstream Corrupt] Forward target set to 192.0.2.1. External DNS resolution will hang!`, 'critical');
+        onLog(`[Upstream Corrupt] Forward target set to 192.0.2.1. External DNS resolution will hang!`, 'critical');
       } else {
-        onLog(`[E6 Upstream Restored] Restored valid Corefile.`, 'success');
+        onLog(`[Upstream Restored] Restored valid Corefile.`, 'success');
       }
     } catch (e: any) {
       onLog(`Failed: ${e.message}`, 'error');
@@ -188,23 +200,7 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
     setIsProcessing(false);
   };
 
-  const exp7CrashLoop = async (crash: boolean) => {
-    setIsProcessing(true);
-    try {
-      const cmd = await k8sApi.updateCoreDNSConfigMap(crash ? BAD_PLUGIN_COREFILE : DEFAULT_COREFILE);
-      onLog(cmd, 'system');
-      if (crash) {
-        onLog(`[E7 Bad Plugin] Injected invalid directive into Corefile. CoreDNS pods will CrashLoop!`, 'critical');
-      } else {
-        onLog(`[E7 Corefile Restored] Restored valid Corefile.`, 'success');
-      }
-    } catch (e: any) {
-      onLog(`Failed: ${e.message}`, 'error');
-    }
-    setIsProcessing(false);
-  };
-
-  // --- MODULE 3: NetworkPolicy Enforcement (E8) ---
+  // --- MODULE 3: NetworkPolicy Enforcement ---
   const exp8FelixDrift = async () => {
     if (!selectedPodObj || selectedPodObj.isCNI || selectedPodObj.isCoreDNS) return;
     setIsProcessing(true);
@@ -220,7 +216,7 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
       };
       const cmd = await k8sApi.applyNetworkPolicy(selectedPodObj.namespace, 'deny-all-exp8', policy);
       onLog(cmd, 'system');
-      onLog(`[E8 Felix Drift] Applied Deny-All policy to ${selectedPodObj.appLabel}. Now crash Felix to observe policy drift!`, 'critical');
+      onLog(`[Felix Drift] Applied Deny-All policy to ${selectedPodObj.appLabel}. Now crash Felix to observe policy drift!`, 'critical');
     } catch (e: any) {
       onLog(`Failed: ${e.message}`, 'error');
     }
@@ -233,7 +229,7 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
       if (selectedPodObj) {
         const cmd = await k8sApi.deleteNetworkPolicy(selectedPodObj.namespace, 'deny-all-exp8');
         onLog(cmd, 'system');
-        onLog(`[E8 Felix Drift] Removed Deny-All NetworkPolicy.`, 'success');
+        onLog(`[Felix Drift] Removed Deny-All NetworkPolicy.`, 'success');
       }
     } catch (e: any) {
       onLog(`Note: Policy already removed.`, 'info');
@@ -241,7 +237,7 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
     setIsProcessing(false);
   };
 
-  // --- MODULE 4: Pod-to-Pod Connectivity (E9 - E12) ---
+  // --- MODULE 4: Pod-to-Pod Connectivity ---
   const exp9DownVeth = async () => {
     if (!selectedPodObj || !selectedPodObj.nodeName) return;
     setIsProcessing(true);
@@ -249,7 +245,7 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
       const downCmd = `ip link | grep veth | awk '{print $2}' | cut -d: -f1 | head -n 1 | xargs -I {} ip link set {} down`;
       const cmd = await k8sApi.runNodeShellCommand(selectedPodObj.nodeName, downCmd);
       onLog(cmd, 'system');
-      onLog(`[E9 Local veth Down] Downed local veth interface on node ${selectedPodObj.nodeName}.`, 'critical');
+      onLog(`[Local veth Down] Downed local veth interface on node ${selectedPodObj.nodeName}.`, 'critical');
     } catch (e: any) {
       onLog(`Failed: ${e.message}`, 'error');
     }
@@ -264,9 +260,9 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
       const cmd = await k8sApi.runNodeShellCommand(selectedPodObj.nodeName, tunnelCmd);
       onLog(cmd, 'system');
       if (down) {
-        onLog(`[E10 Overlay Tunnel Down] Downed tunl0 interface on ${selectedPodObj.nodeName}. Cross-node pod traffic will drop!`, 'critical');
+        onLog(`[Overlay Tunnel Down] Downed tunl0 interface on ${selectedPodObj.nodeName}. Cross-node pod traffic will drop!`, 'critical');
       } else {
-        onLog(`[E10 Overlay Tunnel Restored] Brought tunl0 interface back UP.`, 'success');
+        onLog(`[Overlay Tunnel Restored] Brought tunl0 interface back UP.`, 'success');
       }
     } catch (e: any) {
       onLog(`Failed: ${e.message}`, 'error');
@@ -284,9 +280,9 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
       const cmd = await k8sApi.runNodeShellCommand(selectedPodObj.nodeName, iptablesCmd);
       onLog(cmd, 'system');
       if (drop) {
-        onLog(`[E11 Host iptables DROP] Executed iptables FORWARD DROP on ${selectedPodObj.nodeName}. Forwarded packets dropped!`, 'critical');
+        onLog(`[Host iptables DROP] Executed iptables FORWARD DROP on ${selectedPodObj.nodeName}. Forwarded packets dropped!`, 'critical');
       } else {
-        onLog(`[E11 Host iptables Restored] Restored iptables rules on ${selectedPodObj.nodeName}.`, 'success');
+        onLog(`[Host iptables Restored] Restored iptables rules on ${selectedPodObj.nodeName}.`, 'success');
       }
     } catch (e: any) {
       onLog(`Failed: ${e.message}`, 'error');
@@ -304,9 +300,9 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
       const cmd = await k8sApi.runNodeShellCommand(selectedPodObj.nodeName, routeCmd);
       onLog(cmd, 'system');
       if (breakRoute) {
-        onLog(`[E12 Inter-Node Break] Blocked IPIP encapsulation traffic on ${selectedPodObj.nodeName}. Inter-node ring probes will fail!`, 'critical');
+        onLog(`[Inter-Node Break] Blocked IPIP encapsulation traffic on ${selectedPodObj.nodeName}. Inter-node ring probes will fail!`, 'critical');
       } else {
-        onLog(`[E12 Inter-Node Restored] Unblocked IPIP traffic on ${selectedPodObj.nodeName}.`, 'success');
+        onLog(`[Inter-Node Restored] Unblocked IPIP traffic on ${selectedPodObj.nodeName}.`, 'success');
       }
     } catch (e: any) {
       onLog(`Failed: ${e.message}`, 'error');
@@ -358,10 +354,6 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
 
   return (
     <div className="control-panel glass-panel" style={{ overflowY: 'auto' }}>
-      <div className="panel-header">
-        <Terminal className="icon" size={24} color="#3b82f6" />
-        <h2>All 12 Real Experiments</h2>
-      </div>
 
       {/* MASTER OPERATOR TOGGLE SWITCH */}
       <div style={{
@@ -392,7 +384,7 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
         </button>
       </div>
 
-      <div style={{ display: 'flex', gap: '8px', marginBottom: '15px', flexDirection: 'column' }}>
+      {/* <div style={{ display: 'flex', gap: '8px', marginBottom: '15px', flexDirection: 'column' }}>
         <input 
           type="text" 
           placeholder="App name (e.g. frontend)" 
@@ -404,7 +396,7 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
           <Plus size={18} />
           Deploy Standard App
         </button>
-      </div>
+      </div> */}
 
       <div className="selected-pod-banner" style={{ borderLeft: '4px solid #3b82f6', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div>
@@ -426,15 +418,15 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
         
         {/* MODULE 1: CNI */}
         <div className="experiment-card" style={{ padding: '10px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px' }}>
-          <h4><Network size={16} style={{display:'inline', marginRight: '6px'}} />1. CNI Subsystem (E1 - E3)</h4>
+          <h4><Network size={16} style={{display:'inline', marginRight: '6px'}} />1. CNI Subsystem</h4>
           <p style={{fontSize: '0.75rem', color: '#aaa', margin: '4px 0'}}>Calico agent crash, IPAM pool exhaustion, IPPool disabled.</p>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '8px' }}>
             <button className="btn crash-btn" onClick={exp1KillCNI} disabled={!selectedPodObj?.isCNI || isProcessing}>
-              <ShieldAlert size={14} /> E1: Kill Calico Agent Pod
+              <ShieldAlert size={14} /> Kill Calico Agent Pod
             </button>
             <div style={{ display: 'flex', gap: '6px' }}>
               <button className="btn crash-btn" onClick={exp2ExhaustIPAM} disabled={isProcessing} style={{flex: 1}}>
-                E2: Fill IPAM Pool
+                Fill IPAM Pool
               </button>
               <button className="btn heal-btn" onClick={exp2CleanupIPAM} disabled={isProcessing} style={{flex: 1}}>
                 Clean IPAM
@@ -442,7 +434,7 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
             </div>
             <div style={{ display: 'flex', gap: '6px' }}>
               <button className="btn crash-btn" onClick={() => exp3ToggleIPPool(true)} disabled={isProcessing} style={{flex: 1}}>
-                E3: Disable IPPool
+                Disable IPPool
               </button>
               <button className="btn heal-btn" onClick={() => exp3ToggleIPPool(false)} disabled={isProcessing} style={{flex: 1}}>
                 Enable IPPool
@@ -453,12 +445,12 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
 
         {/* MODULE 2: CoreDNS */}
         <div className="experiment-card" style={{ padding: '10px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px' }}>
-          <h4><Zap size={16} style={{display:'inline', marginRight: '6px'}} />2. CoreDNS Subsystem (E4 - E7)</h4>
-          <p style={{fontSize: '0.75rem', color: '#aaa', margin: '4px 0'}}>Replicas to 0, CPU throttling latency, upstream & syntax corrupt.</p>
+          <h4><Zap size={16} style={{display:'inline', marginRight: '6px'}} />2. CoreDNS Subsystem</h4>
+          <p style={{fontSize: '0.75rem', color: '#aaa', margin: '4px 0'}}>Replicas to 0, CPU throttling latency, upstream corrupt.</p>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '8px' }}>
             <div style={{ display: 'flex', gap: '6px' }}>
               <button className="btn crash-btn" onClick={() => exp4ScaleCoreDNS(0)} disabled={isProcessing} style={{flex: 1}}>
-                E4: Scale 0
+                Scale to 0
               </button>
               <button className="btn heal-btn" onClick={() => exp4ScaleCoreDNS(2)} disabled={isProcessing} style={{flex: 1}}>
                 Restore (2)
@@ -466,7 +458,7 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
             </div>
             <div style={{ display: 'flex', gap: '6px' }}>
               <button className="btn crash-btn" onClick={() => exp5ThrottleCPU(true)} disabled={isProcessing} style={{flex: 1}}>
-                E5: CPU Limit (5m)
+                CPU Limit (5m)
               </button>
               <button className="btn heal-btn" onClick={() => exp5ThrottleCPU(false)} disabled={isProcessing} style={{flex: 1}}>
                 Restore CPU
@@ -474,17 +466,9 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
             </div>
             <div style={{ display: 'flex', gap: '6px' }}>
               <button className="btn crash-btn" onClick={() => exp6CorruptUpstream(true)} disabled={isProcessing} style={{flex: 1}}>
-                E6: Bad Upstream
+                Corrupt Upstream
               </button>
               <button className="btn heal-btn" onClick={() => exp6CorruptUpstream(false)} disabled={isProcessing} style={{flex: 1}}>
-                Fix Corefile
-              </button>
-            </div>
-            <div style={{ display: 'flex', gap: '6px' }}>
-              <button className="btn crash-btn" onClick={() => exp7CrashLoop(true)} disabled={isProcessing} style={{flex: 1}}>
-                E7: Bad Plugin
-              </button>
-              <button className="btn heal-btn" onClick={() => exp7CrashLoop(false)} disabled={isProcessing} style={{flex: 1}}>
                 Fix Corefile
               </button>
             </div>
@@ -493,11 +477,11 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
 
         {/* MODULE 3: NetworkPolicy */}
         <div className="experiment-card" style={{ padding: '10px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px' }}>
-          <h4><FileCode size={16} style={{display:'inline', marginRight: '6px'}} />3. NetworkPolicy Drift (E8)</h4>
+          <h4><FileCode size={16} style={{display:'inline', marginRight: '6px'}} />3. NetworkPolicy Drift</h4>
           <p style={{fontSize: '0.75rem', color: '#aaa', margin: '4px 0'}}>Test silent policy drift when Felix crashes.</p>
           <div style={{ display: 'flex', gap: '6px', marginTop: '8px' }}>
             <button className="btn crash-btn" onClick={exp8FelixDrift} disabled={!selectedPodObj || selectedPodObj.isCNI || selectedPodObj.isCoreDNS || isProcessing} style={{flex: 1}}>
-              E8: Deny-All Policy
+              Deny-All Policy
             </button>
             <button className="btn heal-btn" onClick={exp8RemovePolicy} disabled={isProcessing} style={{flex: 1}}>
               Remove Policy
@@ -507,15 +491,15 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
 
         {/* MODULE 4: Pod Connectivity */}
         <div className="experiment-card" style={{ padding: '10px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px' }}>
-          <h4><WifiOff size={16} style={{display:'inline', marginRight: '6px'}} />4. Pod Connectivity (E9 - E12)</h4>
+          <h4><WifiOff size={16} style={{display:'inline', marginRight: '6px'}} />4. Pod Connectivity</h4>
           <p style={{fontSize: '0.75rem', color: '#aaa', margin: '4px 0'}}>veth down, tunl0 down, iptables FORWARD drop, inter-node break.</p>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '8px' }}>
             <button className="btn crash-btn" onClick={exp9DownVeth} disabled={!selectedPodObj || isProcessing}>
-              E9: Down Local veth
+              Down Local veth
             </button>
             <div style={{ display: 'flex', gap: '6px' }}>
               <button className="btn crash-btn" onClick={() => exp10ToggleTunnel(true)} disabled={!selectedPodObj || isProcessing} style={{flex: 1}}>
-                E10: Down tunl0
+                Down tunl0
               </button>
               <button className="btn heal-btn" onClick={() => exp10ToggleTunnel(false)} disabled={!selectedPodObj || isProcessing} style={{flex: 1}}>
                 Up tunl0
@@ -523,7 +507,7 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
             </div>
             <div style={{ display: 'flex', gap: '6px' }}>
               <button className="btn crash-btn" onClick={() => exp11ToggleIptables(true)} disabled={!selectedPodObj || isProcessing} style={{flex: 1}}>
-                E11: Drop iptables
+                Drop iptables
               </button>
               <button className="btn heal-btn" onClick={() => exp11ToggleIptables(false)} disabled={!selectedPodObj || isProcessing} style={{flex: 1}}>
                 Restore iptables
@@ -531,7 +515,7 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
             </div>
             <div style={{ display: 'flex', gap: '6px' }}>
               <button className="btn crash-btn" onClick={() => exp12ToggleInterNode(true)} disabled={!selectedPodObj || isProcessing} style={{flex: 1}}>
-                E12: Break Inter-Node
+                Break Inter-Node
               </button>
               <button className="btn heal-btn" onClick={() => exp12ToggleInterNode(false)} disabled={!selectedPodObj || isProcessing} style={{flex: 1}}>
                 Restore Route
@@ -547,8 +531,8 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
             <button className="btn" onClick={runPingTest} disabled={!selectedPodObj || isProcessing} style={{ background: '#4b5563', color: 'white', flex: 1 }}>
               Run Ping Test
             </button>
-            <button className="btn" onClick={handleDelete} disabled={!selectedPodObj || selectedPodObj.isCNI || selectedPodObj.isCoreDNS || isProcessing} style={{ background: '#ef4444', color: 'white', flex: 1 }}>
-              <Trash2 size={16} /> Delete App
+            <button className="btn" onClick={handleDeletePod} disabled={!selectedPodObj || selectedPodObj.isCNI || selectedPodObj.isCoreDNS || isProcessing} style={{ background: '#ef4444', color: 'white', flex: 1 }}>
+              <Trash2 size={16} /> Delete Pod
             </button>
           </div>
         </div>

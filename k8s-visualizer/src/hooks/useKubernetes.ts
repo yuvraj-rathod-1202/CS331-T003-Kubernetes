@@ -215,6 +215,40 @@ export function useKubernetes() {
     return `kubectl patch ippool default-ipv4-ippool --type=merge -p '{"spec":{"disabled":${disabled}}}'`;
   };
 
+  const createTinyIPPool = async () => {
+    const tinyPool = {
+      apiVersion: 'crd.projectcalico.org/v1',
+      kind: 'IPPool',
+      metadata: { name: 'experiment-tiny-pool' },
+      spec: {
+        cidr: '10.200.0.0/28',
+        blockSize: 28,
+        ipipMode: 'Always',
+        natOutgoing: true,
+        nodeSelector: 'all()'
+      }
+    };
+    const res = await fetch('/apis/crd.projectcalico.org/v1/ippools', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(tinyPool)
+    });
+    if (!res.ok && res.status !== 409) {
+      throw new Error(await res.text());
+    }
+    return `kubectl apply -f experiments/manifests/tiny-ippool.yaml`;
+  };
+
+  const deleteTinyIPPool = async () => {
+    const res = await fetch('/apis/crd.projectcalico.org/v1/ippools/experiment-tiny-pool', {
+      method: 'DELETE'
+    });
+    if (!res.ok && res.status !== 404) {
+      throw new Error(await res.text());
+    }
+    return `kubectl delete ippool experiment-tiny-pool`;
+  };
+
   const patchDeploymentResources = async (namespace: string, name: string, cpuLimit: string | null) => {
     const patch = cpuLimit ? [
       {
@@ -345,38 +379,51 @@ export function useKubernetes() {
     });
   };
 
-  const deployCustomApp = async (appName: string, nodeName?: string) => {
+  const deployCustomApp = async (appName: string, nodeName?: string, replicas: number = 1) => {
     try {
-      const deployment = {
-        apiVersion: 'apps/v1',
-        kind: 'Deployment',
-        metadata: { name: appName, namespace: 'default' },
-        spec: {
-          replicas: 1,
-          selector: { matchLabels: { app: appName } },
-          template: {
-            metadata: { labels: { app: appName } },
-            spec: {
-              ...(nodeName && { nodeSelector: { 'kubernetes.io/hostname': nodeName } }),
-              containers: [{
-                name: 'nginx',
-                image: 'nginx:alpine',
-                ports: [{ containerPort: 80 }]
-              }]
+      // If deployment already exists, scale it
+      const check = await fetch(`/apis/apps/v1/namespaces/default/deployments/${appName}`);
+      if (check.ok) {
+        const patch = [{ op: 'replace', path: '/spec/replicas', value: replicas }];
+        const patchRes = await fetch(`/apis/apps/v1/namespaces/default/deployments/${appName}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json-patch+json' },
+          body: JSON.stringify(patch)
+        });
+        if (!patchRes.ok) throw new Error(await patchRes.text());
+      } else {
+        const deployment = {
+          apiVersion: 'apps/v1',
+          kind: 'Deployment',
+          metadata: { name: appName, namespace: 'default' },
+          spec: {
+            replicas: replicas,
+            selector: { matchLabels: { app: appName } },
+            template: {
+              metadata: { labels: { app: appName } },
+              spec: {
+                ...(nodeName && { nodeSelector: { 'kubernetes.io/hostname': nodeName } }),
+                containers: [{
+                  name: 'nginx',
+                  image: 'nginx:alpine',
+                  ports: [{ containerPort: 80 }]
+                }]
+              }
             }
           }
-        }
-      };
+        };
 
-      const res = await fetch('/apis/apps/v1/namespaces/default/deployments', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(deployment),
-      });
-      if (!res.ok) throw new Error(await res.text());
+        const res = await fetch('/apis/apps/v1/namespaces/default/deployments', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(deployment),
+        });
+        if (!res.ok) throw new Error(await res.text());
+      }
       await fetchClusterState();
     } catch (err: any) {
       setError(err.message);
+      throw err;
     }
   };
 
@@ -384,8 +431,10 @@ export function useKubernetes() {
     try {
       const res = await fetch(`/apis/apps/v1/namespaces/default/deployments/${appName}`, {
         method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ propagationPolicy: "Foreground" })
       });
-      if (!res.ok) throw new Error(await res.text());
+      if (!res.ok && res.status !== 404) throw new Error(await res.text());
       await fetchClusterState();
     } catch (err: any) {
       console.error(err);
@@ -410,6 +459,8 @@ export function useKubernetes() {
     deleteNetworkPolicy,
     toggleOperator,
     setIPPoolDisabled,
+    createTinyIPPool,
+    deleteTinyIPPool,
     patchDeploymentResources,
     updateCoreDNSConfigMap,
     runNodeShellCommand,

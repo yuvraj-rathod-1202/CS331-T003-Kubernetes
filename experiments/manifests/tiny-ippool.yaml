@@ -1,6 +1,6 @@
 # Tiny Calico IPPool for IP exhaustion experiment
 # /28 = 16 addresses, 14 usable (minus network + broadcast)
-apiVersion: projectcalico.org/v3
+apiVersion: crd.projectcalico.org/v1
 kind: IPPool
 metadata:
   name: experiment-tiny-pool

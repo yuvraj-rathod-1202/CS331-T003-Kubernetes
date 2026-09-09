@@ -97,6 +97,7 @@ type StuckPod struct {
 	Node          string
 	CNIError      string // short message from the FailedCreatePodSandBox event
 	IPAMExhausted bool   // true when the error indicates IPAM pool exhaustion
+	WorkloadKey   string // owner workload e.g. "namespace/Kind/name" to prevent churn
 }
 
 // CNIModule monitors CNI plugin health and remediates detected failures.
@@ -104,11 +105,17 @@ type CNIModule struct {
 	Client               client.Client
 	pendingTarget        *remediationTarget
 	ipamThresholdPercent int
+	evictionCooldown     time.Duration
+	lastWorkloadEviction map[string]time.Time
 }
 
 // New returns a configured CNIModule.
 func New(c client.Client) *CNIModule {
-	return &CNIModule{Client: c}
+	return &CNIModule{
+		Client:               c,
+		evictionCooldown:     3 * time.Minute,
+		lastWorkloadEviction: make(map[string]time.Time),
+	}
 }
 
 // Name satisfies module.Module.
@@ -149,6 +156,15 @@ func (m *CNIModule) Check(
 	}
 	m.ipamThresholdPercent = ipamThreshold
 	signals[signalIPAMThresholdPercent] = ipamThreshold
+
+	cooldown := 3 * time.Minute
+	if spec.CNI.EvictionCooldownSeconds > 0 {
+		cooldown = time.Duration(spec.CNI.EvictionCooldownSeconds) * time.Second
+	}
+	m.evictionCooldown = cooldown
+	if m.lastWorkloadEviction == nil {
+		m.lastWorkloadEviction = make(map[string]time.Time)
+	}
 
 	unreadyPods, err := m.checkCalicoDaemonSet(ctx, calicoNS, calicoDSName)
 	if err != nil {
@@ -283,10 +299,25 @@ func (m *CNIModule) checkStuckPods(ctx context.Context, threshold time.Duration)
 			Node:          pod.Spec.NodeName,
 			CNIError:      cniErr,
 			IPAMExhausted: ipamExhausted,
+			WorkloadKey:   getWorkloadKey(&pod),
 		})
 	}
 
 	return stuck, nil
+}
+
+// getWorkloadKey extracts the owner workload key (e.g. "default/ReplicaSet/backend-65d68")
+// to group pods belonging to the same controller and prevent repeated eviction churn.
+func getWorkloadKey(pod *corev1.Pod) string {
+	for _, ref := range pod.OwnerReferences {
+		if ref.Kind != "" && ref.Name != "" {
+			return fmt.Sprintf("%s/%s/%s", pod.Namespace, ref.Kind, ref.Name)
+		}
+	}
+	if app, ok := pod.Labels["app"]; ok && app != "" {
+		return fmt.Sprintf("%s/App/%s", pod.Namespace, app)
+	}
+	return fmt.Sprintf("%s/Pod/%s", pod.Namespace, pod.Name)
 }
 
 // findCNIEvent checks whether there is a FailedCreatePodSandBox warning event
@@ -452,44 +483,86 @@ func (m *CNIModule) Evaluate(
 		}, nil
 	}
 
+	// Segregate stuck pods into actionable vs throttled (in cooldown)
+	if m.lastWorkloadEviction == nil {
+		m.lastWorkloadEviction = make(map[string]time.Time)
+	}
+	if m.evictionCooldown == 0 {
+		m.evictionCooldown = 3 * time.Minute
+	}
+
+	var actionableStuckPods []StuckPod
+	var throttledStuckPods []StuckPod
+	throttledWorkloadsMap := make(map[string]bool)
+
+	for _, sp := range stuckPods {
+		key := sp.WorkloadKey
+		if key == "" {
+			key = fmt.Sprintf("%s/Pod/%s", sp.Namespace, sp.Name)
+		}
+		if lastTime, ok := m.lastWorkloadEviction[key]; ok {
+			if time.Since(lastTime) < m.evictionCooldown {
+				throttledStuckPods = append(throttledStuckPods, sp)
+				throttledWorkloadsMap[key] = true
+				continue
+			}
+		}
+		actionableStuckPods = append(actionableStuckPods, sp)
+	}
+
+	var throttledWorkloads []string
+	for w := range throttledWorkloadsMap {
+		throttledWorkloads = append(throttledWorkloads, w)
+	}
+
 	// ---- IPAM exhaustion ----
-	if len(exhaustedPools) > 0 || hasIPAMStuck(stuckPods) {
-		reason := fmt.Sprintf(
-			"IPAM exhaustion: %d block(s) at 100%% (%s); %d pod(s) stuck due to IPAM",
-			len(exhaustedPools), strings.Join(exhaustedPools, ", "), countIPAMStuck(stuckPods),
-		)
-		logger.Info("CNI unhealthy: IPAM exhaustion", "exhaustedPools", exhaustedPools)
-		m.pendingTarget = &remediationTarget{
-			actionType: ActionEvictStuckPods,
-			stuckPods:  stuckPods,
+	if len(exhaustedPools) > 0 {
+		if len(actionableStuckPods) > 0 {
+			reason := fmt.Sprintf(
+				"IPAM exhaustion: %d block(s) at 100%% (%s); evicting %d stuck pod(s) due to IPAM",
+				len(exhaustedPools), strings.Join(exhaustedPools, ", "), countIPAMStuck(actionableStuckPods),
+			)
+			logger.Info("CNI unhealthy: IPAM exhaustion", "exhaustedPools", exhaustedPools, "evicting", len(actionableStuckPods))
+			m.pendingTarget = &remediationTarget{
+				actionType: ActionEvictStuckPods,
+				stuckPods:  actionableStuckPods,
+			}
+			return &module.EvalResult{
+				IsHealthy:        false,
+				NeedsRemediation: true,
+				Reason:           reason,
+				Severity:         severityCritical,
+			}, nil
+		} else if len(throttledStuckPods) > 0 {
+			reason := fmt.Sprintf(
+				"IPAM exhaustion: %d block(s) at 100%% (%s); %d pod(s) waiting for IPs [%s]. Eviction throttled to avoid ReplicaSet churn",
+				len(exhaustedPools), strings.Join(exhaustedPools, ", "), len(throttledStuckPods), strings.Join(throttledWorkloads, ", "),
+			)
+			logger.Info("CNI degraded: IPAM exhaustion eviction throttled", "exhaustedPools", exhaustedPools, "throttledPods", len(throttledStuckPods))
+			m.pendingTarget = nil
+			return &module.EvalResult{
+				IsHealthy:        false,
+				NeedsRemediation: false,
+				Reason:           reason,
+				Severity:         severityCritical,
+			}, nil
+		} else {
+			reason := fmt.Sprintf(
+				"IPAM exhaustion: %d block(s) at 100%% (%s); no stuck pods currently",
+				len(exhaustedPools), strings.Join(exhaustedPools, ", "),
+			)
+			logger.Info("CNI unhealthy: IPAM block(s) at 100%", "exhaustedPools", exhaustedPools)
+			m.pendingTarget = nil
+			return &module.EvalResult{
+				IsHealthy:        false,
+				NeedsRemediation: false,
+				Reason:           reason,
+				Severity:         severityCritical,
+			}, nil
 		}
-		return &module.EvalResult{
-			IsHealthy:        false,
-			NeedsRemediation: true,
-			Reason:           reason,
-			Severity:         severityCritical,
-		}, nil
 	}
 
-	// ---- pods stuck with other CNI errors ----
-	if len(stuckPods) > 0 {
-		reason := fmt.Sprintf(
-			"%d pod(s) stuck in ContainerCreating with CNI errors", len(stuckPods),
-		)
-		logger.Info("CNI degraded: stuck pods", "count", len(stuckPods))
-		m.pendingTarget = &remediationTarget{
-			actionType: ActionEvictStuckPods,
-			stuckPods:  stuckPods,
-		}
-		return &module.EvalResult{
-			IsHealthy:        false,
-			NeedsRemediation: true,
-			Reason:           reason,
-			Severity:         severityWarning,
-		}, nil
-	}
-
-	// ---- IPAM usage warning only ----
+	// ---- IPAM usage above defined threshold (e.g. >= 80%) ----
 	var elevatedPools []string
 	for cidr, pct := range usageByPool {
 		if pct >= float64(ipamThreshold) {
@@ -502,14 +575,77 @@ func (m *CNIModule) Evaluate(
 		}
 	}
 
-	m.pendingTarget = nil
 	if len(elevatedPools) > 0 {
-		return &module.EvalResult{
-			IsHealthy:        true,
-			NeedsRemediation: false,
-			Reason:           fmt.Sprintf("CNI plugin is healthy, but IPAM usage elevated above %d%%: %s", ipamThreshold, strings.Join(elevatedPools, ", ")),
-			Severity:         severityWarning,
-		}, nil
+		if len(actionableStuckPods) > 0 {
+			reason := fmt.Sprintf(
+				"IPAM threshold breached (%s >= %d%%); evicting %d stuck pod(s) without IP",
+				strings.Join(elevatedPools, ", "), ipamThreshold, len(actionableStuckPods),
+			)
+			logger.Info("CNI degraded: IPAM threshold breached with stuck pods", "elevatedPools", elevatedPools)
+			m.pendingTarget = &remediationTarget{
+				actionType: ActionEvictStuckPods,
+				stuckPods:  actionableStuckPods,
+			}
+			return &module.EvalResult{
+				IsHealthy:        false,
+				NeedsRemediation: true,
+				Reason:           reason,
+				Severity:         severityWarning,
+			}, nil
+		} else if len(throttledStuckPods) > 0 {
+			reason := fmt.Sprintf(
+				"IPAM threshold breached (%s >= %d%%); %d pod(s) waiting for IPs [%s]. Eviction throttled to avoid ReplicaSet churn",
+				strings.Join(elevatedPools, ", "), ipamThreshold, len(throttledStuckPods), strings.Join(throttledWorkloads, ", "),
+			)
+			logger.Info("CNI degraded: IPAM threshold breached, eviction throttled", "elevatedPools", elevatedPools)
+			m.pendingTarget = nil
+			return &module.EvalResult{
+				IsHealthy:        false,
+				NeedsRemediation: false,
+				Reason:           reason,
+				Severity:         severityWarning,
+			}, nil
+		} else {
+			m.pendingTarget = nil
+			return &module.EvalResult{
+				IsHealthy:        true,
+				NeedsRemediation: false,
+				Reason:           fmt.Sprintf("CNI plugin is healthy, but IPAM usage elevated above %d%%: %s", ipamThreshold, strings.Join(elevatedPools, ", ")),
+				Severity:         severityWarning,
+			}, nil
+		}
+	}
+
+	// ---- pods stuck with other CNI errors ----
+	if len(stuckPods) > 0 {
+		if len(actionableStuckPods) > 0 {
+			reason := fmt.Sprintf(
+				"%d pod(s) stuck in ContainerCreating with CNI errors", len(actionableStuckPods),
+			)
+			logger.Info("CNI degraded: stuck pods", "count", len(actionableStuckPods))
+			m.pendingTarget = &remediationTarget{
+				actionType: ActionEvictStuckPods,
+				stuckPods:  actionableStuckPods,
+			}
+			return &module.EvalResult{
+				IsHealthy:        false,
+				NeedsRemediation: true,
+				Reason:           reason,
+				Severity:         severityWarning,
+			}, nil
+		} else {
+			reason := fmt.Sprintf(
+				"%d pod(s) stuck in ContainerCreating with CNI errors; eviction cooldown active for [%s]",
+				len(throttledStuckPods), strings.Join(throttledWorkloads, ", "),
+			)
+			m.pendingTarget = nil
+			return &module.EvalResult{
+				IsHealthy:        false,
+				NeedsRemediation: false,
+				Reason:           reason,
+				Severity:         severityWarning,
+			}, nil
+		}
 	}
 
 	return &module.EvalResult{
@@ -629,9 +765,13 @@ func (m *CNIModule) Remediate(
 
 	case ActionEvictStuckPods:
 		// TARGETED ACTION 3: Evict stuck workload pods only
+		if m.lastWorkloadEviction == nil {
+			m.lastWorkloadEviction = make(map[string]time.Time)
+		}
 		if len(stuckPods) == 0 {
 			stuckPods, _ = m.checkStuckPods(ctx, 0)
 		}
+		now := time.Now()
 		for _, sp := range stuckPods {
 			pod := &corev1.Pod{}
 			pod.Name = sp.Name
@@ -640,8 +780,20 @@ func (m *CNIModule) Remediate(
 				logger.Error(err, "failed to delete CNI-stuck pod", "pod", sp.Name, "ns", sp.Namespace)
 				lastErr = err
 			} else {
-				logger.Info("evicted CNI-stuck pod", "pod", sp.Name, "ns", sp.Namespace, "ipamExhausted", sp.IPAMExhausted)
+				key := sp.WorkloadKey
+				if key == "" {
+					key = fmt.Sprintf("%s/Pod/%s", sp.Namespace, sp.Name)
+				}
+				m.lastWorkloadEviction[key] = now
+				logger.Info("evicted CNI-stuck pod", "pod", sp.Name, "ns", sp.Namespace, "workload", key, "ipamExhausted", sp.IPAMExhausted)
 				actions = append(actions, fmt.Sprintf("evicted %s/%s", sp.Namespace, sp.Name))
+			}
+		}
+
+		// Prune expired cooldown entries
+		for k, t := range m.lastWorkloadEviction {
+			if now.Sub(t) > 2*m.evictionCooldown {
+				delete(m.lastWorkloadEviction, k)
 			}
 		}
 
