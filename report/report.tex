@@ -61,7 +61,7 @@ viraj.solanki@iitgn.ac.in
 
 % I. ABSTRACT
 \begin{abstract}
-Kubernetes provides robust self-healing for container lifecycle events such as pod crashes and node failures; however, it remains fundamentally blind to network-layer degradation including Container Network Interface (CNI) plugin failures, DNS service disruptions, NetworkPolicy enforcement drift, and silent overlay tunnel breakages. These network failures cause cascading application outages despite all pods appearing healthy to the orchestrator. In this paper, we present our custom Kubernetes operator that continuously monitors and auto-remediates four critical network subsystems: CNI health (Calico), CoreDNS availability, NetworkPolicy dataplane enforcement, and pod-to-pod connectivity. The operator employs a modular \emph{Check~$\to$~Evaluate~$\to$~Remediate} pipeline architecture, where each module independently gathers network telemetry signals, applies threshold-based and triangulation-based failure classification, and executes targeted corrective actions via the Kubernetes API. For connectivity monitoring, we adapt the Pingmesh ring topology to achieve $O(N)$ probe scalability combined with a three-tier triangulation engine for root-cause isolation. The system is driven by a single cluster-scoped Custom Resource Definition (CRD) that exposes configurable detection thresholds and safety guardrails. We validate our operator across Several fault-injection experiments on a multi-node Minikube cluster with Calico CNI, demonstrating automated recovery from CNI agent crashes, IPAM pool exhaustion, DNS latency spikes, corrupted upstream configurations, stale firewall rules, and broken overlay tunnels.
+Kubernetes provides robust self-healing for container lifecycle events such as pod crashes and node failures; however, it remains fundamentally blind to network-layer degradation including Container Network Interface (CNI) plugin failures, DNS service disruptions, NetworkPolicy enforcement drift, and silent overlay tunnel breakages. These network failures cause cascading application outages despite all pods appearing healthy to the orchestrator. We approach the problem from a networking standpoint: each fault is a failure at a specific layer of the protocol stack-veth interfaces and ARP at the link layer, IPAM addressing and IP-in-IP/VXLAN overlay routing at the network layer, ICMP/TCP reachability at the transport layer, and DNS name resolution at the application layer-rather than a purely operational incident. In this paper, we present our custom Kubernetes operator that continuously monitors and auto-remediates four critical network subsystems: CNI health (Calico), CoreDNS availability, NetworkPolicy dataplane enforcement, and pod-to-pod connectivity. The operator employs a modular \emph{Check~$\to$~Evaluate~$\to$~Remediate} pipeline architecture, where each module independently gathers network telemetry signals, applies threshold-based and triangulation-based failure classification, and executes targeted corrective actions via the Kubernetes API. For connectivity monitoring, we adapt the Pingmesh ring topology to achieve $O(N)$ probe scalability combined with a three-tier triangulation engine for root-cause isolation. The system is driven by a single cluster-scoped Custom Resource Definition (CRD) that exposes configurable detection thresholds and safety guardrails. We validate our operator across Several fault-injection experiments on a multi-node Minikube cluster with Calico CNI, demonstrating automated recovery from CNI agent crashes, IPAM pool exhaustion, DNS latency spikes, corrupted upstream configurations, stale firewall rules, and broken overlay tunnels.
 \end{abstract}
 
 % II. INTRODUCTION
@@ -73,6 +73,8 @@ Kubernetes has emerged as the de facto orchestration platform for containerized 
 In production Kubernetes clusters, the network fabric is a complex stack comprising: (i)~a Container Network Interface (CNI) plugin (e.g., Calico, Cilium) that manages IP address allocation, virtual ethernet (veth) interfaces, and inter-node overlay tunnels~\cite{cni-spec, calico-docs}; (ii)~CoreDNS for cluster-internal service discovery and external name resolution~\cite{coredns-docs}; and (iii)~NetworkPolicy resources whose enforcement is delegated to the CNI's dataplane agent (e.g., Calico's Felix daemon) via \texttt{iptables} or eBPF rules.
 
 When any component in this stack degrades-a CNI agent crashes, DNS latency spikes, or an IP-in-IP tunnel interface drops-Kubernetes continues to report pods as \texttt{Running}~(1/1~Ready) and nodes as \texttt{Ready}. Application traffic silently fails with connection timeouts, DNS resolution errors, or unauthorized packet leakage, leading to cascading service disruptions without any automated recovery.
+
+Framed in the vocabulary of computer networks, the faults we target are not operational curiosities but failures spread across the entire protocol stack. At the \emph{link layer}, each pod attaches to its host through a virtual Ethernet (veth) pair and resolves on-node addresses over ARP, so a downed veth or corrupted bridge breaks L2 frame delivery while the pod process stays alive. At the \emph{network layer}, the CNI's IP Address Management (IPAM) assigns every pod an IP, and cross-node traffic rides an overlay in which Calico encapsulates the original pod-to-pod packet inside an outer IP header using IP-in-IP or VXLAN; an exhausted IPAM pool or a dropped tunnel interface (\texttt{tunl0}) thus manifests as a pure L3 addressing and routing failure. At the \emph{transport layer}, reachability is exercised with ICMP echo and TCP connection probes-the same primitives behind \texttt{ping} and a port check. At the \emph{application layer}, service discovery depends on DNS: pods resolve names by sending UDP queries to CoreDNS on port~53, which answers cluster-internal names authoritatively and forwards external ones to an upstream resolver. NetworkPolicy enforcement is, at bottom, stateful packet filtering, with Calico's Felix agent compiling each policy into Linux \texttt{netfilter} (\texttt{iptables}/\texttt{ipset}) rules that match on L3/L4 header fields. Our operator is therefore best understood not as a container-management add-on but as a system that watches and repairs faults along the full path a packet travels-from the veth interface, through IP routing and the overlay tunnel, to DNS resolution at the top of the stack.
 
 \subsection{Existing Solutions and Their Limitations}
 
@@ -272,6 +274,7 @@ This design ensures complete modularity-each network subsystem module operates i
 This section describes the detection signals, evaluation heuristics, and remediation actions for each network subsystem module.
 
 \subsection{CNI Module}
+This module guards the link- and network-layer plumbing every pod depends on before it can send a single packet: the veth pair that connects it to the host, the IPAM allocation that gives it an L3 address, and the BGP/overlay routing mesh that carries its traffic between nodes.
 
 \subsubsection{Detection Signals}
 The CNI module continuously gathers four categories of signals:
@@ -300,6 +303,7 @@ Three targeted remediation branches are executed based on the evaluation:
 \end{itemize}
 
 \subsection{CoreDNS Module}
+DNS is the application-layer directory of the cluster: every service call begins with a name lookup. This module keeps that resolution path healthy, watching both the internal query service (UDP to CoreDNS on port~53) and the upstream forwarding used to resolve external names.
 
 \subsubsection{Detection Signals}
 The CoreDNS module monitors five aspects of DNS service health:
@@ -326,6 +330,7 @@ The CoreDNS module monitors five aspects of DNS service health:
 Each remediation type is gated by independent safety toggles (\texttt{autoHealReplicas}, \texttt{autoHealConfigMap}) and a 30\,s cooldown window to prevent restart thrashing.
 
 \subsection{NetworkPolicy Module}
+A NetworkPolicy is, in networking terms, a stateful packet-filter rule matched on L3/L4 header fields (source/destination IP, port, protocol). Kubernetes only stores this intent; the CNI must program it into the kernel firewall. This module verifies that the enforcement path is actually alive, so that the rules a packet is checked against reflect the declared policy.
 
 \subsubsection{Detection Signals}
 The NetworkPolicy module targets the \emph{control-plane-to-dataplane disconnect} described in Section~III-C. It audits all \texttt{calico-node} pods in \texttt{kube-system} for:
@@ -342,6 +347,7 @@ Any pod matching these criteria indicates that the Felix enforcement agent is no
 When unhealthy enforcement agents are detected and \texttt{autoHeal} is enabled, the operator deletes the degraded \texttt{calico-node} pod. The DaemonSet controller respawns a fresh pod, and on startup, Felix reads all declared policies from the Kubernetes API and programs \texttt{iptables}/\texttt{ipset} chains from scratch, clearing stale rules. A configurable cooldown (default: 60\,s) rate-limits consecutive restarts to prevent control plane churn.
 
 \subsection{Pod-to-Pod Connectivity Module}
+This module works at the network and transport layers, actively testing whether packets can actually traverse the veth, bridge, and overlay-tunnel path between pods-something readiness probes, which only check a local process, never verify.
 
 \subsubsection{Probing Topology}
 We adapt the Pingmesh~\cite{pingmesh2015} approach to Kubernetes by establishing a deterministic ring topology across $N$ worker nodes. Nodes are sorted lexicographically and connected as:
@@ -352,7 +358,7 @@ We adapt the Pingmesh~\cite{pingmesh2015} approach to Kubernetes by establishing
   \text{Reverse: } Node_i \to Node_{(i-1+N) \bmod N} \quad (N \geq 3)
 \end{equation}
 
-This yields exactly $2N$ inter-node probes, achieving $O(N)$ scalability versus the $O(N^2)$ cost of full-mesh probing. Each node additionally undergoes an $O(1)$ intra-node canary validation to verify local veth, bridge, and iptables FORWARD chain integrity.
+This yields exactly $2N$ inter-node probes, achieving $O(N)$ scalability versus the $O(N^2)$ cost of full-mesh probing. Each probe is a lightweight ICMP echo or TCP connection attempt to the target pod's IP address, so a failed probe directly signals loss of L3/L4 reachability along that specific path. Each node additionally undergoes an $O(1)$ intra-node canary validation to verify local veth, bridge, and iptables FORWARD chain integrity.
 
 \subsubsection{Three-Tier Triangulation}
 The evaluate phase employs a three-tier pattern analysis engine to isolate root causes and prevent false remediation:
@@ -489,7 +495,7 @@ Across all experiments, the operator successfully detected the injected network 
 \section{Conclusion and Future Scope}
 
 \subsection{Conclusion}
-We presented our custom Kubernetes operator that extends the platform's self-healing capabilities to the network data plane. By implementing a modular Check~$\to$~Evaluate~$\to$~Remediate pipeline across four critical network subsystems-CNI, CoreDNS, NetworkPolicy enforcement, and pod-to-pod connectivity-our operator detects and auto-remediates network failures that are invisible to native Kubernetes mechanisms.
+We presented our custom Kubernetes operator that extends the platform's self-healing capabilities to the network data plane. By implementing a modular Check~$\to$~Evaluate~$\to$~Remediate pipeline across four critical network subsystems-CNI, CoreDNS, NetworkPolicy enforcement, and pod-to-pod connectivity-our operator detects and auto-remediates network failures that are invisible to native Kubernetes mechanisms. By reasoning explicitly in terms of the protocol layers-L2 veth interfaces, L3 addressing and overlay routing, L4 reachability, and L7 name resolution-the operator localizes and repairs faults along the entire path a packet takes, rather than treating them as opaque application errors.
 
 The operator's $O(N)$ Pingmesh-inspired ring probing topology and three-tier triangulation engine enable scalable, accurate root-cause isolation of connectivity failures without the $O(N^2)$ overhead of full-mesh probing. The CRD-driven configuration model provides operators with fine-grained control over detection thresholds, safety guardrails, and remediation escalation, supporting both fully autonomous and audit-only deployment modes.
 
