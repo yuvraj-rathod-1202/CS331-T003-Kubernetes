@@ -165,7 +165,16 @@ export function ClusterMap({ k8sNodes, k8sPods, isCrashing, testEdges, pendingSo
       });
     });
 
-    setNodes(newNodes);
+    setNodes((nds) => {
+      return newNodes.map(newNode => {
+        const existingNode = nds.find(n => n.id === newNode.id);
+        if (existingNode) {
+          // Preserve React Flow's internal properties (measured, width, height) to prevent crash
+          return { ...existingNode, ...newNode, data: { ...existingNode.data, ...newNode.data } };
+        }
+        return newNode;
+      });
+    });
 
     // Edges
     const newEdges: Edge[] = [];
@@ -181,6 +190,8 @@ export function ClusterMap({ k8sNodes, k8sPods, isCrashing, testEdges, pendingSo
     });
 
     k8sPods.forEach(pod => {
+      if (!pod.nodeName || !k8sNodes.some(n => n.name === pod.nodeName)) return; // Skip edges for pending/unassigned pods
+
       newEdges.push({
         id: `e-${pod.nodeName}-${pod.name}`,
         source: `node-${pod.nodeName}`,
@@ -269,7 +280,12 @@ export function ClusterMap({ k8sNodes, k8sPods, isCrashing, testEdges, pendingSo
       });
     });
 
-    setEdges(newEdges);
+    // CRITICAL FIX: React Flow crashes if any edge references a non-existent node.
+    // Filter out any edge whose source or target isn't in our newNodes list.
+    const validNodeIds = new Set(newNodes.map(n => n.id));
+    const safeEdges = newEdges.filter(e => validNodeIds.has(e.source) && validNodeIds.has(e.target));
+
+    setEdges(safeEdges);
   }, [k8sNodes, k8sPods, isCrashing, testEdges, pendingSource, selectedPod, onSelectPod, setNodes, setEdges]);
 
   return (

@@ -9,6 +9,7 @@ interface ControlPanelProps {
   k8sPods: K8sPod[];
   operatorStatus: OperatorStatus | null;
   k8sApi: any;
+  onOpenLogs?: () => void;
 }
 
 const DEFAULT_COREFILE = `.:53 {
@@ -62,7 +63,7 @@ const BAD_PLUGIN_COREFILE = `.:53 {
     forward . /etc/resolv.conf
 }`;
 
-export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorStatus, k8sApi }: ControlPanelProps) {
+export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorStatus, k8sApi, onOpenLogs }: ControlPanelProps) {
   const [newAppName, setNewAppName] = useState('');
   const [selectedNodeForDeploy, setSelectedNodeForDeploy] = useState<string>('');
   const [isProcessing, setIsProcessing] = useState(false);
@@ -405,8 +406,19 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
         </button>
       </div>
 
-      <div className="selected-pod-banner" style={{ borderLeft: '4px solid #3b82f6' }}>
-        <strong>Target Selected:</strong> {selectedPod || 'None (Click a Pod!)'}
+      <div className="selected-pod-banner" style={{ borderLeft: '4px solid #3b82f6', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div>
+          <strong>Target Selected:</strong> {selectedPod || 'None (Click a Pod!)'}
+        </div>
+        {selectedPod && (
+          <button 
+            className="btn heal-btn" 
+            onClick={onOpenLogs}
+            style={{ width: 'auto', padding: '4px 8px', fontSize: '0.75rem', margin: 0, display: 'flex', alignItems: 'center', gap: '4px' }}
+          >
+            <Terminal size={12} /> View Logs
+          </button>
+        )}
       </div>
 
       {/* EXPERIMENTS UI */}

@@ -393,6 +393,12 @@ export function useKubernetes() {
     }
   };
 
+  const getPodLogs = async (namespace: string, podName: string) => {
+    const res = await fetch(`/api/v1/namespaces/${namespace}/pods/${podName}/log?tailLines=200`);
+    if (!res.ok) throw new Error(await res.text());
+    return await res.text();
+  };
+
   return {
     nodes,
     pods,
@@ -410,5 +416,6 @@ export function useKubernetes() {
     runCommandAndGetLogs,
     deployCustomApp,
     deleteCustomApp,
+    getPodLogs
   };
 }
