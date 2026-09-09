@@ -93,8 +93,6 @@ func (r *NetworkRemediationReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	logger.Info("Reconciling NetworkRemediation", "name", nr.Name)
-
 	// 2. Run each module's pipeline
 	overallHealthy := true
 	for _, reg := range r.modules {
@@ -133,7 +131,6 @@ func (r *NetworkRemediationReconciler) reconcileModule(
 
 	// Check if this module is enabled
 	if !reg.isEnabled(&nr.Spec) {
-		logger.V(1).Info("Module is disabled, skipping")
 		reg.setStatus(&nr.Status, remediationv1alpha1.ModuleStatus{
 			Healthy: true,
 			Enabled: false,
@@ -145,7 +142,6 @@ func (r *NetworkRemediationReconciler) reconcileModule(
 	now := metav1.Now()
 
 	// CHECK
-	logger.Info("Running Check phase")
 	checkResult, err := reg.module.Check(ctx, &nr.Spec)
 	if err != nil {
 		logger.Error(err, "Check phase failed")
@@ -159,7 +155,6 @@ func (r *NetworkRemediationReconciler) reconcileModule(
 	}
 
 	// EVALUATE
-	logger.Info("Running Evaluate phase")
 	evalResult, err := reg.module.Evaluate(ctx, checkResult)
 	if err != nil {
 		logger.Error(err, "Evaluate phase failed")
@@ -173,7 +168,6 @@ func (r *NetworkRemediationReconciler) reconcileModule(
 	}
 
 	if evalResult.IsHealthy {
-		logger.Info("Module is healthy")
 		reg.setStatus(&nr.Status, remediationv1alpha1.ModuleStatus{
 			Healthy:     true,
 			Enabled:     true,
@@ -195,7 +189,6 @@ func (r *NetworkRemediationReconciler) reconcileModule(
 	}
 
 	// REMEDIATE
-	logger.Info("Running Remediate phase", "reason", evalResult.Reason, "severity", evalResult.Severity)
 	remediateResult, err := reg.module.Remediate(ctx, evalResult)
 	if err != nil {
 		logger.Error(err, "Remediate phase failed")

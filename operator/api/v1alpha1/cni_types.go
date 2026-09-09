@@ -43,4 +43,10 @@ type CNISpec struct {
 	// +kubebuilder:default=80
 	// +optional
 	IPAMUsageThresholdPercent int `json:"ipamUsageThresholdPercent,omitempty"`
+
+	// EvictionCooldownSeconds is the cooldown period (in seconds) during which the
+	// operator suppresses repeated evictions for the same workload to prevent churn.
+	// +kubebuilder:default=180
+	// +optional
+	EvictionCooldownSeconds int `json:"evictionCooldownSeconds,omitempty"`
 }

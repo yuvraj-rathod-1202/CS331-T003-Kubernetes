@@ -395,6 +395,89 @@ func TestCNIModule_Evaluate_IPAMExhaustion(t *testing.T) {
 	}
 }
 
+func TestCNIModule_Evaluate_IPAMExhaustion_ThrottledRecreationChurn(t *testing.T) {
+	m := New(nil)
+	ctx := context.Background()
+
+	workloadKey := "default/ReplicaSet/backend-api-filler"
+	m.lastWorkloadEviction[workloadKey] = time.Now() // recently evicted!
+
+	checkResult := &module.CheckResult{
+		Signals: map[string]any{
+			signalCalicoNodeUnready: []string{},
+			signalStuckPods: []StuckPod{
+				{
+					Namespace:     testNamespaceDefault,
+					Name:          "backend-api-filler-newpod",
+					CNIError:      "No IPs available in pools",
+					IPAMExhausted: true,
+					WorkloadKey:   workloadKey,
+				},
+			},
+			signalIPAMUsageByPool:    map[string]float64{testPoolCIDR: 100.0},
+			signalIPAMExhaustedPools: []string{testPoolCIDR},
+			signalDisabledIPPools:    []string{},
+		},
+	}
+
+	evalResult, err := m.Evaluate(ctx, checkResult)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if evalResult.IsHealthy {
+		t.Errorf("expected unhealthy/degraded when IPAM is exhausted even if throttled")
+	}
+	if evalResult.NeedsRemediation {
+		t.Errorf("expected remediation to be SUPPRESSED (throttled) to prevent ReplicaSet churn")
+	}
+	if !strings.Contains(evalResult.Reason, "throttled") {
+		t.Errorf("expected reason to mention throttling/churn, got: %s", evalResult.Reason)
+	}
+}
+
+func TestCNIModule_Evaluate_IPAMUsageAboveThreshold_WithStuckPods(t *testing.T) {
+	m := New(nil)
+	ctx := context.Background()
+
+	checkResult := &module.CheckResult{
+		Signals: map[string]any{
+			signalCalicoNodeUnready: []string{},
+			signalStuckPods: []StuckPod{
+				{
+					Namespace:     testNamespaceDefault,
+					Name:          "new-worker-pod",
+					CNIError:      "failed to allocate for range 0",
+					IPAMExhausted: true,
+					WorkloadKey:   "default/ReplicaSet/new-worker",
+				},
+			},
+			signalIPAMUsageByPool:      map[string]float64{testPoolCIDR: 88.0},
+			signalIPAMExhaustedPools:   []string{},
+			signalDisabledIPPools:      []string{},
+			signalIPAMThresholdPercent: 80,
+		},
+	}
+
+	evalResult, err := m.Evaluate(ctx, checkResult)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if evalResult.IsHealthy {
+		t.Errorf("expected unhealthy when threshold is breached and stuck pods exist")
+	}
+	if !evalResult.NeedsRemediation {
+		t.Errorf("expected remediation to be requested when stuck pods exist")
+	}
+	if evalResult.Severity != severityWarning {
+		t.Errorf("expected severity '%s', got '%s'", severityWarning, evalResult.Severity)
+	}
+	if !strings.Contains(evalResult.Reason, "IPAM threshold breached") {
+		t.Errorf("expected reason to mention IPAM threshold breached, got: %s", evalResult.Reason)
+	}
+}
+
 func TestCNIModule_Evaluate_DisabledIPPool(t *testing.T) {
 	m := New(nil)
 	ctx := context.Background()

@@ -455,22 +455,21 @@ Table~\ref{tab:experiments} summarizes the fault-injection experiments conducted
 \renewcommand{\arraystretch}{1.1}
 \setlength{\tabcolsep}{3pt}
 \footnotesize
-\begin{tabular}{@{}c l p{3.2cm} c@{}}
+\begin{tabular}{@{}l p{4.2cm} c@{}}
 \toprule
-\textbf{ID} & \textbf{Module} & \textbf{Fault Injected} & \textbf{Healed} \\
+\textbf{Module} & \textbf{Fault Injected} & \textbf{Healed} \\
 \midrule
-E1 & CNI & calico-node agent crash & \checkmark \\
-E2 & CNI & IPAM pool exhaustion & \checkmark \\
-E3 & CNI & IPPool disabled & \checkmark \\
-E4 & CoreDNS & Scale replicas to zero & \checkmark \\
-E5 & CoreDNS & CPU throttle ($\leq$5\,m) & \checkmark \\
-E6 & CoreDNS & Corrupted upstream forward & \checkmark \\
-E7 & CoreDNS & Pod CrashLoopBackOff & \checkmark \\
-E8 & NetPolicy & Felix agent crash & \checkmark \\
-E9 & PodConn & veth interface down & \checkmark \\
-E10 & PodConn & IPIP tunnel crash & \checkmark \\
-E11 & PodConn & iptables FORWARD DROP & \checkmark \\
-E12 & PodConn & Inter-node overlay break & \checkmark \\
+CNI & calico-node agent crash & \checkmark \\
+CNI & IPAM pool exhaustion & \checkmark \\
+CNI & IPPool disabled & \checkmark \\
+CoreDNS & Scale replicas to zero & \checkmark \\
+CoreDNS & CPU throttle ($\leq$5\,m) & \checkmark \\
+CoreDNS & Corrupted upstream forward & \checkmark \\
+NetPolicy & Felix agent crash & \checkmark \\
+PodConn & veth interface down & \checkmark \\
+PodConn & IPIP tunnel crash & \checkmark \\
+PodConn & iptables FORWARD DROP & \checkmark \\
+PodConn & Inter-node overlay break & \checkmark \\
 \bottomrule
 \end{tabular}
 \end{table}
