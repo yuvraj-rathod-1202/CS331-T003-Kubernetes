@@ -90,14 +90,31 @@ export function useKubernetes() {
         const crdRes = await fetch('/apis/remediation.cn-operator.yuvraj-rathod-1202.github.io/v1alpha1/networkremediations/networkremediation-sample');
         if (crdRes.ok) {
           const crdData = await crdRes.json();
-          if (crdData.status) {
-             setOperatorStatus({
-               cni: crdData.status.cni || { healthy: false, enabled: false },
-               coreDNS: crdData.status.coreDNS || { healthy: false, enabled: false },
-               networkPolicy: crdData.status.networkPolicy || { healthy: false, enabled: false },
-               podConnectivity: crdData.status.podConnectivity || { healthy: false, enabled: false }
-             });
-          }
+          const spec = crdData.spec || {};
+          const status = crdData.status || {};
+
+          setOperatorStatus({
+            cni: {
+              healthy: status.cni?.healthy ?? true,
+              enabled: spec.cni?.enabled ?? true,
+              message: status.cni?.message
+            },
+            coreDNS: {
+              healthy: status.coreDNS?.healthy ?? true,
+              enabled: spec.coreDNS?.enabled ?? true,
+              message: status.coreDNS?.message
+            },
+            networkPolicy: {
+              healthy: status.networkPolicy?.healthy ?? true,
+              enabled: spec.networkPolicy?.enabled ?? true,
+              message: status.networkPolicy?.message
+            },
+            podConnectivity: {
+              healthy: status.podConnectivity?.healthy ?? true,
+              enabled: spec.podConnectivity?.enabled ?? true,
+              message: status.podConnectivity?.message
+            }
+          });
         }
       } catch (crdErr) {
         console.warn("Operator CRD not found or reachable", crdErr);
@@ -158,6 +175,85 @@ export function useKubernetes() {
     const res = await fetch(`/apis/networking.k8s.io/v1/namespaces/${namespace}/networkpolicies/${name}`, { method: 'DELETE' });
     if (!res.ok && res.status !== 404) throw new Error(await res.text());
     return `kubectl delete networkpolicy ${name} -n ${namespace}`;
+  };
+
+  const toggleOperator = async (enabled: boolean) => {
+    const patch = {
+      spec: {
+        cni: { enabled },
+        coreDNS: { enabled },
+        networkPolicy: { enabled },
+        podConnectivity: { enabled },
+      }
+    };
+    const res = await fetch('/apis/remediation.cn-operator.yuvraj-rathod-1202.github.io/v1alpha1/networkremediations/networkremediation-sample', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/merge-patch+json' },
+      body: JSON.stringify(patch)
+    });
+    if (!res.ok) throw new Error(await res.text());
+    await fetchClusterState();
+    return `kubectl patch networkremediation networkremediation-sample --type=merge -p '{"spec":{"cni":{"enabled":${enabled}},"coreDNS":{"enabled":${enabled}},"networkPolicy":{"enabled":${enabled}},"podConnectivity":{"enabled":${enabled}}}}'`;
+  };
+
+  const setIPPoolDisabled = async (disabled: boolean) => {
+    // Try patching via Calico CRD endpoint
+    let res = await fetch(`/apis/crd.projectcalico.org/v1/ippools/default-ipv4-ippool`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/merge-patch+json' },
+      body: JSON.stringify({ spec: { disabled } })
+    });
+    if (!res.ok) {
+      // Fallback to projectcalico.org/v3
+      res = await fetch(`/apis/projectcalico.org/v3/ippools/default-ipv4-ippool`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/merge-patch+json' },
+        body: JSON.stringify({ spec: { disabled } })
+      });
+    }
+    if (!res.ok) throw new Error(await res.text());
+    return `kubectl patch ippool default-ipv4-ippool --type=merge -p '{"spec":{"disabled":${disabled}}}'`;
+  };
+
+  const patchDeploymentResources = async (namespace: string, name: string, cpuLimit: string | null) => {
+    const patch = cpuLimit ? [
+      {
+        op: 'add',
+        path: '/spec/template/spec/containers/0/resources',
+        value: { limits: { cpu: cpuLimit }, requests: { cpu: '5m' } }
+      }
+    ] : [
+      {
+        op: 'remove',
+        path: '/spec/template/spec/containers/0/resources/limits'
+      }
+    ];
+
+    const res = await fetch(`/apis/apps/v1/namespaces/${namespace}/deployments/${name}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json-patch+json' },
+      body: JSON.stringify(patch)
+    });
+    if (!res.ok) throw new Error(await res.text());
+    return cpuLimit 
+      ? `kubectl set resources deployment ${name} -n ${namespace} --limits=cpu=${cpuLimit}`
+      : `kubectl set resources deployment ${name} -n ${namespace} --limits=cpu=""`;
+  };
+
+  const updateCoreDNSConfigMap = async (corefileContent: string) => {
+    const cmRes = await fetch(`/api/v1/namespaces/kube-system/configmaps/coredns`);
+    if (!cmRes.ok) throw new Error('Failed to fetch coredns ConfigMap');
+    const cmData = await cmRes.json();
+    
+    cmData.data = { ...cmData.data, Corefile: corefileContent };
+
+    const res = await fetch(`/api/v1/namespaces/kube-system/configmaps/coredns`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(cmData)
+    });
+    if (!res.ok) throw new Error(await res.text());
+    return `kubectl edit configmap coredns -n kube-system [Corefile Updated]`;
   };
 
   const runNodeShellCommand = async (nodeName: string, command: string) => {
@@ -306,6 +402,10 @@ export function useKubernetes() {
     scaleDeployment,
     applyNetworkPolicy,
     deleteNetworkPolicy,
+    toggleOperator,
+    setIPPoolDisabled,
+    patchDeploymentResources,
+    updateCoreDNSConfigMap,
     runNodeShellCommand,
     runCommandAndGetLogs,
     deployCustomApp,

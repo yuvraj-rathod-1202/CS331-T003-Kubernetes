@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
@@ -97,7 +98,6 @@ func (m *PodConnectivityModule) Name() string {
 // Check gathers raw health signals for pod-to-pod connectivity using Pingmesh O(N) ring
 // and local CNI canary probing.
 func (m *PodConnectivityModule) Check(ctx context.Context, spec *remediationv1alpha1.NetworkRemediationSpec) (*module.CheckResult, error) {
-	log := logf.FromContext(ctx).WithName("podconnectivity")
 
 	m.targetNamespace = spec.PodConnectivity.TargetNamespace
 	if m.targetNamespace == "" {
@@ -109,9 +109,6 @@ func (m *PodConnectivityModule) Check(ctx context.Context, spec *remediationv1al
 	if m.failureThreshold <= 0 {
 		m.failureThreshold = 2
 	}
-
-	// Pingmesh Ring Topology & Local CNI Probing
-	log.Info("Running Pingmesh O(N) Ring Topology & Local CNI checks")
 
 	nodeList := &corev1.NodeList{}
 	if err := m.Client.List(ctx, nodeList); err != nil {
@@ -125,7 +122,6 @@ func (m *PodConnectivityModule) Check(ctx context.Context, spec *remediationv1al
 	}
 
 	ring := BuildRingTopology(nodeList.Items)
-	log.Info("Constructed ring topology", "totalNodes", len(ring.Nodes), "totalEdges", len(ring.Edges))
 
 	podList := &corev1.PodList{}
 	if err := m.Client.List(ctx, podList, client.InNamespace(m.targetNamespace)); err != nil {
@@ -137,7 +133,10 @@ func (m *PodConnectivityModule) Check(ctx context.Context, spec *remediationv1al
 	for i := range podList.Items {
 		p := &podList.Items[i]
 		if p.Status.Phase == corev1.PodRunning && p.Status.PodIP != "" {
-			nodePodMap[p.Spec.NodeName] = p
+			_, exists := nodePodMap[p.Spec.NodeName]
+			if !exists || strings.Contains(p.Name, "dns-checker") || strings.Contains(p.Name, "probe") {
+				nodePodMap[p.Spec.NodeName] = p
+			}
 		}
 	}
 
@@ -226,7 +225,7 @@ func (m *PodConnectivityModule) pingIP(ctx context.Context, pod *corev1.Pod, tar
 		Namespace(pod.Namespace).
 		SubResource("exec").
 		VersionedParams(&corev1.PodExecOptions{
-			Command: []string{"ping", "-c", "1", "-W", "1", targetIP},
+			Command: []string{"sh", "-c", fmt.Sprintf("ping -c 1 -W 1 %s || nc -z -w 1 %s 80 || wget -q -O- --timeout=1 %s:80 >/dev/null 2>&1", targetIP, targetIP, targetIP)},
 			Stdout:  true,
 			Stderr:  true,
 		}, scheme.ParameterCodec)

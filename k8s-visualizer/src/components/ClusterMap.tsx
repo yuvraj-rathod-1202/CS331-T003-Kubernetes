@@ -1,4 +1,4 @@
-import React, { useEffect, useCallback } from 'react';
+import React, { useEffect } from 'react';
 import {
   ReactFlow,
   Background,
@@ -15,22 +15,22 @@ import type { K8sNode, K8sPod } from '../hooks/useKubernetes';
 import { Server, Box, Globe } from 'lucide-react';
 
 const InternetNode = ({ data }: { data: any }) => (
-  <div className="custom-node internet-node">
+  <div className="custom-node internet-node" style={{ width: '180px', padding: '12px' }}>
     <Globe className="node-icon" size={24} />
     <div>
-      <strong>{data.label}</strong>
+      <strong style={{ fontSize: '0.85rem' }}>{data.label}</strong>
     </div>
     <Handle type="source" position={Position.Bottom} />
   </div>
 );
 
 const K8sNodeComponent = ({ data }: { data: any }) => (
-  <div className="custom-node k8s-node">
+  <div className="custom-node k8s-node" style={{ width: '220px', padding: '14px' }}>
     <Handle type="target" position={Position.Top} />
-    <Server className="node-icon" size={20} />
+    <Server className="node-icon" size={22} color="#3b82f6" />
     <div>
-      <strong>Node</strong>
-      <div className="node-name">{data.label}</div>
+      <strong style={{ fontSize: '0.9rem' }}>Node</strong>
+      <div className="node-name" style={{ fontSize: '0.8rem', fontWeight: 600 }}>{data.label}</div>
     </div>
     <div className={`status-badge ${data.status.toLowerCase()}`}>
       {data.status}
@@ -50,14 +50,21 @@ const K8sPodComponent = ({ data }: { data: any }) => {
     <div 
       className={`custom-node k8s-pod ${statusClass} ${isSelectedClass}`}
       onClick={() => data.onSelect && data.onSelect(data.label)}
+      style={{ width: '190px', padding: '10px 12px', boxSizing: 'border-box' }}
     >
       <Handle type="target" position={Position.Top} />
-      <Box className="node-icon" size={18} />
-      <div>
-        <strong>{data.isCNI ? 'CNI Agent' : 'Pod'}</strong>
-        <div className="node-name" title={data.label}>{data.label.substring(0, 20)}...</div>
+      <Box className="node-icon" size={16} />
+      <div style={{ width: '100%', textOverflow: 'ellipsis', overflow: 'hidden' }}>
+        <strong style={{ fontSize: '0.78rem' }}>{data.isCNI ? 'CNI Agent' : 'Pod'}</strong>
+        <div 
+          className="node-name" 
+          title={data.label} 
+          style={{ fontSize: '0.72rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', marginTop: '2px' }}
+        >
+          {data.label}
+        </div>
       </div>
-      <div className={`status-badge ${statusClass}`}>
+      <div className={`status-badge ${statusClass}`} style={{ fontSize: '0.65rem', padding: '2px 8px', marginTop: '4px' }}>
         {data.status}
       </div>
       {(data.isSource || data.isTarget) && (
@@ -91,68 +98,76 @@ export function ClusterMap({ k8sNodes, k8sPods, isCrashing, testEdges, pendingSo
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
 
   useEffect(() => {
-    setNodes((currentNodes) => {
-      const newNodes: Node[] = [];
-      
-      // Keep existing positions
-      const getPos = (id: string, defaultX: number, defaultY: number) => {
-        const existing = currentNodes.find(n => n.id === id);
-        return existing ? existing.position : { x: defaultX, y: defaultY };
-      };
+    // Recompute clean 2D grid layout to prevent pod overlaps
+    const newNodes: Node[] = [];
 
-      // 1. Internet Node
-      newNodes.push({
-        id: 'internet',
-        type: 'internet',
-        position: getPos('internet', 400, 50),
-        data: { label: 'External Traffic' },
-      });
+    // Calculate internet node position centered over worker nodes
+    const totalNodesCount = Math.max(k8sNodes.length, 1);
+    const centerInternetX = 200 + ((totalNodesCount - 1) * 600) / 2;
 
-      // 2. K8s Nodes
-      k8sNodes.forEach((node, index) => {
-        const xPos = 200 + index * 400;
-        newNodes.push({
-          id: `node-${node.name}`,
-          type: 'k8sNode',
-          position: getPos(`node-${node.name}`, xPos, 200),
-          data: { label: node.name, status: node.status },
-        });
-      });
-
-      // 3. K8s Pods
-      const podsByNode: Record<string, K8sPod[]> = {};
-      k8sPods.forEach(pod => {
-        if (!podsByNode[pod.nodeName]) podsByNode[pod.nodeName] = [];
-        podsByNode[pod.nodeName].push(pod);
-      });
-
-      k8sNodes.forEach((node, nodeIndex) => {
-        const nodeXPos = 200 + nodeIndex * 400;
-        const podsOnThisNode = podsByNode[node.name] || [];
-        
-        podsOnThisNode.forEach((pod, podIndex) => {
-          const offset = (podIndex - (podsOnThisNode.length - 1) / 2) * 200;
-          newNodes.push({
-            id: `pod-${pod.name}`,
-            type: 'k8sPod',
-            position: getPos(`pod-${pod.name}`, nodeXPos + offset, 400),
-            data: { 
-              label: pod.name, 
-              status: pod.status,
-              isCNI: pod.isCNI,
-              selected: selectedPod === pod.name || pendingSource === pod.name,
-              isSource: pendingSource === pod.name,
-              isTarget: false,
-              onSelect: onSelectPod
-            },
-          });
-        });
-      });
-
-      return newNodes;
+    // 1. Internet Node
+    newNodes.push({
+      id: 'internet',
+      type: 'internet',
+      position: { x: centerInternetX, y: 30 },
+      data: { label: 'External Traffic' },
     });
 
-    // Edges can be fully rebuilt without losing state
+    // 2. K8s Nodes
+    k8sNodes.forEach((node, index) => {
+      const xPos = 200 + index * 600;
+      newNodes.push({
+        id: `node-${node.name}`,
+        type: 'k8sNode',
+        position: { x: xPos, y: 160 },
+        data: { label: node.name, status: node.status },
+      });
+    });
+
+    // 3. K8s Pods (Organized in 2-column grid per node)
+    const podsByNode: Record<string, K8sPod[]> = {};
+    k8sPods.forEach(pod => {
+      if (!podsByNode[pod.nodeName]) podsByNode[pod.nodeName] = [];
+      podsByNode[pod.nodeName].push(pod);
+    });
+
+    k8sNodes.forEach((node, nodeIndex) => {
+      const nodeXCenter = 200 + nodeIndex * 600;
+      const podsOnThisNode = podsByNode[node.name] || [];
+      
+      const COLS = 2; // 2 columns per node
+      const COLUMN_SPACING = 215; // horizontal distance between columns
+      const ROW_SPACING = 110;    // vertical distance between rows
+      
+      podsOnThisNode.forEach((pod, podIndex) => {
+        const col = podIndex % COLS;
+        const row = Math.floor(podIndex / COLS);
+        
+        // Calculate grid x relative to node center
+        const xOffset = (col - (COLS - 1) / 2) * COLUMN_SPACING;
+        const posX = nodeXCenter + xOffset;
+        const posY = 320 + row * ROW_SPACING;
+
+        newNodes.push({
+          id: `pod-${pod.name}`,
+          type: 'k8sPod',
+          position: { x: posX, y: posY },
+          data: { 
+            label: pod.name, 
+            status: pod.status,
+            isCNI: pod.isCNI,
+            selected: selectedPod === pod.name || pendingSource === pod.name,
+            isSource: pendingSource === pod.name,
+            isTarget: false,
+            onSelect: onSelectPod
+          },
+        });
+      });
+    });
+
+    setNodes(newNodes);
+
+    // Edges
     const newEdges: Edge[] = [];
     k8sNodes.forEach(node => {
       newEdges.push({
@@ -166,7 +181,6 @@ export function ClusterMap({ k8sNodes, k8sPods, isCrashing, testEdges, pendingSo
     });
 
     k8sPods.forEach(pod => {
-      // Draw edge from Node to Pod
       newEdges.push({
         id: `e-${pod.nodeName}-${pod.name}`,
         source: `node-${pod.nodeName}`,
@@ -177,7 +191,7 @@ export function ClusterMap({ k8sNodes, k8sPods, isCrashing, testEdges, pendingSo
       });
     });
 
-    // Draw all test edges
+    // Test edges
     testEdges.forEach((edge, idx) => {
       const isEdgeCrashing = isCrashing && (selectedPod === edge.source || selectedPod === edge.target);
       const baseStyle = { stroke: isEdgeCrashing ? '#ef4444' : '#eab308', strokeWidth: 4 };
@@ -191,7 +205,7 @@ export function ClusterMap({ k8sNodes, k8sPods, isCrashing, testEdges, pendingSo
         const cniB = k8sPods.find(p => p.isCNI && p.nodeName === targetPodObj.nodeName);
 
         if (cniA && cniB) {
-          // 1. Pod A -> CNI A
+          // Pod A -> CNI A
           newEdges.push({
             id: `e-test-p1-${edge.source}-${cniA.name}-${idx}`,
             source: `pod-${edge.source}`,
@@ -201,7 +215,7 @@ export function ClusterMap({ k8sNodes, k8sPods, isCrashing, testEdges, pendingSo
             markerEnd: baseMarker,
           });
 
-          // 2. CNI A -> CNI B
+          // CNI A -> CNI B
           newEdges.push({
             id: `e-test-p2-${cniA.name}-${cniB.name}-${idx}`,
             source: `pod-${cniA.name}`,
@@ -215,7 +229,7 @@ export function ClusterMap({ k8sNodes, k8sPods, isCrashing, testEdges, pendingSo
             labelBgStyle: { fill: '#fff', fillOpacity: 0.8 },
           });
 
-          // 3. CNI B -> Pod B
+          // CNI B -> Pod B
           newEdges.push({
             id: `e-test-p3-${cniB.name}-${edge.target}-${idx}`,
             source: `pod-${cniB.name}`,
@@ -225,7 +239,6 @@ export function ClusterMap({ k8sNodes, k8sPods, isCrashing, testEdges, pendingSo
             markerEnd: baseMarker,
           });
         } else if (cniA) {
-          // CNI B is dead! Draw a severed connection
           newEdges.push({
             id: `e-test-p1-${edge.source}-${cniA.name}-${idx}`,
             source: `pod-${edge.source}`,
@@ -239,10 +252,9 @@ export function ClusterMap({ k8sNodes, k8sPods, isCrashing, testEdges, pendingSo
             labelBgStyle: { fill: '#fff', fillOpacity: 0.8 },
           });
         }
-        return; // Do not draw the direct edge!
+        return;
       }
 
-      // Same-node connection
       newEdges.push({
         id: `e-test-${edge.source}-${edge.target}-${idx}`,
         source: `pod-${edge.source}`,
@@ -269,6 +281,7 @@ export function ClusterMap({ k8sNodes, k8sPods, isCrashing, testEdges, pendingSo
         onEdgesChange={onEdgesChange}
         nodeTypes={nodeTypes}
         fitView
+        fitViewOptions={{ padding: 0.2 }}
       >
         <Background color="#cbd5e1" gap={24} />
         <Controls style={{ background: '#ffffff', border: '1px solid #e2e8f0', fill: '#64748b' }} />

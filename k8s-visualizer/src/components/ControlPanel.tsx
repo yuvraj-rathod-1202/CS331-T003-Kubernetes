@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ShieldAlert, RefreshCcw, Plus, Trash2, Activity, Terminal, CheckCircle, XCircle } from 'lucide-react';
+import { ShieldAlert, Plus, Trash2, Terminal, CheckCircle, XCircle, Zap, Cpu, Network, WifiOff, FileCode } from 'lucide-react';
 import type { K8sNode, K8sPod, OperatorStatus } from '../hooks/useKubernetes';
 
 interface ControlPanelProps {
@@ -8,8 +8,59 @@ interface ControlPanelProps {
   k8sNodes: K8sNode[];
   k8sPods: K8sPod[];
   operatorStatus: OperatorStatus | null;
-  k8sApi: any; // the return value of useKubernetes
+  k8sApi: any;
 }
+
+const DEFAULT_COREFILE = `.:53 {
+    errors
+    health {
+       lameduck 5s
+    }
+    ready
+    kubernetes cluster.local in-addr.arpa ip6.arpa {
+       pods insecure
+       fallthrough in-addr.arpa ip6.arpa
+       ttl 30
+    }
+    prometheus :9153
+    forward . /etc/resolv.conf {
+       max_concurrent 1000
+    }
+    cache 30
+    loop
+    reload
+    loadbalance
+}`;
+
+const CORRUPTED_UPSTREAM_COREFILE = `.:53 {
+    errors
+    health {
+       lameduck 5s
+    }
+    ready
+    kubernetes cluster.local in-addr.arpa ip6.arpa {
+       pods insecure
+       fallthrough in-addr.arpa ip6.arpa
+       ttl 30
+    }
+    prometheus :9153
+    forward . 192.0.2.1 {
+       max_concurrent 1000
+    }
+    cache 30
+    loop
+    reload
+    loadbalance
+}`;
+
+const BAD_PLUGIN_COREFILE = `.:53 {
+    errors
+    invalid_plugin_directive_xyz
+    health
+    ready
+    kubernetes cluster.local in-addr.arpa ip6.arpa
+    forward . /etc/resolv.conf
+}`;
 
 export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorStatus, k8sApi }: ControlPanelProps) {
   const [newAppName, setNewAppName] = useState('');
@@ -33,30 +84,70 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
     }
   };
 
-  // --- EXPERIMENT 1: CNI FAILURE ---
+  // --- MODULE 1: CNI Subsystem (E1 - E3) ---
   const exp1KillCNI = async () => {
     if (!selectedPodObj || !selectedPodObj.isCNI) return;
     setIsProcessing(true);
     try {
       const cmd = await k8sApi.deletePod(selectedPodObj.namespace, selectedPodObj.name);
       onLog(cmd, 'system');
-      onLog(`[Experiment 1] Killed CNI agent on node ${selectedPodObj.nodeName}. Watch for BGP route loss!`, 'warning');
+      onLog(`[E1 CNI Crash] Killed CNI agent on node ${selectedPodObj.nodeName}. Watch for BGP route loss!`, 'warning');
     } catch (e: any) {
       onLog(`Failed: ${e.message}`, 'error');
     }
     setIsProcessing(false);
   };
 
-  // --- EXPERIMENT 2: CoreDNS FAILURE ---
-  const exp2ScaleCoreDNS = async (replicas: number) => {
+  const exp2ExhaustIPAM = async () => {
+    setIsProcessing(true);
+    try {
+      onLog(`kubectl create deployment ipam-filler --image=nginx:alpine --replicas=20`, 'system');
+      await k8sApi.deployCustomApp('ipam-filler');
+      onLog(`[E2 IPAM Exhaustion] Scaled deployment to fill IPPool. Pods will become stuck in ContainerCreating!`, 'critical');
+    } catch (e: any) {
+      onLog(`Failed: ${e.message}`, 'error');
+    }
+    setIsProcessing(false);
+  };
+
+  const exp2CleanupIPAM = async () => {
+    setIsProcessing(true);
+    try {
+      onLog(`kubectl delete deployment ipam-filler`, 'system');
+      await k8sApi.deleteCustomApp('ipam-filler');
+      onLog(`[E2 IPAM Cleanup] Cleaned up filler pods.`, 'success');
+    } catch (e: any) {
+      onLog(`Note: ${e.message}`, 'info');
+    }
+    setIsProcessing(false);
+  };
+
+  const exp3ToggleIPPool = async (disable: boolean) => {
+    setIsProcessing(true);
+    try {
+      const cmd = await k8sApi.setIPPoolDisabled(disable);
+      onLog(cmd, 'system');
+      if (disable) {
+        onLog(`[E3 IPPool Disabled] Patched IPPool spec.disabled = true. New IP allocations will fail!`, 'critical');
+      } else {
+        onLog(`[E3 IPPool Enabled] Re-enabled IPPool spec.disabled = false.`, 'success');
+      }
+    } catch (e: any) {
+      onLog(`Failed to patch IPPool: ${e.message}`, 'error');
+    }
+    setIsProcessing(false);
+  };
+
+  // --- MODULE 2: CoreDNS Subsystem (E4 - E7) ---
+  const exp4ScaleCoreDNS = async (replicas: number) => {
     setIsProcessing(true);
     try {
       const cmd = await k8sApi.scaleDeployment('kube-system', 'coredns', replicas);
       onLog(cmd, 'system');
       if (replicas === 0) {
-        onLog(`[Experiment 2] CoreDNS scaled to 0. All cluster DNS resolution will fail!`, 'critical');
+        onLog(`[E4 CoreDNS Scale 0] CoreDNS scaled to 0. All cluster DNS resolution will fail!`, 'critical');
       } else {
-        onLog(`[Experiment 2] Restored CoreDNS to ${replicas} replicas.`, 'success');
+        onLog(`[E4 CoreDNS Scale Restore] Restored CoreDNS to ${replicas} replicas.`, 'success');
       }
     } catch (e: any) {
       onLog(`Failed to scale CoreDNS: ${e.message}`, 'error');
@@ -64,83 +155,171 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
     setIsProcessing(false);
   };
 
-  // --- EXPERIMENT 3: NetworkPolicy FAILURE ---
-  const exp3ApplyDenyAll = async () => {
+  const exp5ThrottleCPU = async (throttle: boolean) => {
+    setIsProcessing(true);
+    try {
+      const cmd = await k8sApi.patchDeploymentResources('kube-system', 'coredns', throttle ? '5m' : null);
+      onLog(cmd, 'system');
+      if (throttle) {
+        onLog(`[E5 CPU Throttle] CoreDNS CPU limit set to 5m. Query latency will spike >1000ms!`, 'warning');
+      } else {
+        onLog(`[E5 CPU Throttle] CoreDNS CPU limits restored.`, 'success');
+      }
+    } catch (e: any) {
+      onLog(`Failed to patch resources: ${e.message}`, 'error');
+    }
+    setIsProcessing(false);
+  };
+
+  const exp6CorruptUpstream = async (corrupt: boolean) => {
+    setIsProcessing(true);
+    try {
+      const cmd = await k8sApi.updateCoreDNSConfigMap(corrupt ? CORRUPTED_UPSTREAM_COREFILE : DEFAULT_COREFILE);
+      onLog(cmd, 'system');
+      if (corrupt) {
+        onLog(`[E6 Upstream Corrupt] Forward target set to 192.0.2.1. External DNS resolution will hang!`, 'critical');
+      } else {
+        onLog(`[E6 Upstream Restored] Restored valid Corefile.`, 'success');
+      }
+    } catch (e: any) {
+      onLog(`Failed: ${e.message}`, 'error');
+    }
+    setIsProcessing(false);
+  };
+
+  const exp7CrashLoop = async (crash: boolean) => {
+    setIsProcessing(true);
+    try {
+      const cmd = await k8sApi.updateCoreDNSConfigMap(crash ? BAD_PLUGIN_COREFILE : DEFAULT_COREFILE);
+      onLog(cmd, 'system');
+      if (crash) {
+        onLog(`[E7 Bad Plugin] Injected invalid directive into Corefile. CoreDNS pods will CrashLoop!`, 'critical');
+      } else {
+        onLog(`[E7 Corefile Restored] Restored valid Corefile.`, 'success');
+      }
+    } catch (e: any) {
+      onLog(`Failed: ${e.message}`, 'error');
+    }
+    setIsProcessing(false);
+  };
+
+  // --- MODULE 3: NetworkPolicy Enforcement (E8) ---
+  const exp8FelixDrift = async () => {
     if (!selectedPodObj || selectedPodObj.isCNI || selectedPodObj.isCoreDNS) return;
     setIsProcessing(true);
     try {
       const policy = {
         apiVersion: 'networking.k8s.io/v1',
         kind: 'NetworkPolicy',
-        metadata: { name: 'deny-all-exp3', namespace: selectedPodObj.namespace },
+        metadata: { name: 'deny-all-exp8', namespace: selectedPodObj.namespace },
         spec: {
           podSelector: { matchLabels: { app: selectedPodObj.appLabel } },
           policyTypes: ['Ingress', 'Egress']
         }
       };
-      const cmd = await k8sApi.applyNetworkPolicy(selectedPodObj.namespace, 'deny-all-exp3', policy);
+      const cmd = await k8sApi.applyNetworkPolicy(selectedPodObj.namespace, 'deny-all-exp8', policy);
       onLog(cmd, 'system');
-      onLog(`[Experiment 3] Applied Deny-All NetworkPolicy to ${selectedPodObj.appLabel}. Traffic will silently drop.`, 'critical');
+      onLog(`[E8 Felix Drift] Applied Deny-All policy to ${selectedPodObj.appLabel}. Now crash Felix to observe policy drift!`, 'critical');
     } catch (e: any) {
       onLog(`Failed: ${e.message}`, 'error');
     }
     setIsProcessing(false);
   };
 
-  const exp3RemovePolicy = async () => {
+  const exp8RemovePolicy = async () => {
     setIsProcessing(true);
     try {
       if (selectedPodObj) {
-        const cmd = await k8sApi.deleteNetworkPolicy(selectedPodObj.namespace, 'deny-all-exp3');
+        const cmd = await k8sApi.deleteNetworkPolicy(selectedPodObj.namespace, 'deny-all-exp8');
         onLog(cmd, 'system');
-        onLog(`[Experiment 3] Removed Deny-All NetworkPolicy. Traffic restored.`, 'success');
+        onLog(`[E8 Felix Drift] Removed Deny-All NetworkPolicy.`, 'success');
       }
     } catch (e: any) {
-      onLog(`Note: Policy might already be deleted.`, 'info');
+      onLog(`Note: Policy already removed.`, 'info');
     }
     setIsProcessing(false);
   };
 
-  // --- EXPERIMENT 4: POD CONNECTIVITY (iptables Drop via Node Shell) ---
-  const exp4DropIptables = async () => {
+  // --- MODULE 4: Pod-to-Pod Connectivity (E9 - E12) ---
+  const exp9DownVeth = async () => {
     if (!selectedPodObj || !selectedPodObj.nodeName) return;
     setIsProcessing(true);
     try {
-      // In a real environment we drop the specific pod subnet, but for safety in this demo we simulate by dropping specific port/traffic
-      // Actually, we'll just log what we would run, or run the real nsenter command!
-      const dropCmd = `iptables -I FORWARD -j DROP -m comment --comment "exp4-failure"`;
-      const cmd = await k8sApi.runNodeShellCommand(selectedPodObj.nodeName, dropCmd);
+      const downCmd = `ip link | grep veth | awk '{print $2}' | cut -d: -f1 | head -n 1 | xargs -I {} ip link set {} down`;
+      const cmd = await k8sApi.runNodeShellCommand(selectedPodObj.nodeName, downCmd);
       onLog(cmd, 'system');
-      onLog(`[Experiment 4] Deployed temporary Privileged Node Shell to ${selectedPodObj.nodeName}.`, 'warning');
-      onLog(`[Experiment 4] Executed iptables drop at host level. The kernel will now drop forwarded packets!`, 'critical');
-    } catch (e: any) {
-      onLog(`Failed to run Node Shell: ${e.message}`, 'error');
-    }
-    setIsProcessing(false);
-  };
-  
-  const exp4RestoreIptables = async () => {
-    if (!selectedPodObj || !selectedPodObj.nodeName) return;
-    setIsProcessing(true);
-    try {
-      const restoreCmd = `iptables -D FORWARD -j DROP -m comment --comment "exp4-failure"`;
-      const cmd = await k8sApi.runNodeShellCommand(selectedPodObj.nodeName, restoreCmd);
-      onLog(cmd, 'system');
-      onLog(`[Experiment 4] Restored iptables rules on ${selectedPodObj.nodeName}.`, 'success');
+      onLog(`[E9 Local veth Down] Downed local veth interface on node ${selectedPodObj.nodeName}.`, 'critical');
     } catch (e: any) {
       onLog(`Failed: ${e.message}`, 'error');
     }
     setIsProcessing(false);
   };
 
-  // Utility to test ping
+  const exp10ToggleTunnel = async (down: boolean) => {
+    if (!selectedPodObj || !selectedPodObj.nodeName) return;
+    setIsProcessing(true);
+    try {
+      const tunnelCmd = down ? `ip link set tunl0 down` : `ip link set tunl0 up`;
+      const cmd = await k8sApi.runNodeShellCommand(selectedPodObj.nodeName, tunnelCmd);
+      onLog(cmd, 'system');
+      if (down) {
+        onLog(`[E10 Overlay Tunnel Down] Downed tunl0 interface on ${selectedPodObj.nodeName}. Cross-node pod traffic will drop!`, 'critical');
+      } else {
+        onLog(`[E10 Overlay Tunnel Restored] Brought tunl0 interface back UP.`, 'success');
+      }
+    } catch (e: any) {
+      onLog(`Failed: ${e.message}`, 'error');
+    }
+    setIsProcessing(false);
+  };
+
+  const exp11ToggleIptables = async (drop: boolean) => {
+    if (!selectedPodObj || !selectedPodObj.nodeName) return;
+    setIsProcessing(true);
+    try {
+      const iptablesCmd = drop 
+        ? `iptables -I FORWARD -j DROP -m comment --comment "exp11-failure"`
+        : `iptables -D FORWARD -j DROP -m comment --comment "exp11-failure"`;
+      const cmd = await k8sApi.runNodeShellCommand(selectedPodObj.nodeName, iptablesCmd);
+      onLog(cmd, 'system');
+      if (drop) {
+        onLog(`[E11 Host iptables DROP] Executed iptables FORWARD DROP on ${selectedPodObj.nodeName}. Forwarded packets dropped!`, 'critical');
+      } else {
+        onLog(`[E11 Host iptables Restored] Restored iptables rules on ${selectedPodObj.nodeName}.`, 'success');
+      }
+    } catch (e: any) {
+      onLog(`Failed: ${e.message}`, 'error');
+    }
+    setIsProcessing(false);
+  };
+
+  const exp12ToggleInterNode = async (breakRoute: boolean) => {
+    if (!selectedPodObj || !selectedPodObj.nodeName) return;
+    setIsProcessing(true);
+    try {
+      const routeCmd = breakRoute
+        ? `iptables -I OUTPUT -p ipencap -j DROP`
+        : `iptables -D OUTPUT -p ipencap -j DROP`;
+      const cmd = await k8sApi.runNodeShellCommand(selectedPodObj.nodeName, routeCmd);
+      onLog(cmd, 'system');
+      if (breakRoute) {
+        onLog(`[E12 Inter-Node Break] Blocked IPIP encapsulation traffic on ${selectedPodObj.nodeName}. Inter-node ring probes will fail!`, 'critical');
+      } else {
+        onLog(`[E12 Inter-Node Restored] Unblocked IPIP traffic on ${selectedPodObj.nodeName}.`, 'success');
+      }
+    } catch (e: any) {
+      onLog(`Failed: ${e.message}`, 'error');
+    }
+    setIsProcessing(false);
+  };
+
+  // Utility Ping Test
   const runPingTest = async () => {
     if (!selectedPodObj) return;
     setIsProcessing(true);
     try {
       onLog(`kubectl exec -it ${selectedPodObj.name} -- ping -c 3 8.8.8.8`, 'system');
       onLog(`Running real ping test... please wait 3-4 seconds.`, 'info');
-      // For simplicity, we just use our job wrapper to run a ping
       const output = await k8sApi.runCommandAndGetLogs(`ping -c 3 8.8.8.8`, selectedPodObj.appLabel);
       onLog(`Ping Output:\n${output}`, 'info');
     } catch(e: any) {
@@ -149,11 +328,67 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
     setIsProcessing(false);
   };
 
+  const [operatorOverride, setOperatorOverride] = useState<boolean | null>(null);
+
+  const isOperatorEnabled = operatorOverride !== null ? operatorOverride : (operatorStatus ? Boolean(
+    operatorStatus.cni?.enabled && 
+    operatorStatus.coreDNS?.enabled &&
+    operatorStatus.networkPolicy?.enabled &&
+    operatorStatus.podConnectivity?.enabled
+  ) : true);
+
+  const handleToggleOperator = async (enable: boolean) => {
+    setIsProcessing(true);
+    setOperatorOverride(enable);
+    try {
+      const cmd = await k8sApi.toggleOperator(enable);
+      onLog(cmd, 'system');
+      if (enable) {
+        onLog(`[Operator Master Switch] Operator Auto-Healing ENABLED. Pipeline active!`, 'success');
+      } else {
+        onLog(`[Operator Master Switch] Operator Auto-Healing DISABLED. Native K8s behavior mode!`, 'critical');
+      }
+    } catch (e: any) {
+      setOperatorOverride(!enable);
+      onLog(`Failed to toggle operator: ${e.message}`, 'error');
+    }
+    setIsProcessing(false);
+  };
+
   return (
     <div className="control-panel glass-panel" style={{ overflowY: 'auto' }}>
       <div className="panel-header">
         <Terminal className="icon" size={24} color="#3b82f6" />
-        <h2>Real Experiments</h2>
+        <h2>All 12 Real Experiments</h2>
+      </div>
+
+      {/* MASTER OPERATOR TOGGLE SWITCH */}
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        padding: '10px 12px',
+        background: isOperatorEnabled ? 'rgba(16, 185, 129, 0.12)' : 'rgba(239, 68, 68, 0.12)',
+        border: `1px solid ${isOperatorEnabled ? '#10b981' : '#ef4444'}`,
+        borderRadius: '8px',
+        marginBottom: '15px'
+      }}>
+        <div>
+          <div style={{ fontWeight: 600, fontSize: '0.85rem', color: isOperatorEnabled ? '#10b981' : '#ef4444' }}>
+            Operator Status: {isOperatorEnabled ? 'ENABLED' : 'DISABLED'}
+          </div>
+          <div style={{ fontSize: '0.7rem', color: '#aaa' }}>
+            {isOperatorEnabled ? 'Auto-healing active' : 'Native K8s mode (No auto-healing)'}
+          </div>
+        </div>
+        <button
+          className={`btn ${isOperatorEnabled ? 'crash-btn' : 'heal-btn'}`}
+          onClick={() => handleToggleOperator(!isOperatorEnabled)}
+          style={{ width: 'auto', padding: '6px 12px', fontSize: '0.75rem' }}
+          disabled={isProcessing}
+        >
+          {isOperatorEnabled ? 'Disable' : 'Enable'}
+        </button>
       </div>
 
       <div style={{ display: 'flex', gap: '8px', marginBottom: '15px', flexDirection: 'column' }}>
@@ -177,69 +412,130 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
       {/* EXPERIMENTS UI */}
       <div className="experiments-section" style={{ display: 'flex', flexDirection: 'column', gap: '15px', marginTop: '15px' }}>
         
-        {/* Exp 1 */}
+        {/* MODULE 1: CNI */}
         <div className="experiment-card" style={{ padding: '10px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px' }}>
-          <h4>1. CNI Failure</h4>
-          <p style={{fontSize: '0.8rem', color: '#aaa', margin: '4px 0'}}>Select a `calico-node` pod to test CNI disruption.</p>
-          <button 
-            className="btn crash-btn" 
-            onClick={exp1KillCNI} 
-            disabled={!selectedPodObj?.isCNI || isProcessing}
-          >
-            <ShieldAlert size={16} /> Kill Calico Pod
-          </button>
+          <h4><Network size={16} style={{display:'inline', marginRight: '6px'}} />1. CNI Subsystem (E1 - E3)</h4>
+          <p style={{fontSize: '0.75rem', color: '#aaa', margin: '4px 0'}}>Calico agent crash, IPAM pool exhaustion, IPPool disabled.</p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '8px' }}>
+            <button className="btn crash-btn" onClick={exp1KillCNI} disabled={!selectedPodObj?.isCNI || isProcessing}>
+              <ShieldAlert size={14} /> E1: Kill Calico Agent Pod
+            </button>
+            <div style={{ display: 'flex', gap: '6px' }}>
+              <button className="btn crash-btn" onClick={exp2ExhaustIPAM} disabled={isProcessing} style={{flex: 1}}>
+                E2: Fill IPAM Pool
+              </button>
+              <button className="btn heal-btn" onClick={exp2CleanupIPAM} disabled={isProcessing} style={{flex: 1}}>
+                Clean IPAM
+              </button>
+            </div>
+            <div style={{ display: 'flex', gap: '6px' }}>
+              <button className="btn crash-btn" onClick={() => exp3ToggleIPPool(true)} disabled={isProcessing} style={{flex: 1}}>
+                E3: Disable IPPool
+              </button>
+              <button className="btn heal-btn" onClick={() => exp3ToggleIPPool(false)} disabled={isProcessing} style={{flex: 1}}>
+                Enable IPPool
+              </button>
+            </div>
+          </div>
         </div>
 
-        {/* Exp 2 */}
+        {/* MODULE 2: CoreDNS */}
         <div className="experiment-card" style={{ padding: '10px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px' }}>
-          <h4>2. CoreDNS Failure</h4>
-          <p style={{fontSize: '0.8rem', color: '#aaa', margin: '4px 0'}}>Scale CoreDNS to test service discovery failure.</p>
-          <div style={{ display: 'flex', gap: '8px' }}>
-            <button className="btn crash-btn" onClick={() => exp2ScaleCoreDNS(0)} disabled={isProcessing}>
-              Scale to 0
+          <h4><Zap size={16} style={{display:'inline', marginRight: '6px'}} />2. CoreDNS Subsystem (E4 - E7)</h4>
+          <p style={{fontSize: '0.75rem', color: '#aaa', margin: '4px 0'}}>Replicas to 0, CPU throttling latency, upstream & syntax corrupt.</p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '8px' }}>
+            <div style={{ display: 'flex', gap: '6px' }}>
+              <button className="btn crash-btn" onClick={() => exp4ScaleCoreDNS(0)} disabled={isProcessing} style={{flex: 1}}>
+                E4: Scale 0
+              </button>
+              <button className="btn heal-btn" onClick={() => exp4ScaleCoreDNS(2)} disabled={isProcessing} style={{flex: 1}}>
+                Restore (2)
+              </button>
+            </div>
+            <div style={{ display: 'flex', gap: '6px' }}>
+              <button className="btn crash-btn" onClick={() => exp5ThrottleCPU(true)} disabled={isProcessing} style={{flex: 1}}>
+                E5: CPU Limit (5m)
+              </button>
+              <button className="btn heal-btn" onClick={() => exp5ThrottleCPU(false)} disabled={isProcessing} style={{flex: 1}}>
+                Restore CPU
+              </button>
+            </div>
+            <div style={{ display: 'flex', gap: '6px' }}>
+              <button className="btn crash-btn" onClick={() => exp6CorruptUpstream(true)} disabled={isProcessing} style={{flex: 1}}>
+                E6: Bad Upstream
+              </button>
+              <button className="btn heal-btn" onClick={() => exp6CorruptUpstream(false)} disabled={isProcessing} style={{flex: 1}}>
+                Fix Corefile
+              </button>
+            </div>
+            <div style={{ display: 'flex', gap: '6px' }}>
+              <button className="btn crash-btn" onClick={() => exp7CrashLoop(true)} disabled={isProcessing} style={{flex: 1}}>
+                E7: Bad Plugin
+              </button>
+              <button className="btn heal-btn" onClick={() => exp7CrashLoop(false)} disabled={isProcessing} style={{flex: 1}}>
+                Fix Corefile
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* MODULE 3: NetworkPolicy */}
+        <div className="experiment-card" style={{ padding: '10px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px' }}>
+          <h4><FileCode size={16} style={{display:'inline', marginRight: '6px'}} />3. NetworkPolicy Drift (E8)</h4>
+          <p style={{fontSize: '0.75rem', color: '#aaa', margin: '4px 0'}}>Test silent policy drift when Felix crashes.</p>
+          <div style={{ display: 'flex', gap: '6px', marginTop: '8px' }}>
+            <button className="btn crash-btn" onClick={exp8FelixDrift} disabled={!selectedPodObj || selectedPodObj.isCNI || selectedPodObj.isCoreDNS || isProcessing} style={{flex: 1}}>
+              E8: Deny-All Policy
             </button>
-            <button className="btn heal-btn" onClick={() => exp2ScaleCoreDNS(1)} disabled={isProcessing}>
-              Restore to 1
+            <button className="btn heal-btn" onClick={exp8RemovePolicy} disabled={isProcessing} style={{flex: 1}}>
+              Remove Policy
             </button>
           </div>
         </div>
 
-        {/* Exp 3 */}
+        {/* MODULE 4: Pod Connectivity */}
         <div className="experiment-card" style={{ padding: '10px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px' }}>
-          <h4>3. NetworkPolicy Failure</h4>
-          <p style={{fontSize: '0.8rem', color: '#aaa', margin: '4px 0'}}>Select an app pod to enforce Deny-All policy.</p>
-          <div style={{ display: 'flex', gap: '8px' }}>
-            <button className="btn crash-btn" onClick={exp3ApplyDenyAll} disabled={!selectedPodObj || selectedPodObj.isCNI || selectedPodObj.isCoreDNS || isProcessing}>
-              Deny All
+          <h4><WifiOff size={16} style={{display:'inline', marginRight: '6px'}} />4. Pod Connectivity (E9 - E12)</h4>
+          <p style={{fontSize: '0.75rem', color: '#aaa', margin: '4px 0'}}>veth down, tunl0 down, iptables FORWARD drop, inter-node break.</p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '8px' }}>
+            <button className="btn crash-btn" onClick={exp9DownVeth} disabled={!selectedPodObj || isProcessing}>
+              E9: Down Local veth
             </button>
-            <button className="btn heal-btn" onClick={exp3RemovePolicy} disabled={!selectedPodObj || isProcessing}>
-              Remove
-            </button>
-          </div>
-        </div>
-
-        {/* Exp 4 */}
-        <div className="experiment-card" style={{ padding: '10px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px' }}>
-          <h4>4. Host Connectivity (Node-Shell)</h4>
-          <p style={{fontSize: '0.8rem', color: '#aaa', margin: '4px 0'}}>Select any pod to drop IPTables on its host node natively.</p>
-          <div style={{ display: 'flex', gap: '8px' }}>
-            <button className="btn crash-btn" onClick={exp4DropIptables} disabled={!selectedPodObj || isProcessing}>
-              Drop IP-Tables
-            </button>
-            <button className="btn heal-btn" onClick={exp4RestoreIptables} disabled={!selectedPodObj || isProcessing}>
-              Restore
-            </button>
+            <div style={{ display: 'flex', gap: '6px' }}>
+              <button className="btn crash-btn" onClick={() => exp10ToggleTunnel(true)} disabled={!selectedPodObj || isProcessing} style={{flex: 1}}>
+                E10: Down tunl0
+              </button>
+              <button className="btn heal-btn" onClick={() => exp10ToggleTunnel(false)} disabled={!selectedPodObj || isProcessing} style={{flex: 1}}>
+                Up tunl0
+              </button>
+            </div>
+            <div style={{ display: 'flex', gap: '6px' }}>
+              <button className="btn crash-btn" onClick={() => exp11ToggleIptables(true)} disabled={!selectedPodObj || isProcessing} style={{flex: 1}}>
+                E11: Drop iptables
+              </button>
+              <button className="btn heal-btn" onClick={() => exp11ToggleIptables(false)} disabled={!selectedPodObj || isProcessing} style={{flex: 1}}>
+                Restore iptables
+              </button>
+            </div>
+            <div style={{ display: 'flex', gap: '6px' }}>
+              <button className="btn crash-btn" onClick={() => exp12ToggleInterNode(true)} disabled={!selectedPodObj || isProcessing} style={{flex: 1}}>
+                E12: Break Inter-Node
+              </button>
+              <button className="btn heal-btn" onClick={() => exp12ToggleInterNode(false)} disabled={!selectedPodObj || isProcessing} style={{flex: 1}}>
+                Restore Route
+              </button>
+            </div>
           </div>
         </div>
         
-        {/* Tools */}
+        {/* Verification Tools */}
         <div className="experiment-card" style={{ padding: '10px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px' }}>
           <h4>Verification Tools</h4>
-          <div style={{ display: 'flex', gap: '8px' }}>
-            <button className="btn" onClick={runPingTest} disabled={!selectedPodObj || isProcessing} style={{ background: '#4b5563', color: 'white' }}>
-              Run Ping Test (via Job)
+          <div style={{ display: 'flex', gap: '8px', marginTop: '6px' }}>
+            <button className="btn" onClick={runPingTest} disabled={!selectedPodObj || isProcessing} style={{ background: '#4b5563', color: 'white', flex: 1 }}>
+              Run Ping Test
             </button>
-            <button className="btn" onClick={handleDelete} disabled={!selectedPodObj || selectedPodObj.isCNI || selectedPodObj.isCoreDNS || isProcessing} style={{ background: '#ef4444', color: 'white' }}>
+            <button className="btn" onClick={handleDelete} disabled={!selectedPodObj || selectedPodObj.isCNI || selectedPodObj.isCoreDNS || isProcessing} style={{ background: '#ef4444', color: 'white', flex: 1 }}>
               <Trash2 size={16} /> Delete App
             </button>
           </div>
@@ -266,7 +562,7 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
 }
 
 function StatusRow({ name, status }: { name: string, status: { healthy: boolean, enabled: boolean, message?: string } }) {
-  if (!status.enabled) return <div style={{ fontSize: '0.85rem', color: '#666', display: 'flex', alignItems: 'center' }}><span style={{width: '16px'}}></span> {name}: Disabled</div>;
+  if (!status?.enabled) return <div style={{ fontSize: '0.85rem', color: '#666', display: 'flex', alignItems: 'center' }}><span style={{width: '16px'}}></span> {name}: Disabled</div>;
   
   return (
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '0.85rem' }}>
@@ -280,4 +576,3 @@ function StatusRow({ name, status }: { name: string, status: { healthy: boolean,
     </div>
   );
 }
-

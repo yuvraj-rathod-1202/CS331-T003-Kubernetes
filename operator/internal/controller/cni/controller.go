@@ -174,13 +174,6 @@ func (m *CNIModule) Check(
 	signals[signalIPAMExhaustedPools] = exhausted
 	signals[signalDisabledIPPools] = disabledPools
 
-	logger.Info("check complete",
-		"unreadyCalicoNodes", len(unreadyPods),
-		"stuckPods", len(stuckPods),
-		"exhaustedPools", len(exhausted),
-		"disabledPools", len(disabledPools),
-	)
-
 	return &module.CheckResult{Signals: signals}, nil
 }
 
