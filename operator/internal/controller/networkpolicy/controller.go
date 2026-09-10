@@ -125,6 +125,10 @@ func (m *NetworkPolicyModule) Check(ctx context.Context, spec *remediationv1alph
 	unhealthy := []string{}
 	for i := range pods.Items {
 		p := &pods.Items[i]
+		// Ignore pods created within the last 45 seconds (initial container startup & readiness probe grace period)
+		if time.Since(p.CreationTimestamp.Time) < 45*time.Second {
+			continue
+		}
 		bad := p.Status.Phase != corev1.PodRunning
 		for _, cs := range p.Status.ContainerStatuses {
 			if cs.RestartCount >= 3 || !cs.Ready {

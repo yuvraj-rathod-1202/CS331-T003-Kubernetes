@@ -54,10 +54,13 @@ export function useKubernetes() {
           return isDefault || isSystemCNI || isCoreDNS;
         })
         .map((p: any) => {
-          let status = p.status.phase;
+          let status = p.status.phase || 'Unknown';
           if (p.metadata.deletionTimestamp) {
             status = 'Terminating';
-          } else if (p.status.conditions?.some((c: any) => c.type === 'Ready' && c.status === 'False')) {
+          } else if (
+            p.status.conditions?.some((c: any) => c.type === 'Ready' && c.status === 'False') ||
+            (p.status.phase === 'Running' && !p.status.containerStatuses?.every((cs: any) => cs.ready))
+          ) {
             status = 'NotReady';
           }
           
@@ -85,34 +88,40 @@ export function useKubernetes() {
       setNodes(parsedNodes);
       setPods(parsedPods);
 
-      // Fetch Operator Status
+      // Fetch Operator Status — try both CRD names (cluster-network-remediation is the real one)
       try {
-        const crdRes = await fetch('/apis/remediation.cn-operator.yuvraj-rathod-1202.github.io/v1alpha1/networkremediations/networkremediation-sample');
-        if (crdRes.ok) {
-          const crdData = await crdRes.json();
+        const CRD_NAMES = ['cluster-network-remediation', 'networkremediation-sample'];
+        let crdData: any = null;
+        for (const crdName of CRD_NAMES) {
+          const crdRes = await fetch(`/apis/remediation.cn-operator.yuvraj-rathod-1202.github.io/v1alpha1/networkremediations/${crdName}`);
+          if (crdRes.ok) {
+            crdData = await crdRes.json();
+            break;
+          }
+        }
+        if (crdData) {
           const spec = crdData.spec || {};
-          const status = crdData.status || {};
-
+          const st = crdData.status || {};
           setOperatorStatus({
             cni: {
-              healthy: status.cni?.healthy ?? true,
+              healthy: st.cni?.healthy ?? true,
               enabled: spec.cni?.enabled ?? true,
-              message: status.cni?.message
+              message: st.cni?.message
             },
             coreDNS: {
-              healthy: status.coreDNS?.healthy ?? true,
+              healthy: st.coreDNS?.healthy ?? true,
               enabled: spec.coreDNS?.enabled ?? true,
-              message: status.coreDNS?.message
+              message: st.coreDNS?.message
             },
             networkPolicy: {
-              healthy: status.networkPolicy?.healthy ?? true,
+              healthy: st.networkPolicy?.healthy ?? true,
               enabled: spec.networkPolicy?.enabled ?? true,
-              message: status.networkPolicy?.message
+              message: st.networkPolicy?.message
             },
             podConnectivity: {
-              healthy: status.podConnectivity?.healthy ?? true,
+              healthy: st.podConnectivity?.healthy ?? true,
               enabled: spec.podConnectivity?.enabled ?? true,
-              message: status.podConnectivity?.message
+              message: st.podConnectivity?.message
             }
           });
         }
@@ -186,14 +195,25 @@ export function useKubernetes() {
         podConnectivity: { enabled },
       }
     };
-    const res = await fetch('/apis/remediation.cn-operator.yuvraj-rathod-1202.github.io/v1alpha1/networkremediations/networkremediation-sample', {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/merge-patch+json' },
-      body: JSON.stringify(patch)
-    });
-    if (!res.ok) throw new Error(await res.text());
+    // Patch BOTH CRD instances so whichever the operator watches gets updated
+    const CRD_NAMES = ['cluster-network-remediation', 'networkremediation-sample'];
+    let lastError: string | null = null;
+    let patchedAtLeastOne = false;
+    for (const crdName of CRD_NAMES) {
+      const res = await fetch(`/apis/remediation.cn-operator.yuvraj-rathod-1202.github.io/v1alpha1/networkremediations/${crdName}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/merge-patch+json' },
+        body: JSON.stringify(patch)
+      });
+      if (res.ok) {
+        patchedAtLeastOne = true;
+      } else {
+        lastError = await res.text();
+      }
+    }
+    if (!patchedAtLeastOne) throw new Error(lastError || 'Failed to patch any NetworkRemediation CRD');
     await fetchClusterState();
-    return `kubectl patch networkremediation networkremediation-sample --type=merge -p '{"spec":{"cni":{"enabled":${enabled}},"coreDNS":{"enabled":${enabled}},"networkPolicy":{"enabled":${enabled}},"podConnectivity":{"enabled":${enabled}}}}'`;
+    return `kubectl patch networkremediation cluster-network-remediation --type=merge -p '{"spec":{"cni":{"enabled":${enabled}},"coreDNS":{"enabled":${enabled}},"networkPolicy":{"enabled":${enabled}},"podConnectivity":{"enabled":${enabled}}}}'`;
   };
 
   const setIPPoolDisabled = async (disabled: boolean) => {

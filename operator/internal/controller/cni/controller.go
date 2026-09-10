@@ -233,6 +233,10 @@ func (m *CNIModule) checkCalicoDaemonSet(ctx context.Context, ns, dsName string)
 
 	var unready []string
 	for _, pod := range podList.Items {
+		// Ignore pods created within the last 45 seconds (initial container startup & readiness probe grace period)
+		if time.Since(pod.CreationTimestamp.Time) < 45*time.Second {
+			continue
+		}
 		if !isPodReady(&pod) {
 			unready = append(unready, pod.Name)
 		}

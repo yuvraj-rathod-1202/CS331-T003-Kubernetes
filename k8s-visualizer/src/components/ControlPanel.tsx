@@ -58,6 +58,10 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
   const [newAppName, setNewAppName] = useState('');
   const [selectedNodeForDeploy, setSelectedNodeForDeploy] = useState<string>('');
   const [isProcessing, setIsProcessing] = useState(false);
+  // Track the namespace where deny-all-exp8 was applied, so Remove always hits the right ns
+  const [exp8Namespace, setExp8Namespace] = useState<string>('default');
+  const [operatorOverride, setOperatorOverride] = useState<boolean | null>(null);
+
 
   const selectedPodObj = k8sPods.find(p => p.name === selectedPod);
 
@@ -91,6 +95,7 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
       const cmd = await k8sApi.deletePod(selectedPodObj.namespace, selectedPodObj.name);
       onLog(cmd, 'system');
       onLog(`[CNI Crash] Killed CNI agent on node ${selectedPodObj.nodeName}. Watch for BGP route loss!`, 'warning');
+      onLog(`ℹ️  Note: Kubernetes DaemonSet will automatically recreate the calico-node pod. This is expected native K8s behavior — the operator's job is to detect and react FASTER than the default 5-min timeout.`, 'info');
     } catch (e: any) {
       onLog(`Failed: ${e.message}`, 'error');
     }
@@ -205,18 +210,31 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
     if (!selectedPodObj || selectedPodObj.isCNI || selectedPodObj.isCoreDNS) return;
     setIsProcessing(true);
     try {
+      const ns = selectedPodObj.namespace;
       const policy = {
         apiVersion: 'networking.k8s.io/v1',
         kind: 'NetworkPolicy',
-        metadata: { name: 'deny-all-exp8', namespace: selectedPodObj.namespace },
+        metadata: { name: 'deny-all-exp8', namespace: ns },
         spec: {
           podSelector: { matchLabels: { app: selectedPodObj.appLabel } },
           policyTypes: ['Ingress', 'Egress']
         }
       };
-      const cmd = await k8sApi.applyNetworkPolicy(selectedPodObj.namespace, 'deny-all-exp8', policy);
+      const cmd = await k8sApi.applyNetworkPolicy(ns, 'deny-all-exp8', policy);
       onLog(cmd, 'system');
-      onLog(`[Felix Drift] Applied Deny-All policy to ${selectedPodObj.appLabel}. Now crash Felix to observe policy drift!`, 'critical');
+      onLog(`[Felix Drift] Step 1: Applied Deny-All NetworkPolicy to '${selectedPodObj.appLabel}' in namespace '${ns}'.`, 'critical');
+      setExp8Namespace(ns);
+
+      // Step 2: Kill the calico-node (Felix) pod on the same node to simulate Felix crash
+      const felixPod = k8sPods.find(p => p.isCNI && p.nodeName === selectedPodObj.nodeName);
+      if (felixPod) {
+        const felixCmd = await k8sApi.deletePod(felixPod.namespace, felixPod.name);
+        onLog(felixCmd, 'system');
+        onLog(`[Felix Drift] Step 2: Killed Felix (calico-node) on node '${selectedPodObj.nodeName}'. During the ~30s Felix restart window, the deny-all policy MAY not be enforced — this is the policy drift!`, 'critical');
+        onLog(`ℹ️  The operator's NetworkPolicy module detects this drift via calico-node health checks and triggers a remediation. With operator DISABLED, drift is undetected.`, 'info');
+      } else {
+        onLog(`[Felix Drift] No calico-node pod found on node '${selectedPodObj.nodeName}' to simulate crash.`, 'warning');
+      }
     } catch (e: any) {
       onLog(`Failed: ${e.message}`, 'error');
     }
@@ -226,13 +244,12 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
   const exp8RemovePolicy = async () => {
     setIsProcessing(true);
     try {
-      if (selectedPodObj) {
-        const cmd = await k8sApi.deleteNetworkPolicy(selectedPodObj.namespace, 'deny-all-exp8');
-        onLog(cmd, 'system');
-        onLog(`[Felix Drift] Removed Deny-All NetworkPolicy.`, 'success');
-      }
+      const ns = exp8Namespace || selectedPodObj?.namespace || 'default';
+      const cmd = await k8sApi.deleteNetworkPolicy(ns, 'deny-all-exp8');
+      onLog(cmd, 'system');
+      onLog(`[Felix Drift] Removed Deny-All NetworkPolicy from namespace '${ns}'.`, 'success');
     } catch (e: any) {
-      onLog(`Note: Policy already removed.`, 'info');
+      onLog(`Note: Policy already removed or not found.`, 'info');
     }
     setIsProcessing(false);
   };
@@ -325,14 +342,28 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
     setIsProcessing(false);
   };
 
-  const [operatorOverride, setOperatorOverride] = useState<boolean | null>(null);
-
   const isOperatorEnabled = operatorOverride !== null ? operatorOverride : (operatorStatus ? Boolean(
-    operatorStatus.cni?.enabled && 
+    operatorStatus.cni?.enabled &&
     operatorStatus.coreDNS?.enabled &&
     operatorStatus.networkPolicy?.enabled &&
     operatorStatus.podConnectivity?.enabled
   ) : true);
+
+  // When real CRD status arrives, sync it to clear any stale local override
+  React.useEffect(() => {
+    if (operatorStatus && operatorOverride !== null) {
+      const liveEnabled = Boolean(
+        operatorStatus.cni?.enabled &&
+        operatorStatus.coreDNS?.enabled &&
+        operatorStatus.networkPolicy?.enabled &&
+        operatorStatus.podConnectivity?.enabled
+      );
+      // Once the CRD reflects what we toggled, clear the local override
+      if (liveEnabled === operatorOverride) {
+        setOperatorOverride(null);
+      }
+    }
+  }, [operatorStatus, operatorOverride]);
 
   const handleToggleOperator = async (enable: boolean) => {
     setIsProcessing(true);
@@ -477,16 +508,21 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
 
         {/* MODULE 3: NetworkPolicy */}
         <div className="experiment-card" style={{ padding: '10px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px' }}>
-          <h4><FileCode size={16} style={{display:'inline', marginRight: '6px'}} />3. NetworkPolicy Drift</h4>
-          <p style={{fontSize: '0.75rem', color: '#aaa', margin: '4px 0'}}>Test silent policy drift when Felix crashes.</p>
+          <h4><FileCode size={16} style={{display:'inline', marginRight: '6px'}} />3. NetworkPolicy Drift (Felix)</h4>
+          <p style={{fontSize: '0.75rem', color: '#aaa', margin: '4px 0'}}>Select a workload pod, then click "Apply Deny-All + Crash Felix" to simulate Felix (Calico dataplane) crashing after a policy is applied. With operator DISABLED, drift is undetected.</p>
           <div style={{ display: 'flex', gap: '6px', marginTop: '8px' }}>
             <button className="btn crash-btn" onClick={exp8FelixDrift} disabled={!selectedPodObj || selectedPodObj.isCNI || selectedPodObj.isCoreDNS || isProcessing} style={{flex: 1}}>
-              Deny-All Policy
+              Apply Deny-All + Crash Felix
             </button>
             <button className="btn heal-btn" onClick={exp8RemovePolicy} disabled={isProcessing} style={{flex: 1}}>
               Remove Policy
             </button>
           </div>
+          {exp8Namespace && (
+            <div style={{ fontSize: '0.7rem', color: '#888', marginTop: '4px' }}>
+              Policy namespace: <strong style={{color:'#fbbf24'}}>{exp8Namespace}</strong>
+            </div>
+          )}
         </div>
 
         {/* MODULE 4: Pod Connectivity */}
