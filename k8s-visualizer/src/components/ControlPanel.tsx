@@ -438,7 +438,7 @@ export function ControlPanel({ onLog, selectedPod, k8sPods, operatorStatus, k8sA
         
         {/* MODULE 1: CNI */}
         <div className="experiment-card" style={{ padding: '10px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px' }}>
-          <h4><Network size={16} style={{display:'inline', marginRight: '6px'}} />1. CNI Subsystem</h4>
+          <h4><Network size={16} style={{display:'inline', marginRight: '6px'}} />CNI Subsystem</h4>
           <p style={{fontSize: '0.75rem', color: '#aaa', margin: '4px 0'}}>Calico agent crash, IPAM pool exhaustion, IPPool disabled.</p>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '8px' }}>
             <button className="btn crash-btn" onClick={exp1KillCNI} disabled={!selectedPodObj?.isCNI || isProcessing}>
@@ -465,7 +465,7 @@ export function ControlPanel({ onLog, selectedPod, k8sPods, operatorStatus, k8sA
 
         {/* MODULE 2: CoreDNS */}
         <div className="experiment-card" style={{ padding: '10px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px' }}>
-          <h4><Zap size={16} style={{display:'inline', marginRight: '6px'}} />2. CoreDNS Subsystem</h4>
+          <h4><Zap size={16} style={{display:'inline', marginRight: '6px'}} />CoreDNS Subsystem</h4>
           <p style={{fontSize: '0.75rem', color: '#aaa', margin: '4px 0'}}>Replicas to 0, CPU throttling latency, upstream corrupt.</p>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '8px' }}>
             <div style={{ display: 'flex', gap: '6px' }}>
@@ -496,7 +496,7 @@ export function ControlPanel({ onLog, selectedPod, k8sPods, operatorStatus, k8sA
         </div>
 
         {/* MODULE 3: NetworkPolicy */}
-        <div className="experiment-card" style={{ padding: '10px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px' }}>
+        {/* <div className="experiment-card" style={{ padding: '10px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px' }}>
           <h4><FileCode size={16} style={{display:'inline', marginRight: '6px'}} />3. NetworkPolicy Drift</h4>
           <p style={{fontSize: '0.75rem', color: '#aaa', margin: '4px 0'}}>Test silent policy drift when Felix crashes.</p>
           <div style={{ display: 'flex', gap: '6px', marginTop: '8px' }}>
@@ -507,12 +507,12 @@ export function ControlPanel({ onLog, selectedPod, k8sPods, operatorStatus, k8sA
               Remove Policy
             </button>
           </div>
-        </div>
+        </div> */}
 
         {/* MODULE 4: Pod Connectivity */}
         <div className="experiment-card" style={{ padding: '10px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <h4><WifiOff size={16} style={{display:'inline', marginRight: '6px'}} />4. Pod Connectivity</h4>
+            <h4><WifiOff size={16} style={{display:'inline', marginRight: '6px'}} />Pod Connectivity</h4>
             <div style={{ display: 'flex', gap: '4px' }}>
               {selectedPodObj && vethInfo?.isDown && (
                 <span style={{ 

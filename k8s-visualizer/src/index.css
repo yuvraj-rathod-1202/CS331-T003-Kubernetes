@@ -360,9 +360,10 @@ body {
   margin-right: 8px;
 }
 
-.log-line.system { color: #94a3b8; }
+.log-line.system { color: #ffffff; }
 .log-line.info { color: #38bdf8; }
 .log-line.error { color: #f87171; }
 .log-line.warning { color: #fbbf24; }
 .log-line.success { color: #34d399; }
+.log-line.critical {color: #94a3b8;}
 
