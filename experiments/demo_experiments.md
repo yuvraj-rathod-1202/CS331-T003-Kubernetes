@@ -1,6 +1,6 @@
 # Complete Presentation & Demo Guide: 12 Network Failure Experiments
 
-This document provides a comprehensive step-by-step setup and presentation guide for demonstrating all **12 network failure experiments (E1 to E12)** detailed in the project research report (`report/report.tex`).
+This document provides a comprehensive step-by-step setup and presentation guide for demonstrating all the experiments detailed in the project research report (`report/report.tex`).
 
 ---
 
@@ -109,7 +109,7 @@ Open your browser at `http://localhost:5173`. You will see the cluster topology,
 
 ---
 
-### Module 1: CNI Subsystem Experiments
+### CNI Subsystem Experiments
 
 #### **Experiment: `calico-node` Agent Crash**
 * **Goal**: Show that when a node's CNI agent crashes, new pods fail to schedule and the node becomes unready without native K8s auto-recovery.
@@ -135,7 +135,7 @@ Open your browser at `http://localhost:5173`. You will see the cluster topology,
 
 ---
 
-### Module 2: CoreDNS Subsystem Experiments
+### CoreDNS Subsystem Experiments
 
 #### **Experiment: Scale Replicas to Zero**
 * **Goal**: Demonstrate recovery when CoreDNS replicas are accidentally scaled to 0.
@@ -160,18 +160,7 @@ Open your browser at `http://localhost:5173`. You will see the cluster topology,
 
 ---
 
-### Module 3: NetworkPolicy Enforcement Experiments
-
-#### **Experiment: Felix Agent Crash (Silent Policy Drift)**
-* **Goal**: Show that native Kubernetes leaves NetworkPolicies un-enforced when Calico's Felix agent crashes, whereas our operator restores enforcement.
-* **Demo Steps**:
-  1. **Inject Fault**: Apply a `Deny-All` NetworkPolicy using `[ Deny All ]` button, then crash the Felix container (`calico-node`).
-  2. **Observe Native K8s**: `kubectl get networkpolicy` shows policy as active in K8s API, but packet-filtering rules are frozen/dropped in Linux kernel—traffic illegally bypasses policy!
-  3. **Operator Response**: NetworkPolicy Check phase audits `calico-node` container readiness & restart count, detects degraded Felix agent, deletes bad pod, and respawned Felix agent reprograms kernel `iptables`/`ipset` chains.
-
----
-
-### Module 4: Pod-to-Pod Connectivity Experiments
+### Pod-to-Pod Connectivity Experiments
 
 #### **Experiment 1: Local `veth` Interface Down (Intra-Node Failure)**
 * **Goal**: Isolate and fix local container virtual interface drops on a single node.

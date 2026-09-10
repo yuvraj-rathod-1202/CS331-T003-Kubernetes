@@ -1,4 +1,15 @@
-# Kubernetes Network Self-Healing Operator
+### Team ID: T003
+### Project ID: 7
+### Project Title: Extending Kubernetes Self-Healing for Networking Failure
+### Team Members: 
+    1. Arpan Gupta (24110051)
+    2. Buha Deep Maheshbhai (24110082)
+    3. Param Tanna (24110236)
+    4. Ramji Purwar (24110287)
+    5. Rathod Yuvraj Rajubhai (24110293)
+    6. Solanki Viraj Rajeshbhai (24110348)
+
+---
 
 A custom Kubernetes operator developed in Go using [Kubebuilder](https://book.kubebuilder.io/) to detect and automatically heal networking-related failures in a Kubernetes cluster.
 
