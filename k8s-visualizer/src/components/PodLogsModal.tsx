@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { X, RefreshCw, TerminalSquare } from 'lucide-react';
 import type { K8sPod } from '../hooks/useKubernetes';
 

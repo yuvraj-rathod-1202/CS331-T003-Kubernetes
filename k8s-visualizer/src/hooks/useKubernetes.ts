@@ -448,6 +448,45 @@ export function useKubernetes() {
     return await res.text();
   };
 
+  const dropIptables = async (nodeName: string) => {
+    const res = await fetch('/api/fault/iptables/drop', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nodeName }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to drop iptables');
+    return data;
+  };
+
+  const restoreIptables = async (nodeName: string) => {
+    const res = await fetch('/api/fault/iptables/restore', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nodeName }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to restore iptables');
+    return data;
+  };
+
+  const getIptablesStatus = async (nodeName: string) => {
+    const res = await fetch(`/api/fault/iptables/status?nodeName=${encodeURIComponent(nodeName)}`);
+    if (!res.ok) return { dropped: false };
+    return await res.json();
+  };
+
+  const runDirectPing = async (namespace: string, podName: string, targetIP?: string) => {
+    const res = await fetch('/api/fault/ping', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ namespace, podName, targetIP }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Ping execution failed');
+    return data;
+  };
+
   return {
     nodes,
     pods,
@@ -467,6 +506,10 @@ export function useKubernetes() {
     runCommandAndGetLogs,
     deployCustomApp,
     deleteCustomApp,
-    getPodLogs
+    getPodLogs,
+    dropIptables,
+    restoreIptables,
+    getIptablesStatus,
+    runDirectPing,
   };
 }

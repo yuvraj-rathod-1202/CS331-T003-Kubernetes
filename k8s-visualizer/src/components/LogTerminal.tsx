@@ -1,10 +1,10 @@
-import React, { useEffect, useRef } from 'react';
+import { useEffect, useRef } from 'react';
 import { Terminal } from 'lucide-react';
 
 export interface LogEntry {
   timestamp: string;
   message: string;
-  type: 'info' | 'error' | 'success' | 'system';
+  type: 'info' | 'error' | 'success' | 'system' | 'warning' | 'critical';
 }
 
 interface LogTerminalProps {
