@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { useKubernetes } from './hooks/useKubernetes';
 import { ClusterMap } from './components/ClusterMap';
 import { ControlPanel } from './components/ControlPanel';

@@ -173,30 +173,20 @@ Open your browser at `http://localhost:5173`. You will see the cluster topology,
 
 ### Module 4: Pod-to-Pod Connectivity Experiments
 
-#### **Experiment: Local `veth` Interface Down (Intra-Node Failure)**
-* **Goal**: Isolate and fix local container virtual interface drops.
+#### **Experiment 1: Local `veth` Interface Down (Intra-Node Failure)**
+* **Goal**: Isolate and fix local container virtual interface drops on a single node.
 * **Demo Steps**:
-  1. **Inject Fault**: Run `ip link set vethXXXX down` inside host node shell.
-  2. **Observe Native K8s**: Pod remains `1/1 Ready`, but local traffic drops.
-  3. **Operator Response**: **Tier 1 Triangulation**: Operator local probe fails while external gateway anchors pass $\to$ Evaluates `FailureTypeLocalCNI` $\to$ Restarts local CNI agent.
+  1. **Select Pod**: Click on any workload pod (e.g. `dns-checker` or `frontend-probe`) in the visualizer graph.
+  2. **Inject Fault**: In the control panel under **4. Pod Connectivity**, click **`[ Down veth (calixxx) ]`**.
+  3. **Observe Native K8s**: Pod remains `1/1 Ready` in Kubernetes, but local traffic to/from that pod drops. The visualizer shows the warning badge `veth: DOWN (calixxx) ⚠️`.
+  4. **Operator Response**: **Tier 1 Triangulation**: Operator local probe fails while external gateway anchors pass $\to$ Diagnoses `FailureTypeLocalCNI` $\to$ Restarts local CNI agent to rebuild the veth interface and restore routing.
+  5. **Manual Restore**: Click **`[ Up veth (calixxx) ]`** to bring the interface back online immediately.
 
-#### **Experiment: IPIP Tunnel Interface Crash (`tunl0` Down)**
-* **Goal**: Detect and recover broken overlay tunnels across nodes.
+#### **Experiment 2: IPIP Tunnel Interface Crash (`tunl0` Down - Inter-Node Failure)**
+* **Goal**: Detect and recover broken overlay tunnels across multi-node topology.
 * **Demo Steps**:
-  1. **Inject Fault**: Run `ip link set tunl0 down` on Node-1.
-  2. **Observe Native K8s**: Both nodes remain `Ready`, but cross-node pod traffic completely fails.
-  3. **Operator Response**: **Tier 2 Triangulation**: Operator Pingmesh ring prober detects cross-node drop ($node_1 \not\to node_2$), isolates `tunl0` tunnel failure, and resets CNI overlay subsystem.
-
-#### **Experiment: Host `iptables` FORWARD DROP**
-* **Goal**: Recover from corrupted host-level packet forwarding rules.
-* **Demo Steps**:
-  1. **Inject Fault**: Click `[ Drop IP-Tables ]` in web app (`iptables -I FORWARD -j DROP`).
-  2. **Observe Native K8s**: Native K8s has zero visibility into host kernel iptables chains; pod traffic drops.
-  3. **Operator Response**: Operator ring prober detects consecutive probe failures, triggers Tier 1 CNI restart, and if un-recovered, applies Tier 2 node taint (`network-degraded:NoSchedule`).
-
-#### **Experiment: Inter-Node Overlay Network Break**
-* **Goal**: Demonstrate full Pingmesh $O(N)$ ring probing & 3-tier triangulation across multi-node topology.
-* **Demo Steps**:
-  1. **Inject Fault**: Drop inter-node encapsulated traffic between `minikube` (Node-1) and `minikube-m02` (Node-2).
-  2. **Observe Native K8s**: Pod-to-pod ping times out silently.
-  3. **Operator Response**: Operator's deterministic ring topology ($Node_i \to Node_{(i+1)\bmod N}$) detects edge failure, performs cross-vantage point verification ($Node_3 \to Node_2$), isolates fault to Node-1 egress, and triggers automated remediation.
+  1. **Select Pod**: Click on any pod hosted on Node-1 or Node-2.
+  2. **Inject Fault**: In the control panel under **4. Pod Connectivity**, click **`[ Down tunl0 ]`**.
+  3. **Observe Native K8s**: Both nodes remain `Ready`. Intra-node traffic on each node continues to work, but all cross-node pod traffic across nodes drops with 100% packet loss.
+  4. **Operator Response**: **Tier 2 Triangulation**: Operator Pingmesh ring prober detects cross-node drop ($node_1 \not\to node_2$), isolates `tunl0` tunnel failure (`FailureTypeTunnelCrash`), and restarts CNI overlay subsystem to re-establish the tunnel interface.
+  5. **Manual Restore**: Click **`[ Up tunl0 ]`** to bring the tunnel interface back online immediately.

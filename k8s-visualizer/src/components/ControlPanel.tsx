@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { ShieldAlert, Plus, Trash2, Terminal, CheckCircle, XCircle, Zap, Cpu, Network, WifiOff, FileCode } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { ShieldAlert, Trash2, Terminal, CheckCircle, XCircle, Zap, Network, WifiOff, FileCode } from 'lucide-react';
 import type { K8sNode, K8sPod, OperatorStatus } from '../hooks/useKubernetes';
 
 interface ControlPanelProps {
@@ -54,20 +54,69 @@ const CORRUPTED_UPSTREAM_COREFILE = `.:53 {
     loadbalance
 }`;
 
-export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorStatus, k8sApi, onOpenLogs }: ControlPanelProps) {
-  const [newAppName, setNewAppName] = useState('');
-  const [selectedNodeForDeploy, setSelectedNodeForDeploy] = useState<string>('');
+export function ControlPanel({ onLog, selectedPod, k8sPods, operatorStatus, k8sApi, onOpenLogs }: ControlPanelProps) {
+  const [iptablesDropped, setIptablesDropped] = useState<boolean>(false);
+  const [vethInfo, setVethInfo] = useState<{ iface: string; isDown: boolean } | null>(null);
+  const [tunl0Down, setTunl0Down] = useState<boolean>(false);
   const [isProcessing, setIsProcessing] = useState(false);
 
   const selectedPodObj = k8sPods.find(p => p.name === selectedPod);
 
-  const handleDeploy = () => {
-    if (newAppName && k8sApi.deployCustomApp) {
-      onLog(`kubectl create deployment ${newAppName} --image=nginx:alpine`, 'system');
-      k8sApi.deployCustomApp(newAppName, selectedNodeForDeploy || undefined);
-      setNewAppName('');
+  // Real-time Calico host veth interface polling for the selected pod
+  useEffect(() => {
+    if (!selectedPodObj?.nodeName || !selectedPodObj?.name || !k8sApi.getVethStatus) {
+      setVethInfo(null);
+      return;
     }
-  };
+    let isMounted = true;
+    const checkVeth = async () => {
+      try {
+        const res = await k8sApi.getVethStatus(
+          selectedPodObj.nodeName,
+          selectedPodObj.name,
+          selectedPodObj.namespace,
+          selectedPodObj.podIP
+        );
+        if (isMounted && res.iface) {
+          setVethInfo({ iface: res.iface, isDown: !!res.isDown });
+        }
+      } catch {
+        // ignore polling errors
+      }
+    };
+    checkVeth();
+    const interval = setInterval(checkVeth, 3000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, [selectedPodObj?.name, selectedPodObj?.nodeName, selectedPodObj?.podIP, k8sApi]);
+
+  // Real-time tunl0 status polling for the selected pod's node
+  useEffect(() => {
+    if (!selectedPodObj?.nodeName || !k8sApi.getTunnelStatus) {
+      setTunl0Down(false);
+      return;
+    }
+    let isMounted = true;
+    const checkTunl = async () => {
+      try {
+        const res = await k8sApi.getTunnelStatus(selectedPodObj.nodeName);
+        if (isMounted && typeof res.isDown === 'boolean') {
+          setTunl0Down(res.isDown);
+        }
+      } catch {
+        // ignore polling errors
+      }
+    };
+    checkTunl();
+    const interval = setInterval(checkTunl, 3000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, [selectedPodObj?.nodeName, k8sApi]);
+
 
   const handleDeletePod = async () => {
     if (selectedPodObj && !selectedPodObj.isCNI && !selectedPodObj.isCoreDNS) {
@@ -238,14 +287,28 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
   };
 
   // --- MODULE 4: Pod-to-Pod Connectivity ---
-  const exp9DownVeth = async () => {
+  const exp9ToggleVeth = async (down: boolean) => {
     if (!selectedPodObj || !selectedPodObj.nodeName) return;
     setIsProcessing(true);
     try {
-      const downCmd = `ip link | grep veth | awk '{print $2}' | cut -d: -f1 | head -n 1 | xargs -I {} ip link set {} down`;
-      const cmd = await k8sApi.runNodeShellCommand(selectedPodObj.nodeName, downCmd);
-      onLog(cmd, 'system');
-      onLog(`[Local veth Down] Downed local veth interface on node ${selectedPodObj.nodeName}.`, 'critical');
+      const action = down ? 'down' : 'up';
+      const res = await k8sApi.toggleVeth(
+        selectedPodObj.nodeName,
+        selectedPodObj.name,
+        selectedPodObj.namespace,
+        action,
+        selectedPodObj.podIP,
+        vethInfo?.iface
+      );
+      if (res.iface) {
+        setVethInfo({ iface: res.iface, isDown: down });
+      }
+      onLog(`docker exec ${selectedPodObj.nodeName} sudo ip link set ${res.iface || vethInfo?.iface || 'cali...'} ${action}`, 'system');
+      if (down) {
+        onLog(`[Local veth Down] Downed interface ${res.iface || 'veth'} for pod ${selectedPodObj.name} on ${selectedPodObj.nodeName}. Local traffic will drop!`, 'critical');
+      } else {
+        onLog(`[Local veth Restored] Brought interface ${res.iface || 'veth'} back UP on ${selectedPodObj.nodeName}.`, 'success');
+      }
     } catch (e: any) {
       onLog(`Failed: ${e.message}`, 'error');
     }
@@ -256,53 +319,14 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
     if (!selectedPodObj || !selectedPodObj.nodeName) return;
     setIsProcessing(true);
     try {
-      const tunnelCmd = down ? `ip link set tunl0 down` : `ip link set tunl0 up`;
-      const cmd = await k8sApi.runNodeShellCommand(selectedPodObj.nodeName, tunnelCmd);
-      onLog(cmd, 'system');
+      const action = down ? 'down' : 'up';
+      onLog(`docker exec ${selectedPodObj.nodeName} sudo ip link set tunl0 ${action}`, 'system');
+      const res = await k8sApi.toggleTunnel(selectedPodObj.nodeName, action);
+      setTunl0Down(down);
       if (down) {
         onLog(`[Overlay Tunnel Down] Downed tunl0 interface on ${selectedPodObj.nodeName}. Cross-node pod traffic will drop!`, 'critical');
       } else {
-        onLog(`[Overlay Tunnel Restored] Brought tunl0 interface back UP.`, 'success');
-      }
-    } catch (e: any) {
-      onLog(`Failed: ${e.message}`, 'error');
-    }
-    setIsProcessing(false);
-  };
-
-  const exp11ToggleIptables = async (drop: boolean) => {
-    if (!selectedPodObj || !selectedPodObj.nodeName) return;
-    setIsProcessing(true);
-    try {
-      const iptablesCmd = drop 
-        ? `iptables -I FORWARD -j DROP -m comment --comment "exp11-failure"`
-        : `iptables -D FORWARD -j DROP -m comment --comment "exp11-failure"`;
-      const cmd = await k8sApi.runNodeShellCommand(selectedPodObj.nodeName, iptablesCmd);
-      onLog(cmd, 'system');
-      if (drop) {
-        onLog(`[Host iptables DROP] Executed iptables FORWARD DROP on ${selectedPodObj.nodeName}. Forwarded packets dropped!`, 'critical');
-      } else {
-        onLog(`[Host iptables Restored] Restored iptables rules on ${selectedPodObj.nodeName}.`, 'success');
-      }
-    } catch (e: any) {
-      onLog(`Failed: ${e.message}`, 'error');
-    }
-    setIsProcessing(false);
-  };
-
-  const exp12ToggleInterNode = async (breakRoute: boolean) => {
-    if (!selectedPodObj || !selectedPodObj.nodeName) return;
-    setIsProcessing(true);
-    try {
-      const routeCmd = breakRoute
-        ? `iptables -I OUTPUT -p ipencap -j DROP`
-        : `iptables -D OUTPUT -p ipencap -j DROP`;
-      const cmd = await k8sApi.runNodeShellCommand(selectedPodObj.nodeName, routeCmd);
-      onLog(cmd, 'system');
-      if (breakRoute) {
-        onLog(`[Inter-Node Break] Blocked IPIP encapsulation traffic on ${selectedPodObj.nodeName}. Inter-node ring probes will fail!`, 'critical');
-      } else {
-        onLog(`[Inter-Node Restored] Unblocked IPIP traffic on ${selectedPodObj.nodeName}.`, 'success');
+        onLog(`[Overlay Tunnel Restored] Brought tunl0 interface back UP on ${selectedPodObj.nodeName}.`, 'success');
       }
     } catch (e: any) {
       onLog(`Failed: ${e.message}`, 'error');
@@ -312,13 +336,22 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
 
   // Utility Ping Test
   const runPingTest = async () => {
-    if (!selectedPodObj) return;
+    if (!selectedPodObj) {
+      onLog('Please select a pod from the cluster map to run ping test.', 'warning');
+      return;
+    }
     setIsProcessing(true);
     try {
-      onLog(`kubectl exec -it ${selectedPodObj.name} -- ping -c 3 8.8.8.8`, 'system');
-      onLog(`Running real ping test... please wait 3-4 seconds.`, 'info');
-      const output = await k8sApi.runCommandAndGetLogs(`ping -c 3 8.8.8.8`, selectedPodObj.appLabel);
-      onLog(`Ping Output:\n${output}`, 'info');
+      onLog(`kubectl exec -it ${selectedPodObj.name} -n ${selectedPodObj.namespace} -- ping -c 3 8.8.8.8`, 'system');
+      onLog(`Executing direct ping test from ${selectedPodObj.name}...`, 'info');
+      const res = await k8sApi.runDirectPing(selectedPodObj.namespace, selectedPodObj.name);
+      if (res.packetLossPercent === 100) {
+        onLog(`[Ping DROPPED] 100% packet loss! Traffic blocked by iptables or broken network interface.\n${res.output}`, 'critical');
+      } else if (res.packetLossPercent > 0) {
+        onLog(`[Ping DEGRADED] ${res.packetLossPercent}% packet loss.\n${res.output}`, 'warning');
+      } else {
+        onLog(`[Ping SUCCESS] 0% packet loss. Network connectivity is healthy!\n${res.output}`, 'success');
+      }
     } catch(e: any) {
       onLog(`Ping failed: ${e.message}`, 'error');
     }
@@ -384,19 +417,6 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
         </button>
       </div>
 
-      {/* <div style={{ display: 'flex', gap: '8px', marginBottom: '15px', flexDirection: 'column' }}>
-        <input 
-          type="text" 
-          placeholder="App name (e.g. frontend)" 
-          value={newAppName}
-          onChange={(e) => setNewAppName(e.target.value)}
-          className="app-input"
-        />
-        <button className="btn deploy-btn" onClick={handleDeploy} disabled={!newAppName || isProcessing}>
-          <Plus size={18} />
-          Deploy Standard App
-        </button>
-      </div> */}
 
       <div className="selected-pod-banner" style={{ borderLeft: '4px solid #3b82f6', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div>
@@ -491,34 +511,78 @@ export function ControlPanel({ onLog, selectedPod, k8sNodes, k8sPods, operatorSt
 
         {/* MODULE 4: Pod Connectivity */}
         <div className="experiment-card" style={{ padding: '10px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px' }}>
-          <h4><WifiOff size={16} style={{display:'inline', marginRight: '6px'}} />4. Pod Connectivity</h4>
-          <p style={{fontSize: '0.75rem', color: '#aaa', margin: '4px 0'}}>veth down, tunl0 down, iptables FORWARD drop, inter-node break.</p>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <h4><WifiOff size={16} style={{display:'inline', marginRight: '6px'}} />4. Pod Connectivity</h4>
+            <div style={{ display: 'flex', gap: '4px' }}>
+              {selectedPodObj && vethInfo?.isDown && (
+                <span style={{ 
+                  padding: '2px 6px', 
+                  borderRadius: '4px', 
+                  fontWeight: 600, 
+                  fontSize: '0.7rem',
+                  background: 'rgba(239, 68, 68, 0.2)', 
+                  color: '#ef4444',
+                  border: '1px solid #ef4444'
+                }}>
+                  veth: DOWN {vethInfo?.iface ? `(${vethInfo.iface})` : ''} ⚠️
+                </span>
+              )}
+              {selectedPodObj && tunl0Down && (
+                <span style={{ 
+                  padding: '2px 6px', 
+                  borderRadius: '4px', 
+                  fontWeight: 600, 
+                  fontSize: '0.7rem',
+                  background: 'rgba(239, 68, 68, 0.2)', 
+                  color: '#ef4444',
+                  border: '1px solid #ef4444'
+                }}>
+                  tunl0: DOWN ({selectedPodObj.nodeName}) ⚠️
+                </span>
+              )}
+            </div>
+          </div>
+          <p style={{fontSize: '0.75rem', color: '#aaa', margin: '4px 0'}}>Intra-node (veth down) and Inter-node (tunl0 down) failure experiments.</p>
+
           <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '8px' }}>
-            <button className="btn crash-btn" onClick={exp9DownVeth} disabled={!selectedPodObj || isProcessing}>
-              Down Local veth
-            </button>
             <div style={{ display: 'flex', gap: '6px' }}>
-              <button className="btn crash-btn" onClick={() => exp10ToggleTunnel(true)} disabled={!selectedPodObj || isProcessing} style={{flex: 1}}>
-                Down tunl0
+              <button 
+                className="btn crash-btn" 
+                onClick={() => exp9ToggleVeth(true)} 
+                disabled={!selectedPodObj || isProcessing}
+                style={{ flex: 1 }}
+                title={vethInfo?.iface ? `Bring down host veth ${vethInfo.iface}` : 'Select a pod to down its veth'}
+              >
+                Down veth
               </button>
-              <button className="btn heal-btn" onClick={() => exp10ToggleTunnel(false)} disabled={!selectedPodObj || isProcessing} style={{flex: 1}}>
+              <button 
+                className="btn heal-btn" 
+                onClick={() => exp9ToggleVeth(false)} 
+                disabled={!selectedPodObj || isProcessing}
+                style={{ flex: 1 }}
+                title={vethInfo?.iface ? `Bring up host veth ${vethInfo.iface}` : 'Select a pod to up its veth'}
+              >
+                Up veth
+              </button>
+            </div>
+            <div style={{ display: 'flex', gap: '6px' }}>
+              <button 
+                className="btn crash-btn" 
+                onClick={() => exp10ToggleTunnel(true)} 
+                disabled={!selectedPodObj || isProcessing} 
+                style={{ flex: 1 }}
+                title={selectedPodObj?.nodeName ? `Bring down tunl0 on ${selectedPodObj.nodeName}` : 'Select a pod to target its node'}
+              >
+                Down tunl0 
+              </button>
+              <button 
+                className="btn heal-btn" 
+                onClick={() => exp10ToggleTunnel(false)} 
+                disabled={!selectedPodObj || isProcessing} 
+                style={{ flex: 1 }}
+                title={selectedPodObj?.nodeName ? `Bring up tunl0 on ${selectedPodObj.nodeName}` : 'Select a pod to target its node'}
+              >
                 Up tunl0
-              </button>
-            </div>
-            <div style={{ display: 'flex', gap: '6px' }}>
-              <button className="btn crash-btn" onClick={() => exp11ToggleIptables(true)} disabled={!selectedPodObj || isProcessing} style={{flex: 1}}>
-                Drop iptables
-              </button>
-              <button className="btn heal-btn" onClick={() => exp11ToggleIptables(false)} disabled={!selectedPodObj || isProcessing} style={{flex: 1}}>
-                Restore iptables
-              </button>
-            </div>
-            <div style={{ display: 'flex', gap: '6px' }}>
-              <button className="btn crash-btn" onClick={() => exp12ToggleInterNode(true)} disabled={!selectedPodObj || isProcessing} style={{flex: 1}}>
-                Break Inter-Node
-              </button>
-              <button className="btn heal-btn" onClick={() => exp12ToggleInterNode(false)} disabled={!selectedPodObj || isProcessing} style={{flex: 1}}>
-                Restore Route
               </button>
             </div>
           </div>

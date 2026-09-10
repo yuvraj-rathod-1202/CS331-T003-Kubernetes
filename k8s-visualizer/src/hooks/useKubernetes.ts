@@ -13,6 +13,7 @@ export interface K8sPod {
   appLabel: string;
   isCNI: boolean;
   isCoreDNS: boolean;
+  podIP?: string;
 }
 
 export interface OperatorStatus {
@@ -79,6 +80,7 @@ export function useKubernetes() {
             appLabel: appLabel,
             isCNI: (p.metadata.namespace === 'kube-system' || p.metadata.namespace === 'calico-system') && p.metadata.name.includes('calico-node'),
             isCoreDNS: p.metadata.namespace === 'kube-system' && p.metadata.name.includes('coredns'),
+            podIP: p.status?.podIP || '',
           };
         });
 
@@ -448,6 +450,80 @@ export function useKubernetes() {
     return await res.text();
   };
 
+  const dropIptables = async (nodeName: string) => {
+    const res = await fetch('/api/fault/iptables/drop', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nodeName }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to drop iptables');
+    return data;
+  };
+
+  const restoreIptables = async (nodeName: string) => {
+    const res = await fetch('/api/fault/iptables/restore', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nodeName }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to restore iptables');
+    return data;
+  };
+
+  const getIptablesStatus = async (nodeName: string) => {
+    const res = await fetch(`/api/fault/iptables/status?nodeName=${encodeURIComponent(nodeName)}`);
+    if (!res.ok) return { dropped: false };
+    return await res.json();
+  };
+
+  const runDirectPing = async (namespace: string, podName: string, targetIP?: string) => {
+    const res = await fetch('/api/fault/ping', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ namespace, podName, targetIP }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Ping execution failed');
+    return data;
+  };
+
+  const getVethStatus = async (nodeName: string, podName: string, namespace: string = 'default', podIP?: string) => {
+    const params = new URLSearchParams({ nodeName, podName, namespace, podIP: podIP || '' });
+    const res = await fetch(`/api/fault/veth/status?${params.toString()}`);
+    if (!res.ok) return { iface: '', isDown: false };
+    return await res.json();
+  };
+
+  const toggleVeth = async (nodeName: string, podName: string, namespace: string = 'default', action: 'down' | 'up' = 'down', podIP?: string, iface?: string) => {
+    const res = await fetch('/api/fault/veth/toggle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nodeName, podName, namespace, action, podIP, iface }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `Failed to set veth ${action}`);
+    return data;
+  };
+
+  const getTunnelStatus = async (nodeName: string) => {
+    const res = await fetch(`/api/fault/tunnel/status?nodeName=${encodeURIComponent(nodeName)}`);
+    if (!res.ok) return { isDown: false };
+    return await res.json();
+  };
+
+  const toggleTunnel = async (nodeName: string, action: 'down' | 'up' = 'down') => {
+    const res = await fetch('/api/fault/tunnel/toggle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nodeName, action }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `Failed to set tunl0 ${action}`);
+    return data;
+  };
+
   return {
     nodes,
     pods,
@@ -467,6 +543,14 @@ export function useKubernetes() {
     runCommandAndGetLogs,
     deployCustomApp,
     deleteCustomApp,
-    getPodLogs
+    getPodLogs,
+    dropIptables,
+    restoreIptables,
+    getIptablesStatus,
+    getVethStatus,
+    toggleVeth,
+    getTunnelStatus,
+    toggleTunnel,
+    runDirectPing,
   };
 }
