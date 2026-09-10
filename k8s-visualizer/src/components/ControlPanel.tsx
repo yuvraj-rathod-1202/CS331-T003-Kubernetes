@@ -56,29 +56,61 @@ const CORRUPTED_UPSTREAM_COREFILE = `.:53 {
 
 export function ControlPanel({ onLog, selectedPod, k8sPods, operatorStatus, k8sApi, onOpenLogs }: ControlPanelProps) {
   const [iptablesDropped, setIptablesDropped] = useState<boolean>(false);
+  const [vethInfo, setVethInfo] = useState<{ iface: string; isDown: boolean } | null>(null);
+  const [tunl0Down, setTunl0Down] = useState<boolean>(false);
   const [isProcessing, setIsProcessing] = useState(false);
 
   const selectedPodObj = k8sPods.find(p => p.name === selectedPod);
 
-  // Real-time kernel iptables status polling for the selected pod's node
+  // Real-time Calico host veth interface polling for the selected pod
   useEffect(() => {
-    if (!selectedPodObj?.nodeName || !k8sApi.getIptablesStatus) {
-      setIptablesDropped(false);
+    if (!selectedPodObj?.nodeName || !selectedPodObj?.name || !k8sApi.getVethStatus) {
+      setVethInfo(null);
       return;
     }
     let isMounted = true;
-    const check = async () => {
+    const checkVeth = async () => {
       try {
-        const res = await k8sApi.getIptablesStatus(selectedPodObj.nodeName);
-        if (isMounted && typeof res.dropped === 'boolean') {
-          setIptablesDropped(res.dropped);
+        const res = await k8sApi.getVethStatus(
+          selectedPodObj.nodeName,
+          selectedPodObj.name,
+          selectedPodObj.namespace,
+          selectedPodObj.podIP
+        );
+        if (isMounted && res.iface) {
+          setVethInfo({ iface: res.iface, isDown: !!res.isDown });
         }
       } catch {
         // ignore polling errors
       }
     };
-    check();
-    const interval = setInterval(check, 3000);
+    checkVeth();
+    const interval = setInterval(checkVeth, 3000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, [selectedPodObj?.name, selectedPodObj?.nodeName, selectedPodObj?.podIP, k8sApi]);
+
+  // Real-time tunl0 status polling for the selected pod's node
+  useEffect(() => {
+    if (!selectedPodObj?.nodeName || !k8sApi.getTunnelStatus) {
+      setTunl0Down(false);
+      return;
+    }
+    let isMounted = true;
+    const checkTunl = async () => {
+      try {
+        const res = await k8sApi.getTunnelStatus(selectedPodObj.nodeName);
+        if (isMounted && typeof res.isDown === 'boolean') {
+          setTunl0Down(res.isDown);
+        }
+      } catch {
+        // ignore polling errors
+      }
+    };
+    checkTunl();
+    const interval = setInterval(checkTunl, 3000);
     return () => {
       isMounted = false;
       clearInterval(interval);
@@ -255,14 +287,28 @@ export function ControlPanel({ onLog, selectedPod, k8sPods, operatorStatus, k8sA
   };
 
   // --- MODULE 4: Pod-to-Pod Connectivity ---
-  const exp9DownVeth = async () => {
+  const exp9ToggleVeth = async (down: boolean) => {
     if (!selectedPodObj || !selectedPodObj.nodeName) return;
     setIsProcessing(true);
     try {
-      const downCmd = `ip link | grep veth | awk '{print $2}' | cut -d: -f1 | head -n 1 | xargs -I {} ip link set {} down`;
-      const cmd = await k8sApi.runNodeShellCommand(selectedPodObj.nodeName, downCmd);
-      onLog(cmd, 'system');
-      onLog(`[Local veth Down] Downed local veth interface on node ${selectedPodObj.nodeName}.`, 'critical');
+      const action = down ? 'down' : 'up';
+      const res = await k8sApi.toggleVeth(
+        selectedPodObj.nodeName,
+        selectedPodObj.name,
+        selectedPodObj.namespace,
+        action,
+        selectedPodObj.podIP,
+        vethInfo?.iface
+      );
+      if (res.iface) {
+        setVethInfo({ iface: res.iface, isDown: down });
+      }
+      onLog(`docker exec ${selectedPodObj.nodeName} sudo ip link set ${res.iface || vethInfo?.iface || 'cali...'} ${action}`, 'system');
+      if (down) {
+        onLog(`[Local veth Down] Downed interface ${res.iface || 'veth'} for pod ${selectedPodObj.name} on ${selectedPodObj.nodeName}. Local traffic will drop!`, 'critical');
+      } else {
+        onLog(`[Local veth Restored] Brought interface ${res.iface || 'veth'} back UP on ${selectedPodObj.nodeName}.`, 'success');
+      }
     } catch (e: any) {
       onLog(`Failed: ${e.message}`, 'error');
     }
@@ -273,56 +319,14 @@ export function ControlPanel({ onLog, selectedPod, k8sPods, operatorStatus, k8sA
     if (!selectedPodObj || !selectedPodObj.nodeName) return;
     setIsProcessing(true);
     try {
-      const tunnelCmd = down ? `ip link set tunl0 down` : `ip link set tunl0 up`;
-      const cmd = await k8sApi.runNodeShellCommand(selectedPodObj.nodeName, tunnelCmd);
-      onLog(cmd, 'system');
+      const action = down ? 'down' : 'up';
+      onLog(`docker exec ${selectedPodObj.nodeName} sudo ip link set tunl0 ${action}`, 'system');
+      const res = await k8sApi.toggleTunnel(selectedPodObj.nodeName, action);
+      setTunl0Down(down);
       if (down) {
         onLog(`[Overlay Tunnel Down] Downed tunl0 interface on ${selectedPodObj.nodeName}. Cross-node pod traffic will drop!`, 'critical');
       } else {
-        onLog(`[Overlay Tunnel Restored] Brought tunl0 interface back UP.`, 'success');
-      }
-    } catch (e: any) {
-      onLog(`Failed: ${e.message}`, 'error');
-    }
-    setIsProcessing(false);
-  };
-
-  const exp11ToggleIptables = async (drop: boolean) => {
-    if (!selectedPodObj || !selectedPodObj.nodeName) return;
-    const nodeToTarget = selectedPodObj.nodeName;
-    setIsProcessing(true);
-    try {
-      if (drop) {
-        onLog(`docker exec ${nodeToTarget} iptables -I FORWARD -j DROP -m comment --comment "exp11-failure"`, 'system');
-        const res = await k8sApi.dropIptables(nodeToTarget);
-        setIptablesDropped(true);
-        onLog(`[Host iptables DROP] ${res.message || 'Dropped FORWARD chain in kernel.'}`, 'critical');
-        onLog(`Forwarded pod packets on ${nodeToTarget} will now be physically dropped (100% packet loss)!`, 'warning');
-      } else {
-        onLog(`docker exec ${nodeToTarget} iptables -D FORWARD -j DROP -m comment --comment "exp11-failure"`, 'system');
-        const res = await k8sApi.restoreIptables(nodeToTarget);
-        setIptablesDropped(false);
-        onLog(`[Host iptables Restored] ${res.message || 'Restored kernel iptables rules.'}`, 'success');
-      }
-    } catch (e: any) {
-      onLog(`Failed: ${e.message}`, 'error');
-    }
-    setIsProcessing(false);
-  };
-
-  const exp12ToggleInterNode = async (breakRoute: boolean) => {
-    if (!selectedPodObj || !selectedPodObj.nodeName) return;
-    setIsProcessing(true);
-    try {
-      const routeCmd = breakRoute
-        ? `iptables -I OUTPUT -p ipencap -j DROP`
-        : `iptables -D OUTPUT -p ipencap -j DROP`;
-      const cmd = await k8sApi.runNodeShellCommand(selectedPodObj.nodeName, routeCmd);
-      onLog(cmd, 'system');
-      if (breakRoute) {
-        onLog(`[Inter-Node Break] Blocked IPIP encapsulation traffic on ${selectedPodObj.nodeName}. Inter-node ring probes will fail!`, 'critical');
-      } else {
-        onLog(`[Inter-Node Restored] Unblocked IPIP traffic on ${selectedPodObj.nodeName}.`, 'success');
+        onLog(`[Overlay Tunnel Restored] Brought tunl0 interface back UP on ${selectedPodObj.nodeName}.`, 'success');
       }
     } catch (e: any) {
       onLog(`Failed: ${e.message}`, 'error');
@@ -509,48 +513,76 @@ export function ControlPanel({ onLog, selectedPod, k8sPods, operatorStatus, k8sA
         <div className="experiment-card" style={{ padding: '10px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <h4><WifiOff size={16} style={{display:'inline', marginRight: '6px'}} />4. Pod Connectivity</h4>
-            {selectedPodObj && iptablesDropped && (
-              <span style={{ 
-                padding: '2px 6px', 
-                borderRadius: '4px', 
-                fontWeight: 600, 
-                fontSize: '0.7rem',
-                background: 'rgba(239, 68, 68, 0.2)', 
-                color: '#ef4444',
-                border: '1px solid #ef4444'
-              }}>
-                iptables: DROPPED ⚠️
-              </span>
-            )}
+            <div style={{ display: 'flex', gap: '4px' }}>
+              {selectedPodObj && vethInfo?.isDown && (
+                <span style={{ 
+                  padding: '2px 6px', 
+                  borderRadius: '4px', 
+                  fontWeight: 600, 
+                  fontSize: '0.7rem',
+                  background: 'rgba(239, 68, 68, 0.2)', 
+                  color: '#ef4444',
+                  border: '1px solid #ef4444'
+                }}>
+                  veth: DOWN {vethInfo?.iface ? `(${vethInfo.iface})` : ''} ⚠️
+                </span>
+              )}
+              {selectedPodObj && tunl0Down && (
+                <span style={{ 
+                  padding: '2px 6px', 
+                  borderRadius: '4px', 
+                  fontWeight: 600, 
+                  fontSize: '0.7rem',
+                  background: 'rgba(239, 68, 68, 0.2)', 
+                  color: '#ef4444',
+                  border: '1px solid #ef4444'
+                }}>
+                  tunl0: DOWN ({selectedPodObj.nodeName}) ⚠️
+                </span>
+              )}
+            </div>
           </div>
-          <p style={{fontSize: '0.75rem', color: '#aaa', margin: '4px 0'}}>veth down, tunl0 down, iptables FORWARD drop, inter-node break.</p>
+          <p style={{fontSize: '0.75rem', color: '#aaa', margin: '4px 0'}}>Intra-node (veth down) and Inter-node (tunl0 down) failure experiments.</p>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '8px' }}>
-            <button className="btn crash-btn" onClick={exp9DownVeth} disabled={!selectedPodObj || isProcessing}>
-              Down Local veth
-            </button>
             <div style={{ display: 'flex', gap: '6px' }}>
-              <button className="btn crash-btn" onClick={() => exp10ToggleTunnel(true)} disabled={!selectedPodObj || isProcessing} style={{flex: 1}}>
-                Down tunl0
+              <button 
+                className="btn crash-btn" 
+                onClick={() => exp9ToggleVeth(true)} 
+                disabled={!selectedPodObj || isProcessing}
+                style={{ flex: 1 }}
+                title={vethInfo?.iface ? `Bring down host veth ${vethInfo.iface}` : 'Select a pod to down its veth'}
+              >
+                Down veth
               </button>
-              <button className="btn heal-btn" onClick={() => exp10ToggleTunnel(false)} disabled={!selectedPodObj || isProcessing} style={{flex: 1}}>
+              <button 
+                className="btn heal-btn" 
+                onClick={() => exp9ToggleVeth(false)} 
+                disabled={!selectedPodObj || isProcessing}
+                style={{ flex: 1 }}
+                title={vethInfo?.iface ? `Bring up host veth ${vethInfo.iface}` : 'Select a pod to up its veth'}
+              >
+                Up veth
+              </button>
+            </div>
+            <div style={{ display: 'flex', gap: '6px' }}>
+              <button 
+                className="btn crash-btn" 
+                onClick={() => exp10ToggleTunnel(true)} 
+                disabled={!selectedPodObj || isProcessing} 
+                style={{ flex: 1 }}
+                title={selectedPodObj?.nodeName ? `Bring down tunl0 on ${selectedPodObj.nodeName}` : 'Select a pod to target its node'}
+              >
+                Down tunl0 
+              </button>
+              <button 
+                className="btn heal-btn" 
+                onClick={() => exp10ToggleTunnel(false)} 
+                disabled={!selectedPodObj || isProcessing} 
+                style={{ flex: 1 }}
+                title={selectedPodObj?.nodeName ? `Bring up tunl0 on ${selectedPodObj.nodeName}` : 'Select a pod to target its node'}
+              >
                 Up tunl0
-              </button>
-            </div>
-            <div style={{ display: 'flex', gap: '6px' }}>
-              <button className="btn crash-btn" onClick={() => exp11ToggleIptables(true)} disabled={!selectedPodObj || isProcessing} style={{flex: 1}}>
-                Drop iptables
-              </button>
-              <button className="btn heal-btn" onClick={() => exp11ToggleIptables(false)} disabled={!selectedPodObj || isProcessing} style={{flex: 1}}>
-                Restore iptables
-              </button>
-            </div>
-            <div style={{ display: 'flex', gap: '6px' }}>
-              <button className="btn crash-btn" onClick={() => exp12ToggleInterNode(true)} disabled={!selectedPodObj || isProcessing} style={{flex: 1}}>
-                Break Inter-Node
-              </button>
-              <button className="btn heal-btn" onClick={() => exp12ToggleInterNode(false)} disabled={!selectedPodObj || isProcessing} style={{flex: 1}}>
-                Restore Route
               </button>
             </div>
           </div>

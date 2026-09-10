@@ -1,9 +1,10 @@
 import type { Plugin } from 'vite';
-import { exec } from 'child_process';
+import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
 import type { IncomingMessage, ServerResponse } from 'http';
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 interface FaultApiOptions {
   // Optional configuration
@@ -23,19 +24,19 @@ async function runShell(cmd: string): Promise<{ stdout: string; stderr: string; 
 }
 
 async function resolveContainerName(nodeName: string): Promise<string> {
-  // If exact node name matches docker container
-  const { stdout: psOut } = await runShell(`docker ps --format '{{.Names}}'`);
-  const containerNames = psOut.split('\n').map(s => s.trim()).filter(Boolean);
+  try {
+    const { stdout } = await execFileAsync('docker', ['ps', '--format', '{{.Names}}']);
+    const containerNames = stdout.split('\n').map(s => s.trim()).filter(Boolean);
 
-  if (containerNames.includes(nodeName)) {
-    return nodeName;
-  }
+    if (containerNames.includes(nodeName)) {
+      return nodeName;
+    }
 
-  // Check substring match
-  const match = containerNames.find(name => name.includes(nodeName) || nodeName.includes(name));
-  if (match) {
-    return match;
-  }
+    const match = containerNames.find(name => name.includes(nodeName) || nodeName.includes(name));
+    if (match) {
+      return match;
+    }
+  } catch {}
 
   return nodeName;
 }
@@ -43,23 +44,68 @@ async function resolveContainerName(nodeName: string): Promise<string> {
 async function execOnNode(nodeName: string, command: string): Promise<{ stdout: string; stderr: string; code: number }> {
   const container = await resolveContainerName(nodeName);
 
-  // 1. Primary execution strategy: docker exec
-  const dockerCmd = `docker exec ${container} sh -c "${command.replace(/"/g, '\\"')}"`;
-  const dockerRes = await runShell(dockerCmd);
-  if (dockerRes.code === 0) {
-    return dockerRes;
+  // 1. Primary execution strategy: docker exec directly without cmd.exe shell wrapper
+  try {
+    const { stdout, stderr } = await execFileAsync('docker', ['exec', container, 'sh', '-c', command]);
+    return { stdout: stdout.trim(), stderr: stderr.trim(), code: 0 };
+  } catch (err: any) {
+    // 2. Fallback: minikube ssh
+    try {
+      const { stdout, stderr } = await execFileAsync('minikube', ['ssh', '-n', nodeName, '--', command]);
+      return { stdout: stdout.trim(), stderr: stderr.trim(), code: 0 };
+    } catch (mErr: any) {
+      return {
+        stdout: err.stdout?.trim() || mErr.stdout?.trim() || '',
+        stderr: err.stderr?.trim() || mErr.stderr?.trim() || err.message,
+        code: err.code || 1,
+      };
+    }
   }
+}
 
-  // If docker failed with no such container or permission, try minikube ssh
-  if (dockerRes.stderr.includes('No such container') || dockerRes.stderr.includes('permission denied')) {
-    const minikubeCmd = `minikube ssh -n ${nodeName} -- "${command.replace(/"/g, '\\"')}"`;
-    const minikubeRes = await runShell(minikubeCmd);
-    if (minikubeRes.code === 0) {
-      return minikubeRes;
+async function resolvePodCaliInterface(nodeName: string, podName: string, namespace: string, podIP?: string): Promise<string> {
+  // 1. Direct Calico endpoint-status query on the node (Calico's primary source of truth, works UP or DOWN)
+  if (podName) {
+    const calicoRes = await execOnNode(nodeName, `grep -o cali[0-9a-f]* /var/run/calico/endpoint-status/*${podName}*`);
+    const match = calicoRes.stdout.trim().split(/\s+/)[0];
+    if (match && match.startsWith('cali')) {
+      return match;
     }
   }
 
-  return dockerRes;
+  // 2. Try resolving via host routing table if targetIP is known
+  let targetIP = podIP;
+  if (!targetIP && podName) {
+    try {
+      const { stdout } = await execFileAsync('kubectl', ['get', 'pod', podName, '-n', namespace || 'default', '-o', 'jsonpath={.status.podIP}']);
+      targetIP = stdout.trim();
+    } catch {}
+  }
+
+  if (targetIP) {
+    const routeRes = await execOnNode(nodeName, `ip route show ${targetIP} | grep -o cali[0-9a-f]*`);
+    const match = routeRes.stdout.trim().split(/\s+/)[0];
+    if (match && match.startsWith('cali')) {
+      return match;
+    }
+  }
+
+  // 3. Query peer interface index from inside the container via sysfs iflink
+  if (podName) {
+    try {
+      const { stdout } = await execFileAsync('kubectl', ['exec', '-n', namespace || 'default', podName, '--', 'cat', '/sys/class/net/eth0/iflink']);
+      const ifindex = stdout.trim().split(/\s+/)[0];
+      if (/^\d+$/.test(ifindex)) {
+        const linkRes = await execOnNode(nodeName, `ip -o link show | grep "^${ifindex}:" | grep -o cali[0-9a-f]*`);
+        const match = linkRes.stdout.trim().split(/\s+/)[0];
+        if (match && match.startsWith('cali')) {
+          return match;
+        }
+      }
+    } catch {}
+  }
+
+  return '';
 }
 
 function parseJsonBody<T = any>(req: IncomingMessage): Promise<T> {
@@ -244,6 +290,120 @@ export function faultInjectorPlugin(_options: FaultApiOptions = {}): Plugin {
               output: pingRes.stdout || pingRes.stderr,
               packetLossPercent: packetLoss,
               exitCode: pingRes.code,
+            });
+          }
+
+          if (url.startsWith('/api/fault/veth/status') && req.method === 'GET') {
+            const parsedUrl = new URL(url, 'http://localhost');
+            const nodeName = parsedUrl.searchParams.get('nodeName');
+            const podName = parsedUrl.searchParams.get('podName') || '';
+            const namespace = parsedUrl.searchParams.get('namespace') || 'default';
+            const podIP = parsedUrl.searchParams.get('podIP') || '';
+
+            if (!nodeName) {
+              return sendJson(res, 400, { error: 'nodeName is required' });
+            }
+
+            const iface = await resolvePodCaliInterface(nodeName, podName, namespace, podIP);
+            let isDown = false;
+            let statusRaw = '';
+
+            if (iface) {
+              const linkCheck = await execOnNode(nodeName, `ip link show ${iface}`);
+              statusRaw = linkCheck.stdout;
+              isDown = statusRaw.includes('state DOWN');
+            }
+
+            return sendJson(res, 200, {
+              nodeName,
+              podName,
+              iface,
+              isDown,
+              statusRaw,
+            });
+          }
+
+          if (url === '/api/fault/veth/toggle' && req.method === 'POST') {
+            const { nodeName, podName, namespace = 'default', podIP, action = 'down', iface: providedIface } = await parseJsonBody(req);
+            if (!nodeName) {
+              return sendJson(res, 400, { error: 'nodeName is required' });
+            }
+
+            let iface = providedIface;
+            if (!iface) {
+              iface = await resolvePodCaliInterface(nodeName, podName, namespace, podIP);
+            }
+
+            if (!iface) {
+              return sendJson(res, 404, { error: `Could not determine Calico veth interface for pod ${podName} on node ${nodeName}` });
+            }
+
+            const validAction = action === 'up' ? 'up' : 'down';
+            const toggleRes = await execOnNode(nodeName, `sudo ip link set ${iface} ${validAction}`);
+            if (toggleRes.code !== 0) {
+              return sendJson(res, 500, {
+                error: `Failed to set ${iface} ${validAction}: ${toggleRes.stderr}`,
+                command: `sudo ip link set ${iface} ${validAction}`,
+              });
+            }
+
+            const verifyRes = await execOnNode(nodeName, `ip link show ${iface}`);
+            const isDown = verifyRes.stdout.includes('state DOWN');
+
+            return sendJson(res, 200, {
+              success: true,
+              nodeName,
+              podName,
+              iface,
+              action: validAction,
+              isDown,
+              command: `sudo ip link set ${iface} ${validAction}`,
+              message: `Successfully set interface ${iface} on ${nodeName} to ${validAction.toUpperCase()}`,
+            });
+          }
+
+          if (url.startsWith('/api/fault/tunnel/status') && req.method === 'GET') {
+            const parsedUrl = new URL(url, 'http://localhost');
+            const nodeName = parsedUrl.searchParams.get('nodeName');
+            if (!nodeName) {
+              return sendJson(res, 400, { error: 'nodeName is required' });
+            }
+
+            const checkRes = await execOnNode(nodeName, 'ip link show tunl0');
+            const isDown = checkRes.stdout.includes('state DOWN') || !checkRes.stdout.includes('UP');
+
+            return sendJson(res, 200, {
+              nodeName,
+              isDown,
+              output: checkRes.stdout,
+            });
+          }
+
+          if (url === '/api/fault/tunnel/toggle' && req.method === 'POST') {
+            const { nodeName, action = 'down' } = await parseJsonBody(req);
+            if (!nodeName) {
+              return sendJson(res, 400, { error: 'nodeName is required' });
+            }
+
+            const validAction = action === 'up' ? 'up' : 'down';
+            const toggleRes = await execOnNode(nodeName, `ip link set tunl0 ${validAction}`);
+            if (toggleRes.code !== 0) {
+              return sendJson(res, 500, {
+                error: `Failed to set tunl0 ${validAction}: ${toggleRes.stderr}`,
+                command: `ip link set tunl0 ${validAction}`,
+              });
+            }
+
+            const checkRes = await execOnNode(nodeName, 'ip link show tunl0');
+            const isDown = checkRes.stdout.includes('state DOWN') || !checkRes.stdout.includes('UP');
+
+            return sendJson(res, 200, {
+              success: true,
+              nodeName,
+              action: validAction,
+              isDown,
+              command: `ip link set tunl0 ${validAction}`,
+              message: `Successfully set tunl0 on ${nodeName} to ${validAction.toUpperCase()}`,
             });
           }
 
