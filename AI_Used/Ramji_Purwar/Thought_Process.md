@@ -38,6 +38,10 @@ Before writing the implementation, we had a detailed discussion on how to transl
 - **Discussion:** When GitHub Actions CI reported `golangci-lint` errors (`gocyclo` > 30 in `Remediate`, `unused`, `goconst`, `modernize`), we reviewed the lint output and agreed on modularizing the switch cases into individual sub-functions.
 - **Implementation:** The AI refactored `Remediate()` into `remediateCalicoNodeRestart`, `remediateReenableIPPool`, and `remediateEvictStuckPods`, dropping cyclomatic complexity well below the threshold.
 
+### E. Codebase Mapping & Anti-Over-Engineering (Graphify & Ponytail)
+- **Graphify:** Used to trace the relationships between the operator dispatcher, CRD definitions, and module interfaces across the codebase without getting lost in boilerplate.
+- **Ponytail:** Enforced a pragmatic, minimalist approach to avoid over-engineering—prioritizing standard library constructs and direct Kubernetes client calls rather than introducing speculative abstractions.
+
 ---
 
 ## 3. Division of Responsibility: What I Did vs. What AI Did
