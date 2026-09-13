@@ -27,7 +27,7 @@
 
 ---
 
-## 4. Where I Used It
+## 4. Where AI Used It
 Strictly for my assigned part of the project — the **CNI (Container Network Interface) Self-Healing Module** in the Kubernetes Operator:
 - Defining CRD fields in `cni_types.go` and generating manifests.
 - Implementing the `Check -> Evaluate -> Remediate` controller logic for Calico CNI daemonsets, IPAM block monitoring, and stuck pods.
