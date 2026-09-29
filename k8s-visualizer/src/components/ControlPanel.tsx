@@ -320,13 +320,17 @@ export function ControlPanel({ onLog, selectedPod, k8sPods, operatorStatus, k8sA
     setIsProcessing(true);
     try {
       const action = down ? 'down' : 'up';
-      onLog(`docker exec ${selectedPodObj.nodeName} sudo ip link set tunl0 ${action}`, 'system');
-      const res = await k8sApi.toggleTunnel(selectedPodObj.nodeName, action);
-      setTunl0Down(down);
       if (down) {
-        onLog(`[Overlay Tunnel Down] Downed tunl0 interface on ${selectedPodObj.nodeName}. Cross-node pod traffic will drop!`, 'critical');
+        onLog(`docker exec ${selectedPodObj.nodeName} iptables -I OUTPUT -p ipencap -j DROP`, 'system');
       } else {
-        onLog(`[Overlay Tunnel Restored] Brought tunl0 interface back UP on ${selectedPodObj.nodeName}.`, 'success');
+        onLog(`docker exec ${selectedPodObj.nodeName} iptables -D OUTPUT -p ipencap -j DROP`, 'system');
+      }
+      const res = await k8sApi.toggleTunnel(selectedPodObj.nodeName, action);
+      setTunl0Down(res.isDown ?? down);
+      if (down) {
+        onLog(`[Overlay Tunnel Down] Blocked IPIP tunnel encapsulation (OUTPUT -p ipencap DROP) on ${selectedPodObj.nodeName}. Cross-node pod traffic will drop!`, 'critical');
+      } else {
+        onLog(`[Overlay Tunnel Restored] Restored IPIP tunnel encapsulation and tunl0 on ${selectedPodObj.nodeName}.`, 'success');
       }
     } catch (e: any) {
       onLog(`Failed: ${e.message}`, 'error');
@@ -363,7 +367,6 @@ export function ControlPanel({ onLog, selectedPod, k8sPods, operatorStatus, k8sA
   const isOperatorEnabled = operatorOverride !== null ? operatorOverride : (operatorStatus ? Boolean(
     operatorStatus.cni?.enabled && 
     operatorStatus.coreDNS?.enabled &&
-    operatorStatus.networkPolicy?.enabled &&
     operatorStatus.podConnectivity?.enabled
   ) : true);
 

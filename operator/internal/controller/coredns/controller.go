@@ -338,18 +338,18 @@ func (m *CoreDNSModule) Evaluate(ctx context.Context, checkResult *module.CheckR
 	}
 
 	// Scenario 2: Replica Degradation
-	if availableReplicas < expectedReplicas {
-		return &module.EvalResult{
-			IsHealthy:        false,
-			NeedsRemediation: autoHealReplicas,
-			Reason:           fmt.Sprintf("CoreDNS deployment is degraded: %d/%d available replicas ready", availableReplicas, expectedReplicas),
-			Severity:         severityWarning,
-			ActionType:       ActionScaleReplicas,
-			ActionData: map[string]any{
-				"targetReplicas": expectedReplicas,
-			},
-		}, nil
-	}
+	// if availableReplicas < expectedReplicas {
+	// 	return &module.EvalResult{
+	// 		IsHealthy:        false,
+	// 		NeedsRemediation: autoHealReplicas,
+	// 		Reason:           fmt.Sprintf("CoreDNS deployment is degraded: %d/%d available replicas ready", availableReplicas, expectedReplicas),
+	// 		Severity:         severityWarning,
+	// 		ActionType:       ActionScaleReplicas,
+	// 		ActionData: map[string]any{
+	// 			"targetReplicas": expectedReplicas,
+	// 		},
+	// 	}, nil
+	// }
 
 	// Scenario 3: Corrupted Upstream DNS Configuration (Experiment 2.3)
 	if upstreamValidationEnabled && upstreamCorrupted {

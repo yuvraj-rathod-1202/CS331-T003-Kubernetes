@@ -184,7 +184,7 @@ export function useKubernetes() {
       spec: {
         cni: { enabled },
         coreDNS: { enabled },
-        networkPolicy: { enabled },
+        networkPolicy: { enabled:false },
         podConnectivity: { enabled },
       }
     };

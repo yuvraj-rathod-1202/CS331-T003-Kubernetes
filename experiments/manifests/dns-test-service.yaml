@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-service-pod
+  labels:
+    app: target-nginx
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: target-nginx
+  template:
+    metadata:
+      labels:
+        app: target-nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:alpine
+        ports:
+        - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: test-service
+spec:
+  selector:
+    app: target-nginx
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 80
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-client-pod
+spec:
+  containers:
+  - name: curl-client
+    image: curlimages/curl:latest
+    command: ["sleep", "3600"]

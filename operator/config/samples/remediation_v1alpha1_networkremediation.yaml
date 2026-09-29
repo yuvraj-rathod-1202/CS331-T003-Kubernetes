@@ -9,8 +9,8 @@ spec:
   coreDNS:
     enabled: true
   networkPolicy:
-    enabled: true
-    autoHeal: true
+    enabled: false
+    autoHeal: false
     cooldownSeconds: 60
   podConnectivity:
     enabled: true

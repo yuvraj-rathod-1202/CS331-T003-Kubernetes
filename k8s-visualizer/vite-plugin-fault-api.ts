@@ -369,13 +369,14 @@ export function faultInjectorPlugin(_options: FaultApiOptions = {}): Plugin {
               return sendJson(res, 400, { error: 'nodeName is required' });
             }
 
-            const checkRes = await execOnNode(nodeName, 'ip link show tunl0');
-            const isDown = checkRes.stdout.includes('state DOWN') || !checkRes.stdout.includes('UP');
+            const ruleCheck = await execOnNode(nodeName, 'iptables -C OUTPUT -p 4 -j DROP -m comment --comment "tunl0-drop" 2>/dev/null');
+            const linkCheck = await execOnNode(nodeName, 'ip link show tunl0');
+            const isDown = ruleCheck.code === 0 || linkCheck.stdout.includes('state DOWN') || !linkCheck.stdout.includes('UP');
 
             return sendJson(res, 200, {
               nodeName,
               isDown,
-              output: checkRes.stdout,
+              output: linkCheck.stdout || (ruleCheck.code === 0 ? 'IPIP encapsulation DROPPED via iptables' : ''),
             });
           }
 
@@ -386,24 +387,40 @@ export function faultInjectorPlugin(_options: FaultApiOptions = {}): Plugin {
             }
 
             const validAction = action === 'up' ? 'up' : 'down';
-            const toggleRes = await execOnNode(nodeName, `ip link set tunl0 ${validAction}`);
-            if (toggleRes.code !== 0) {
-              return sendJson(res, 500, {
-                error: `Failed to set tunl0 ${validAction}: ${toggleRes.stderr}`,
-                command: `ip link set tunl0 ${validAction}`,
-              });
+            let commandRan = '';
+
+            if (validAction === 'down') {
+              // Ensure iptables rule blocking IPIP protocol (protocol 4) is present
+              const ruleCheck = await execOnNode(nodeName, 'iptables -C OUTPUT -p 4 -j DROP -m comment --comment "tunl0-drop" 2>/dev/null');
+              if (ruleCheck.code !== 0) {
+                await execOnNode(nodeName, 'iptables -I OUTPUT -p 4 -j DROP -m comment --comment "tunl0-drop"');
+              }
+              await execOnNode(nodeName, 'ip link set tunl0 down 2>/dev/null || true');
+              commandRan = 'iptables -I OUTPUT -p 4 -j DROP -m comment --comment "tunl0-drop" && ip link set tunl0 down';
+            } else {
+              // Clean up iptables rule and bring interface up
+              while (true) {
+                const check = await execOnNode(nodeName, 'iptables -C OUTPUT -p 4 -j DROP -m comment --comment "tunl0-drop" 2>/dev/null');
+                if (check.code !== 0) break;
+                await execOnNode(nodeName, 'iptables -D OUTPUT -p 4 -j DROP -m comment --comment "tunl0-drop"');
+              }
+              await execOnNode(nodeName, 'ip link set tunl0 up 2>/dev/null || true');
+              commandRan = 'iptables -D OUTPUT -p 4 -j DROP && ip link set tunl0 up';
             }
 
-            const checkRes = await execOnNode(nodeName, 'ip link show tunl0');
-            const isDown = checkRes.stdout.includes('state DOWN') || !checkRes.stdout.includes('UP');
+            const verifyRule = await execOnNode(nodeName, 'iptables -C OUTPUT -p 4 -j DROP -m comment --comment "tunl0-drop" 2>/dev/null');
+            const verifyLink = await execOnNode(nodeName, 'ip link show tunl0');
+            const isDown = verifyRule.code === 0 || verifyLink.stdout.includes('state DOWN') || !verifyLink.stdout.includes('UP');
 
             return sendJson(res, 200, {
               success: true,
               nodeName,
               action: validAction,
               isDown,
-              command: `ip link set tunl0 ${validAction}`,
-              message: `Successfully set tunl0 on ${nodeName} to ${validAction.toUpperCase()}`,
+              command: commandRan,
+              message: validAction === 'down' 
+                ? `Successfully blocked IPIP tunnel traffic (OUTPUT -p 4 DROP) and downed tunl0 on ${nodeName}`
+                : `Successfully unblocked IPIP tunnel traffic and brought tunl0 UP on ${nodeName}`,
             });
           }
 
