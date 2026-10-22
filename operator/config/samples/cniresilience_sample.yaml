@@ -1,0 +1,32 @@
+# Sample CNIResilience CR — apply this to enable dual-CNI monitoring.
+#
+# This configures:
+#   - Calico as the primary CNI (10.244.0.0/16)
+#   - Flannel as the backup CNI (192.168.0.0/16)
+#   - 5-second probe interval with 3 failure threshold
+#   - Automatic recovery and failover enabled
+#
+# Usage:
+#   kubectl apply -f config/samples/cniresilience_sample.yaml
+apiVersion: remediation.cn-operator.yuvraj-rathod-1202.github.io/v1alpha1
+kind: CNIResilience
+metadata:
+  name: default-resilience
+spec:
+  primaryCNI:
+    name: calico
+    namespace: kube-system
+    daemonSetName: calico-node
+    healthEndpoint: "http://localhost:9099/liveness"
+    addressSpace: "10.244.0.0/16"
+  backupCNI:
+    name: flannel
+    namespace: kube-system
+    daemonSetName: kube-flannel-ds
+    healthEndpoint: ""  # Flannel has no built-in health endpoint
+    addressSpace: "192.168.0.0/16"
+  probeIntervalSeconds: 5
+  probeTimeoutSeconds: 2
+  failureThreshold: 3
+  autoRecover: true
+  autoFailover: true

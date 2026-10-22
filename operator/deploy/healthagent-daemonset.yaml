@@ -1,0 +1,119 @@
+# DaemonSet for the CNI health agent.
+#
+# The health agent runs on every node and probes both CNI paths.
+# It needs:
+#   - hostNetwork: true (to access both the primary and backup networks)
+#   - CAP_NET_RAW capability (for ICMP probes)
+#   - Access to the node's routing table and interfaces
+#
+# TODO: Update the image name after building the health agent binary.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: cni-health-agent
+  namespace: kube-system
+  labels:
+    app: cni-health-agent
+    app.kubernetes.io/component: health-agent
+    app.kubernetes.io/part-of: cniresilience
+spec:
+  selector:
+    matchLabels:
+      app: cni-health-agent
+  template:
+    metadata:
+      labels:
+        app: cni-health-agent
+        app.kubernetes.io/component: health-agent
+      annotations:
+        # Attach the Flannel backup network so the agent can probe over it
+        k8s.v1.cni.cncf.io/networks: flannel-backup
+    spec:
+      hostNetwork: true
+      hostPID: false
+      serviceAccountName: cni-health-agent
+      tolerations:
+        # Run on all nodes, including control plane
+        - operator: Exists
+      containers:
+        - name: health-agent
+          # TODO(Deep): Replace with the actual image after building
+          image: ghcr.io/yuvraj-rathod-1202/cni-health-agent:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: probe
+              containerPort: 9100
+              protocol: TCP
+            - name: metrics
+              containerPort: 9101
+              protocol: TCP
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: PROBE_INTERVAL
+              value: "5"
+            - name: PROBE_TIMEOUT
+              value: "2"
+            - name: FAILURE_THRESHOLD
+              value: "3"
+          securityContext:
+            capabilities:
+              add:
+                - NET_RAW      # For ICMP probes
+                - NET_ADMIN    # For reading routes and interfaces
+            readOnlyRootFilesystem: true
+            runAsNonRoot: false  # Needed for raw sockets
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+# ServiceAccount for the health agent
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cni-health-agent
+  namespace: kube-system
+---
+# ClusterRole for the health agent to read nodes and pods
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cni-health-agent
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cni-health-agent
+subjects:
+  - kind: ServiceAccount
+    name: cni-health-agent
+    namespace: kube-system
+roleRef:
+  kind: ClusterRole
+  name: cni-health-agent
+  apiGroup: rbac.authorization.k8s.io

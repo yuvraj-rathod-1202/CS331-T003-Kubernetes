@@ -1,0 +1,28 @@
+# Multus NetworkAttachmentDefinition for the Flannel backup CNI.
+#
+# This tells Multus how to create the secondary interface (net1) in each pod.
+# Pods annotated with k8s.v1.cni.cncf.io/networks: flannel-backup will get
+# a second interface connected to the Flannel VXLAN overlay.
+#
+# TODO: Adjust the config after installing Flannel on the cluster.
+# The "delegate" section should match Flannel's actual CNI config.
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: flannel-backup
+  namespace: kube-system
+spec:
+  config: |
+    {
+      "cniVersion": "0.3.1",
+      "name": "flannel-backup",
+      "type": "flannel",
+      "subnetFile": "/run/flannel/subnet.env",
+      "delegate": {
+        "type": "bridge",
+        "bridge": "cni-flannel1",
+        "isDefaultGateway": false,
+        "ipMasq": false,
+        "hairpinMode": true
+      }
+    }

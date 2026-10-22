@@ -41,6 +41,8 @@ import (
 	corednsmod "CS331-CN-Project-1/operator/internal/controller/coredns"
 	netpolmod "CS331-CN-Project-1/operator/internal/controller/networkpolicy"
 	podconnmod "CS331-CN-Project-1/operator/internal/controller/podconnectivity"
+	cniresctrl "CS331-CN-Project-1/operator/internal/controller/cniresilience"
+	ipamctrl "CS331-CN-Project-1/operator/internal/controller/ipam"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -225,6 +227,20 @@ func main() {
 
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "networkremediation")
+		os.Exit(1)
+	}
+
+	// Problem 1: Dynamic Buddy-Style IPAM Controller (Lead: Ramji, with Viraj & Param)
+	ipamReconciler := ipamctrl.NewIPAMController(mgr.GetClient(), mgr.GetScheme())
+	if err := ipamReconciler.SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "ipam")
+		os.Exit(1)
+	}
+
+	// Problem 2: CNI Resilience Controller (Lead: Yuvraj, with Deep & Arpan)
+	cniResReconciler := cniresctrl.NewCNIResilienceController(mgr.GetClient(), mgr.GetScheme())
+	if err := cniResReconciler.SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "cniresilience")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder

@@ -1,0 +1,17 @@
+# Sample IPPool CR — apply this to the cluster to start the IPAM controller.
+#
+# This creates a pool with a single /16 CIDR range and configures the
+# buddy allocator with /28 minimum blocks and /22 maximum blocks.
+#
+# Usage:
+#   kubectl apply -f config/samples/ipam_sample.yaml
+apiVersion: remediation.cn-operator.yuvraj-rathod-1202.github.io/v1alpha1
+kind: IPPool
+metadata:
+  name: default-pool
+spec:
+  cidrs:
+    - "10.244.0.0/16"
+  minBlockSize: 28       # Smallest block: /28 = 16 addresses
+  maxBlockSize: 22       # Largest block: /22 = 1024 addresses
+  expandThresholdPercent: 80  # Expand when a node reaches 80% usage

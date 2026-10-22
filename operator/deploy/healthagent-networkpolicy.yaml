@@ -1,0 +1,64 @@
+# NetworkPolicy to allow health probe traffic between health agents.
+#
+# This policy explicitly allows ICMP and TCP traffic on the health agent's
+# probe port (9100) between all health agent pods. This ensures that:
+#   - Our probes are never blocked by application NetworkPolicies.
+#   - A blocked probe is always a real failure, never a policy drop.
+#
+# As noted in the problem statement: "A probe blocked by NetworkPolicy is not
+# a failure." We avoid this confusion by whitelisting our probe traffic.
+#
+# NOTE: Standard Kubernetes NetworkPolicy only applies to the primary CNI
+# (Calico). It does NOT apply to Multus secondary interfaces (Flannel).
+# So the backup path probes are inherently unblocked.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-health-probes
+  namespace: kube-system
+spec:
+  podSelector:
+    matchLabels:
+      app: cni-health-agent
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow probe traffic from other health agents
+    - from:
+        - podSelector:
+            matchLabels:
+              app: cni-health-agent
+      ports:
+        - protocol: TCP
+          port: 9100
+        - protocol: TCP
+          port: 9101
+    # Allow ICMP from other health agents
+    - from:
+        - podSelector:
+            matchLabels:
+              app: cni-health-agent
+  egress:
+    # Allow probing other health agents
+    - to:
+        - podSelector:
+            matchLabels:
+              app: cni-health-agent
+      ports:
+        - protocol: TCP
+          port: 9100
+    # Allow access to the Kubernetes API server (for recovery actions)
+    - to: []
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+    # Allow DNS resolution
+    - to: []
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
