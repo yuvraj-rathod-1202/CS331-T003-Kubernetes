@@ -88,15 +88,15 @@ func (lr *LeakReclaimer) SetGracePeriod(d time.Duration) {
 // with actually running pods and identifies leaks.
 //
 // TODO: Implement:
-//   1. Get all NodeIPAllocation CRs → extract all allocated IPs per node.
-//      (For now, we can use the host-local data dir or our own records.)
-//   2. List all Pods across the cluster that have a PodIP.
-//   3. Build a set of "actually used IPs".
-//   4. For each allocated IP not in the "actually used" set:
-//      a. If it's new, add it to knownLeaks with DetectedAt = now.
-//      b. If it's already in knownLeaks and grace period has passed, mark GracePeriodExpired.
-//   5. Remove entries from knownLeaks if the IP is now in use (pod came back).
-//   6. Return the list of leaked allocations.
+//  1. Get all NodeIPAllocation CRs → extract all allocated IPs per node.
+//     (For now, we can use the host-local data dir or our own records.)
+//  2. List all Pods across the cluster that have a PodIP.
+//  3. Build a set of "actually used IPs".
+//  4. For each allocated IP not in the "actually used" set:
+//     a. If it's new, add it to knownLeaks with DetectedAt = now.
+//     b. If it's already in knownLeaks and grace period has passed, mark GracePeriodExpired.
+//  5. Remove entries from knownLeaks if the IP is now in use (pod came back).
+//  6. Return the list of leaked allocations.
 func (lr *LeakReclaimer) DetectLeaks(ctx context.Context) ([]LeakedAllocation, error) {
 	logger := logf.FromContext(ctx).WithName("leak-reclaimer")
 	logger.V(1).Info("Scanning for leaked IP allocations")
@@ -109,11 +109,11 @@ func (lr *LeakReclaimer) DetectLeaks(ctx context.Context) ([]LeakedAllocation, e
 // ReclaimLeaks frees all leaked allocations that have passed the grace period.
 //
 // TODO: Implement:
-//   1. Call DetectLeaks to get current leaks.
-//   2. For each leak where GracePeriodExpired is true:
-//      a. Free the IP from the IPAM allocation records.
-//      b. Log the reclamation event.
-//   3. Return the count of reclaimed addresses.
+//  1. Call DetectLeaks to get current leaks.
+//  2. For each leak where GracePeriodExpired is true:
+//     a. Free the IP from the IPAM allocation records.
+//     b. Log the reclamation event.
+//  3. Return the count of reclaimed addresses.
 func (lr *LeakReclaimer) ReclaimLeaks(ctx context.Context) (int, error) {
 	logger := logf.FromContext(ctx).WithName("leak-reclaimer")
 	logger.Info("Running leak reclamation")

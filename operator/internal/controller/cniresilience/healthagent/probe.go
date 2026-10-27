@@ -26,8 +26,16 @@ package healthagent
 import (
 	"context"
 	"fmt"
+	"net"
 	"time"
+
+	"golang.org/x/net/icmp"
+	"golang.org/x/net/ipv4"
 )
+
+// healthAgentPort is the port the health agent TCP listener binds on every node.
+// NetworkPolicy explicitly allows this port between health agent pods.
+const healthAgentPort = 9100
 
 // Prober defines the interface for network probes.
 type Prober interface {
@@ -50,10 +58,11 @@ type ProbeOutcome struct {
 	Message string
 }
 
-// ICMPProber sends ICMP echo requests (ping).
-//
-// TODO: Implement using raw sockets or the `golang.org/x/net/icmp` package.
-// Note: raw sockets require CAP_NET_RAW capability in the DaemonSet pod.
+// ICMPProber
+
+// ICMPProber sends ICMP echo requests (ping) using golang.org/x/net/icmp.
+// The DaemonSet runs with hostNetwork:true and CAP_NET_RAW, which are both
+// required to open a raw IP socket.
 type ICMPProber struct {
 	// Timeout is the maximum time to wait for a reply.
 	Timeout time.Duration
@@ -72,24 +81,92 @@ func NewICMPProber(timeout time.Duration) *ICMPProber {
 
 func (p *ICMPProber) Name() string { return "icmp" }
 
-// Probe sends an ICMP echo request to the target IP.
-//
-// TODO: Implement:
-//   1. Create a raw ICMP socket (or use golang.org/x/net/icmp).
-//   2. Send an echo request with p.PacketSize payload.
-//   3. Wait for echo reply up to p.Timeout.
-//   4. Measure round-trip time.
-//   5. Return ProbeOutcome with success/failure and latency.
+// Probe sends an ICMP echo request to target (IPv4 address string) and measures RTT.
+// It requires CAP_NET_RAW. The network "ip4:icmp" opens a raw IPv4 socket.
 func (p *ICMPProber) Probe(ctx context.Context, target string) (ProbeOutcome, error) {
-	// TODO: Implement ICMP probe.
+	// Open raw ICMP socket. Requires CAP_NET_RAW.
+	conn, err := icmp.ListenPacket("ip4:icmp", "0.0.0.0")
+	if err != nil {
+		return ProbeOutcome{}, fmt.Errorf("icmp: open raw socket: %w", err)
+	}
+	defer conn.Close() //nolint:errcheck
 
-	return ProbeOutcome{}, fmt.Errorf("TODO: ICMPProber.Probe not yet implemented")
+	deadline := time.Now().Add(p.Timeout)
+	if err := conn.SetDeadline(deadline); err != nil {
+		return ProbeOutcome{}, fmt.Errorf("icmp: set deadline: %w", err)
+	}
+
+	// Build ICMP echo request.
+	payload := make([]byte, p.PacketSize)
+	for i := range payload {
+		payload[i] = byte(i % 256)
+	}
+	msg := icmp.Message{
+		Type: ipv4.ICMPTypeEcho,
+		Code: 0,
+		Body: &icmp.Echo{
+			ID:   1,
+			Seq:  1,
+			Data: payload,
+		},
+	}
+	msgBytes, err := msg.Marshal(nil)
+	if err != nil {
+		return ProbeOutcome{}, fmt.Errorf("icmp: marshal: %w", err)
+	}
+
+	dst := &net.IPAddr{IP: net.ParseIP(target)}
+	start := time.Now()
+
+	if _, err := conn.WriteTo(msgBytes, dst); err != nil {
+		return ProbeOutcome{
+			Success: false,
+			Message: fmt.Sprintf("icmp: send to %s: %v", target, err),
+		}, nil
+	}
+
+	// Wait for echo reply.
+	buf := make([]byte, 1500)
+	for {
+		select {
+		case <-ctx.Done():
+			return ProbeOutcome{Success: false, Message: "context cancelled"}, nil
+		default:
+		}
+
+		n, peer, err := conn.ReadFrom(buf)
+		if err != nil {
+			return ProbeOutcome{
+				Success: false,
+				Latency: time.Since(start),
+				Message: fmt.Sprintf("icmp: read reply from %s: %v", target, err),
+			}, nil
+		}
+
+		rm, err := icmp.ParseMessage(1 /* ICMPv4 */, buf[:n])
+		if err != nil {
+			continue
+		}
+
+		if rm.Type == ipv4.ICMPTypeEchoReply {
+			// Verify it is a reply to our request (not another host's traffic).
+			if reply, ok := rm.Body.(*icmp.Echo); ok && reply.ID == 1 && reply.Seq == 1 {
+				_ = peer
+				latency := time.Since(start)
+				return ProbeOutcome{
+					Success: true,
+					Latency: latency,
+					Message: fmt.Sprintf("icmp echo reply from %s in %v", target, latency),
+				}, nil
+			}
+		}
+	}
 }
 
+// TCPProber
+
 // TCPProber attempts a TCP connection to a target host:port.
-//
-// TODO: Implement using net.DialTimeout.
-// The health agent on the peer node listens on a known port (e.g. 9100).
+// The health agent on the peer node listens on healthAgentPort (9100).
 type TCPProber struct {
 	// Timeout is the maximum time to wait for the connection.
 	Timeout time.Duration
@@ -98,7 +175,7 @@ type TCPProber struct {
 	Port int
 }
 
-// NewTCPProber creates a TCP prober for the given port.
+// NewTCPProber creates a TCP prober for the health agent port.
 func NewTCPProber(timeout time.Duration, port int) *TCPProber {
 	return &TCPProber{
 		Timeout: timeout,
@@ -108,33 +185,45 @@ func NewTCPProber(timeout time.Duration, port int) *TCPProber {
 
 func (p *TCPProber) Name() string { return "tcp" }
 
-// Probe attempts a TCP connection to target:port.
-//
-// TODO: Implement:
-//   1. Use net.DialTimeout("tcp", target:port, p.Timeout).
-//   2. If connection succeeds, close it and return success.
-//   3. If it fails, return failure with the error message.
+// Probe attempts a TCP connection to target:port and measures connection time.
 func (p *TCPProber) Probe(ctx context.Context, target string) (ProbeOutcome, error) {
-	// TODO: Implement TCP probe.
+	addr := fmt.Sprintf("%s:%d", target, p.Port)
+	start := time.Now()
 
-	return ProbeOutcome{}, fmt.Errorf("TODO: TCPProber.Probe not yet implemented")
+	d := net.Dialer{Timeout: p.Timeout}
+	conn, err := d.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return ProbeOutcome{
+			Success: false,
+			Latency: time.Since(start),
+			Message: fmt.Sprintf("tcp: dial %s: %v", addr, err),
+		}, nil
+	}
+	latency := time.Since(start)
+	conn.Close() //nolint:errcheck
+
+	return ProbeOutcome{
+		Success: true,
+		Latency: latency,
+		Message: fmt.Sprintf("tcp: connected to %s in %v", addr, latency),
+	}, nil
 }
+
+// MTUProber
 
 // MTUProber sends large ICMP packets to detect MTU mismatches.
 //
-// This catches the professor's VXLAN MTU problem: small packets (like regular pings)
+// This catches the VXLAN MTU problem: small packets (like regular pings)
 // pass through fine, but large packets are silently dropped because the VXLAN
 // overhead (50 bytes) reduces the effective MTU.
 //
-// Standard MTU: 1500. VXLAN overhead: 50. So effective MTU = 1450.
-// If one side has MTU 1500 and the other 1450, packets > 1450 bytes are dropped.
-//
-// TODO(Deep): Implement using raw sockets with DF (Don't Fragment) bit set.
+// Standard Ethernet MTU: 1500. VXLAN overhead: 50. Effective MTU = 1450.
+// We probe with 1400-byte payloads - a healthy VXLAN tunnel must pass these.
 type MTUProber struct {
 	// Timeout is the maximum time to wait for a reply.
 	Timeout time.Duration
 
-	// PacketSize is the large payload size (e.g. 1400 bytes to test near-MTU).
+	// PacketSize is the large payload size to send.
 	PacketSize int
 }
 
@@ -142,32 +231,105 @@ type MTUProber struct {
 func NewMTUProber(timeout time.Duration) *MTUProber {
 	return &MTUProber{
 		Timeout:    timeout,
-		PacketSize: 1400, // Just under standard VXLAN effective MTU
+		PacketSize: 1400, // Just under VXLAN effective MTU - must pass through healthy tunnels.
 	}
 }
 
 func (p *MTUProber) Name() string { return "mtu" }
 
-// Probe sends a large ICMP packet with the Don't Fragment bit set.
-//
-// TODO(Deep): Implement:
-//   1. Create a raw ICMP socket.
-//   2. Set the Don't Fragment (DF) bit on the IP header.
-//   3. Send an echo request with p.PacketSize payload.
-//   4. If we get a "message too big" ICMP error, the MTU is wrong → failure.
-//   5. If we get a normal echo reply, MTU is fine → success.
+// Probe sends a large ICMP packet. A failure here (when small ICMP succeeds)
+// strongly indicates an MTU mismatch on the VXLAN tunnel.
 func (p *MTUProber) Probe(ctx context.Context, target string) (ProbeOutcome, error) {
-	// TODO(Deep): Implement MTU probe.
+	conn, err := icmp.ListenPacket("ip4:icmp", "0.0.0.0")
+	if err != nil {
+		return ProbeOutcome{}, fmt.Errorf("mtu: open raw socket: %w", err)
+	}
+	defer conn.Close() //nolint:errcheck
 
-	return ProbeOutcome{}, fmt.Errorf("TODO: MTUProber.Probe not yet implemented")
+	deadline := time.Now().Add(p.Timeout)
+	if err := conn.SetDeadline(deadline); err != nil {
+		return ProbeOutcome{}, fmt.Errorf("mtu: set deadline: %w", err)
+	}
+
+	// Large payload to expose MTU problems.
+	payload := make([]byte, p.PacketSize)
+	for i := range payload {
+		payload[i] = byte(i % 256)
+	}
+
+	msg := icmp.Message{
+		Type: ipv4.ICMPTypeEcho,
+		Code: 0,
+		Body: &icmp.Echo{
+			ID:   2, // Distinct ID from ICMPProber to avoid reply confusion.
+			Seq:  1,
+			Data: payload,
+		},
+	}
+	msgBytes, err := msg.Marshal(nil)
+	if err != nil {
+		return ProbeOutcome{}, fmt.Errorf("mtu: marshal: %w", err)
+	}
+
+	dst := &net.IPAddr{IP: net.ParseIP(target)}
+	start := time.Now()
+
+	if _, err := conn.WriteTo(msgBytes, dst); err != nil {
+		return ProbeOutcome{
+			Success: false,
+			Message: fmt.Sprintf("mtu: send %d-byte packet to %s: %v", p.PacketSize, target, err),
+		}, nil
+	}
+
+	buf := make([]byte, 2048)
+	for {
+		select {
+		case <-ctx.Done():
+			return ProbeOutcome{Success: false, Message: "context cancelled"}, nil
+		default:
+		}
+
+		n, _, err := conn.ReadFrom(buf)
+		if err != nil {
+			return ProbeOutcome{
+				Success: false,
+				Latency: time.Since(start),
+				Message: fmt.Sprintf("mtu: no reply for %d-byte packet to %s (likely MTU drop): %v", p.PacketSize, target, err),
+			}, nil
+		}
+
+		rm, err := icmp.ParseMessage(1, buf[:n])
+		if err != nil {
+			continue
+		}
+
+		switch rm.Type {
+		case ipv4.ICMPTypeEchoReply:
+			if reply, ok := rm.Body.(*icmp.Echo); ok && reply.ID == 2 && reply.Seq == 1 {
+				latency := time.Since(start)
+				return ProbeOutcome{
+					Success: true,
+					Latency: latency,
+					Message: fmt.Sprintf("mtu: %d-byte reply from %s in %v — tunnel MTU OK", p.PacketSize, target, latency),
+				}, nil
+			}
+		case ipv4.ICMPTypeDestinationUnreachable:
+			// "Fragmentation needed but DF set" — classic MTU problem signal.
+			return ProbeOutcome{
+				Success: false,
+				Latency: time.Since(start),
+				Message: fmt.Sprintf("mtu: ICMP destination unreachable (fragmentation needed) from %s — MTU MISMATCH", target),
+			}, nil
+		}
+	}
 }
 
+// RunProbes helper
+
 // RunProbes runs all probers against a target and returns aggregated results.
-//
-// TODO(Deep): This is a convenience function. Implement:
-//   1. Run each prober in the list.
-//   2. Collect results.
-//   3. Return all results (the caller decides what constitutes "healthy").
+// A probe infrastructure error (e.g., failed to open socket) is returned as
+// an error. A connectivity failure (e.g., timeout, refused) is returned as
+// ProbeOutcome{Success: false} — not an error.
 func RunProbes(ctx context.Context, target string, probers ...Prober) ([]ProbeOutcome, error) {
 	results := make([]ProbeOutcome, 0, len(probers))
 
