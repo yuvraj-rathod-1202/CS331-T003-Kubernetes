@@ -56,6 +56,9 @@ const (
 	// phaseFailedOver is when at least one node has failed over to the backup path.
 	phaseFailedOver = "FailedOver"
 
+	activePathPrimary = "primary"
+	activePathBackup  = "backup"
+
 	// Minimum time between recovery attempts for the same node, to avoid tight
 	// restart loops that could OOM-kill the CNI agent on a broken node.
 	recoveryBackoff = 2 * time.Minute
@@ -159,7 +162,7 @@ func (r *CNIResilienceController) Reconcile(ctx context.Context, req ctrl.Reques
 					nodeStatus.Message = fmt.Sprintf("Failover failed: %v", foErr)
 				} else if event.Success {
 					failoverCount++
-					nodeStatus.ActivePath = "backup"
+					nodeStatus.ActivePath = activePathBackup
 					nodeStatus.Message = "Failed over to backup path"
 					now := metav1.Now()
 					nodeStatus.LastFailoverTime = &now
@@ -196,7 +199,7 @@ func (r *CNIResilienceController) Reconcile(ctx context.Context, req ctrl.Reques
 				nodeStatus.Message = fmt.Sprintf("Failback failed: %v", fbErr)
 				anyFailedOver = true // still in failover state
 			} else if event.Success {
-				nodeStatus.ActivePath = "primary"
+				nodeStatus.ActivePath = activePathPrimary
 				nodeStatus.Message = "Recovered; traffic restored to primary path"
 				now := metav1.Now()
 				nodeStatus.LastFailoverTime = &now
@@ -214,7 +217,7 @@ func (r *CNIResilienceController) Reconcile(ctx context.Context, req ctrl.Reques
 
 		default:
 			// Both paths healthy and on primary.
-			nodeStatus.ActivePath = "primary"
+			nodeStatus.ActivePath = activePathPrimary
 			nodeStatus.Message = "All paths healthy"
 		}
 
@@ -274,9 +277,9 @@ func (r *CNIResilienceController) recoveryAllowed(nodeName string) bool {
 // buildNodeStatus converts the health-agent's NodeHealthStatus to the CRD status type.
 func buildNodeStatus(nodeName string, h *healthagent.NodeHealthStatus) remediationv1alpha1.NodeCNIStatus {
 	now := metav1.Now()
-	activePath := "primary"
+	activePath := activePathPrimary
 	if !h.PrimaryHealthy && h.BackupHealthy {
-		activePath = "backup"
+		activePath = activePathBackup
 	}
 	return remediationv1alpha1.NodeCNIStatus{
 		NodeName:                   nodeName,

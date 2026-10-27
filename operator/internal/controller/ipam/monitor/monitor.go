@@ -176,6 +176,8 @@ func (m *Monitor) GetAllNodeUsage() map[string]*NodeUsage {
 //
 // TODO: This is a helper. Implement:
 //   - Return true if pod.Status.PodIP is non-empty and pod is not in Succeeded/Failed phase.
+//
+//nolint:unused
 func isPodRunningWithIP(pod *corev1.Pod) bool {
 	if pod.Status.PodIP == "" {
 		return false

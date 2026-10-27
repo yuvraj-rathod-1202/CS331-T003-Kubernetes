@@ -39,6 +39,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"os"
 	"strings"
@@ -306,9 +307,7 @@ func (a *Agent) ProbeAllNodes(ctx context.Context) (map[string]*NodeHealthStatus
 
 	// Persist latest state.
 	a.mu.Lock()
-	for k, v := range results {
-		a.nodeStatuses[k] = v
-	}
+	maps.Copy(a.nodeStatuses, results)
 	a.mu.Unlock()
 
 	return results, nil
@@ -482,7 +481,7 @@ func (a *Agent) VerifyLocalInterfaces(ctx context.Context) (bool, error) {
 	}
 
 	var hasCali, hasFlannel bool
-	for _, line := range strings.Split(string(data), "\n") {
+	for line := range strings.SplitSeq(string(data), "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "cali") {
 			hasCali = true

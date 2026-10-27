@@ -686,17 +686,7 @@ func (m *CNIModule) Remediate(
 		m.pendingTarget = nil // reset after consuming
 	} else {
 		// Fallback for direct invocations (e.g. unit tests without prior Evaluate call)
-		reason := evalResult.Reason
-		switch {
-		case strings.Contains(reason, "calico-node") && strings.Contains(reason, "not ready"):
-			actionType = ActionRestartCalicoNode
-		case strings.Contains(reason, "disabled"):
-			actionType = ActionReenableIPPool
-		case strings.Contains(reason, "IPAM exhaustion"),
-			strings.Contains(reason, "stuck in ContainerCreating"),
-			strings.Contains(reason, "stuck pods"):
-			actionType = ActionEvictStuckPods
-		}
+		actionType = determineActionTypeFromReason(evalResult.Reason)
 	}
 
 	var actions []string
@@ -704,99 +694,11 @@ func (m *CNIModule) Remediate(
 
 	switch actionType {
 	case ActionRestartCalicoNode:
-		// TARGETED ACTION 1: Restart unready calico-node pods only
-		if len(unreadyPods) == 0 {
-			unreadyPods, _ = m.checkCalicoDaemonSet(ctx, kubeSystemNamespace, "calico-node")
-		}
-		for _, podName := range unreadyPods {
-			pod := &corev1.Pod{}
-			pod.Name = podName
-			pod.Namespace = kubeSystemNamespace
-			if err := m.Client.Delete(ctx, pod); err != nil {
-				logger.Error(err, "failed to delete unready calico-node pod", "pod", podName)
-				lastErr = err
-			} else {
-				logger.Info("deleted unready calico-node pod for restart", "pod", podName)
-				actions = append(actions, "restarted calico-node/"+podName)
-			}
-		}
-
+		actions, lastErr = m.remediateRestartCalicoNode(ctx, unreadyPods)
 	case ActionReenableIPPool:
-		// TARGETED ACTION 2: Re-enable the specific disabled IPPools and evict waiting pods
-		if len(disabledPools) == 0 {
-			_, _, disabledPools, _ = m.checkIPAMUsage(ctx)
-		}
-		for _, poolName := range disabledPools {
-			pool := &unstructured.Unstructured{}
-			pool.SetGroupVersionKind(schema.GroupVersionKind{
-				Group:   calicoCRDGroup,
-				Version: "v1",
-				Kind:    calicoIPPoolKind,
-			})
-			if err := m.Client.Get(ctx, types.NamespacedName{Name: poolName}, pool); err == nil {
-				patch := pool.DeepCopy()
-				if err := unstructured.SetNestedField(patch.Object, false, "spec", "disabled"); err == nil {
-					if err := m.Client.Patch(ctx, patch, client.MergeFrom(pool)); err != nil {
-						logger.Error(err, "failed to re-enable disabled IPPool", "pool", poolName)
-						lastErr = err
-					} else {
-						logger.Info("re-enabled disabled IPPool", "pool", poolName)
-						actions = append(actions, "re-enabled IPPool "+poolName)
-					}
-				}
-			}
-		}
-
-		if len(stuckPods) == 0 {
-			stuckPods, _ = m.checkStuckPods(ctx, 0)
-		}
-		for _, sp := range stuckPods {
-			pod := &corev1.Pod{}
-			pod.Name = sp.Name
-			pod.Namespace = sp.Namespace
-			if err := m.Client.Delete(ctx, pod); err != nil {
-				logger.Error(err, "failed to delete CNI-stuck pod after IPPool re-enable", "pod", sp.Name, "ns", sp.Namespace)
-				lastErr = err
-			} else {
-				logger.Info("evicted CNI-stuck pod to acquire unblocked IP", "pod", sp.Name, "ns", sp.Namespace)
-				actions = append(actions, fmt.Sprintf("evicted %s/%s", sp.Namespace, sp.Name))
-			}
-		}
-
+		actions, lastErr = m.remediateReenableIPPool(ctx, disabledPools, stuckPods)
 	case ActionEvictStuckPods:
-		// TARGETED ACTION 3: Evict stuck workload pods only
-		if m.lastWorkloadEviction == nil {
-			m.lastWorkloadEviction = make(map[string]time.Time)
-		}
-		if len(stuckPods) == 0 {
-			stuckPods, _ = m.checkStuckPods(ctx, 0)
-		}
-		now := time.Now()
-		for _, sp := range stuckPods {
-			pod := &corev1.Pod{}
-			pod.Name = sp.Name
-			pod.Namespace = sp.Namespace
-			if err := m.Client.Delete(ctx, pod); err != nil {
-				logger.Error(err, "failed to delete CNI-stuck pod", "pod", sp.Name, "ns", sp.Namespace)
-				lastErr = err
-			} else {
-				key := sp.WorkloadKey
-				if key == "" {
-					key = fmt.Sprintf("%s/Pod/%s", sp.Namespace, sp.Name)
-				}
-				m.lastWorkloadEviction[key] = now
-				logger.Info("evicted CNI-stuck pod", "pod", sp.Name, "ns", sp.Namespace, "workload", key, "ipamExhausted", sp.IPAMExhausted)
-				actions = append(actions, fmt.Sprintf("evicted %s/%s", sp.Namespace, sp.Name))
-			}
-		}
-
-		// Prune expired cooldown entries
-		for k, t := range m.lastWorkloadEviction {
-			if now.Sub(t) > 2*m.evictionCooldown {
-				delete(m.lastWorkloadEviction, k)
-			}
-		}
-
+		actions, lastErr = m.remediateEvictStuckPods(ctx, stuckPods)
 	default:
 		return &module.RemediateResult{
 			Action:  "none",
@@ -816,6 +718,140 @@ func (m *CNIModule) Remediate(
 		Success: lastErr == nil,
 		Err:     lastErr,
 	}, nil
+}
+
+func determineActionTypeFromReason(reason string) ActionType {
+	switch {
+	case strings.Contains(reason, "calico-node") && strings.Contains(reason, "not ready"):
+		return ActionRestartCalicoNode
+	case strings.Contains(reason, "disabled"):
+		return ActionReenableIPPool
+	case strings.Contains(reason, "IPAM exhaustion"),
+		strings.Contains(reason, "stuck in ContainerCreating"),
+		strings.Contains(reason, "stuck pods"):
+		return ActionEvictStuckPods
+	default:
+		return ActionNone
+	}
+}
+
+func (m *CNIModule) remediateRestartCalicoNode(
+	ctx context.Context,
+	unreadyPods []string,
+) ([]string, error) {
+	logger := log.FromContext(ctx).WithName("cni-remediate")
+	var actions []string
+	var lastErr error
+
+	if len(unreadyPods) == 0 {
+		unreadyPods, _ = m.checkCalicoDaemonSet(ctx, kubeSystemNamespace, "calico-node")
+	}
+	for _, podName := range unreadyPods {
+		pod := &corev1.Pod{}
+		pod.Name = podName
+		pod.Namespace = kubeSystemNamespace
+		if err := m.Client.Delete(ctx, pod); err != nil {
+			logger.Error(err, "failed to delete unready calico-node pod", "pod", podName)
+			lastErr = err
+		} else {
+			logger.Info("deleted unready calico-node pod for restart", "pod", podName)
+			actions = append(actions, "restarted calico-node/"+podName)
+		}
+	}
+	return actions, lastErr
+}
+
+func (m *CNIModule) remediateReenableIPPool(
+	ctx context.Context,
+	disabledPools []string,
+	stuckPods []StuckPod,
+) ([]string, error) {
+	logger := log.FromContext(ctx).WithName("cni-remediate")
+	var actions []string
+	var lastErr error
+
+	if len(disabledPools) == 0 {
+		_, _, disabledPools, _ = m.checkIPAMUsage(ctx)
+	}
+	for _, poolName := range disabledPools {
+		pool := &unstructured.Unstructured{}
+		pool.SetGroupVersionKind(schema.GroupVersionKind{
+			Group:   calicoCRDGroup,
+			Version: "v1",
+			Kind:    calicoIPPoolKind,
+		})
+		if err := m.Client.Get(ctx, types.NamespacedName{Name: poolName}, pool); err == nil {
+			patch := pool.DeepCopy()
+			if err := unstructured.SetNestedField(patch.Object, false, "spec", "disabled"); err == nil {
+				if err := m.Client.Patch(ctx, patch, client.MergeFrom(pool)); err != nil {
+					logger.Error(err, "failed to re-enable disabled IPPool", "pool", poolName)
+					lastErr = err
+				} else {
+					logger.Info("re-enabled disabled IPPool", "pool", poolName)
+					actions = append(actions, "re-enabled IPPool "+poolName)
+				}
+			}
+		}
+	}
+
+	if len(stuckPods) == 0 {
+		stuckPods, _ = m.checkStuckPods(ctx, 0)
+	}
+	for _, sp := range stuckPods {
+		pod := &corev1.Pod{}
+		pod.Name = sp.Name
+		pod.Namespace = sp.Namespace
+		if err := m.Client.Delete(ctx, pod); err != nil {
+			logger.Error(err, "failed to delete CNI-stuck pod after IPPool re-enable", "pod", sp.Name, "ns", sp.Namespace)
+			lastErr = err
+		} else {
+			logger.Info("evicted CNI-stuck pod to acquire unblocked IP", "pod", sp.Name, "ns", sp.Namespace)
+			actions = append(actions, fmt.Sprintf("evicted %s/%s", sp.Namespace, sp.Name))
+		}
+	}
+	return actions, lastErr
+}
+
+func (m *CNIModule) remediateEvictStuckPods(
+	ctx context.Context,
+	stuckPods []StuckPod,
+) ([]string, error) {
+	logger := log.FromContext(ctx).WithName("cni-remediate")
+	var actions []string
+	var lastErr error
+
+	if m.lastWorkloadEviction == nil {
+		m.lastWorkloadEviction = make(map[string]time.Time)
+	}
+	if len(stuckPods) == 0 {
+		stuckPods, _ = m.checkStuckPods(ctx, 0)
+	}
+	now := time.Now()
+	for _, sp := range stuckPods {
+		pod := &corev1.Pod{}
+		pod.Name = sp.Name
+		pod.Namespace = sp.Namespace
+		if err := m.Client.Delete(ctx, pod); err != nil {
+			logger.Error(err, "failed to delete CNI-stuck pod", "pod", sp.Name, "ns", sp.Namespace)
+			lastErr = err
+		} else {
+			key := sp.WorkloadKey
+			if key == "" {
+				key = fmt.Sprintf("%s/Pod/%s", sp.Namespace, sp.Name)
+			}
+			m.lastWorkloadEviction[key] = now
+			logger.Info("evicted CNI-stuck pod", "pod", sp.Name, "ns", sp.Namespace, "workload", key, "ipamExhausted", sp.IPAMExhausted)
+			actions = append(actions, fmt.Sprintf("evicted %s/%s", sp.Namespace, sp.Name))
+		}
+	}
+
+	// Prune expired cooldown entries
+	for k, t := range m.lastWorkloadEviction {
+		if now.Sub(t) > 2*m.evictionCooldown {
+			delete(m.lastWorkloadEviction, k)
+		}
+	}
+	return actions, lastErr
 }
 
 func signalInt(cr *module.CheckResult, key string, fallback int) int {
@@ -884,14 +920,6 @@ func signalStuckPodSlice(cr *module.CheckResult) []StuckPod {
 	return nil
 }
 
-func hasIPAMStuck(pods []StuckPod) bool {
-	for _, p := range pods {
-		if p.IPAMExhausted {
-			return true
-		}
-	}
-	return false
-}
 
 func countIPAMStuck(pods []StuckPod) int {
 	n := 0

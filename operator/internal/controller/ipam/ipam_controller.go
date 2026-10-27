@@ -103,7 +103,7 @@ func (r *IPAMController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	logger.Info("Reconciling IPPool", "name", ippool.Name, "cidrs", ippool.Spec.CIDRs)
 
 	// 2. Initialize buddy pool from CIDRs (idempotent)
-	if err := r.ensurePoolInitialized(ctx, &ippool); err != nil {
+	if err := r.ensurePoolInitialized(&ippool); err != nil {
 		logger.Error(err, "Failed to initialize buddy pool")
 		return ctrl.Result{}, err
 	}
@@ -122,7 +122,7 @@ func (r *IPAMController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 // ensurePoolInitialized adds CIDRs from the IPPool spec to the buddy pool.
 //
 // TODO: Make this idempotent — skip CIDRs already added.
-func (r *IPAMController) ensurePoolInitialized(ctx context.Context, ippool *remediationv1alpha1.IPPool) error {
+func (r *IPAMController) ensurePoolInitialized(ippool *remediationv1alpha1.IPPool) error {
 	for _, cidr := range ippool.Spec.CIDRs {
 		if err := r.pool.AddCIDR(cidr, ippool.Spec.MinBlockSize, ippool.Spec.MaxBlockSize); err != nil {
 			// TODO: If the CIDR is already added, skip it instead of erroring.
@@ -139,6 +139,8 @@ func (r *IPAMController) ensurePoolInitialized(ctx context.Context, ippool *reme
 //  2. Call pool.Allocate(requestedAddrs, nodeName).
 //  3. Create or update the NodeIPAllocation CR for this node.
 //  4. Generate the host-local CNI config file on the node (or via ConfigMap).
+//
+//nolint:unused
 func (r *IPAMController) allocateBlockForNode(ctx context.Context, nodeName string, requestedAddrs int) error {
 	_ = logf.FromContext(ctx).WithName("ipam-controller")
 
@@ -167,6 +169,8 @@ func (r *IPAMController) allocateBlockForNode(ctx context.Context, nodeName stri
 //	  ],
 //	  "dataDir": "/var/lib/cni/networks"
 //	}
+//
+//nolint:unused
 func (r *IPAMController) generateHostLocalConfig(ctx context.Context, nodeName string, blocks []string) (string, error) {
 	// TODO: Build the host-local JSON config from the blocks list.
 
@@ -180,6 +184,8 @@ func (r *IPAMController) generateHostLocalConfig(ctx context.Context, nodeName s
 //   - Updating node annotations and having a DaemonSet read them
 //   - Directly running `ip route add` via a privileged DaemonSet
 //   - Using the Kubernetes API to create Route objects (if using a cloud provider)
+//
+//nolint:unused
 func (r *IPAMController) installRoutes(ctx context.Context, nodeName string, blockCIDR string) error {
 	// TODO: Implement route installation.
 

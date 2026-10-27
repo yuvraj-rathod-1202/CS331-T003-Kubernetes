@@ -32,44 +32,49 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
+const (
+	metricNamespace = "ipam"
+	labelNodeName   = "node_name"
+)
+
 var (
 	// addressUtilization tracks per-node IP utilization as a ratio (0.0 to 1.0).
 	// Labels: node_name, pool_name
 	addressUtilization = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Namespace: "ipam",
+			Namespace: metricNamespace,
 			Name:      "address_utilization_ratio",
 			Help:      "Ratio of used addresses to total allocated addresses per node (0.0 to 1.0).",
 		},
-		[]string{"node_name", "pool_name"},
+		[]string{labelNodeName, "pool_name"},
 	)
 
 	// failedPodsTotal counts pods that failed or were delayed due to IP exhaustion.
 	// Labels: node_name, reason (e.g. "no_ip_available", "cidr_not_available")
 	failedPodsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Namespace: "ipam",
+			Namespace: metricNamespace,
 			Name:      "failed_pods_total",
 			Help:      "Total pods that failed to start due to IP address exhaustion.",
 		},
-		[]string{"node_name", "reason"},
+		[]string{labelNodeName, "reason"},
 	)
 
 	// routesPerNode tracks the number of routes on each node.
 	// Fewer routes = better aggregation.
 	routesPerNode = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Namespace: "ipam",
+			Namespace: metricNamespace,
 			Name:      "routes_per_node",
 			Help:      "Number of pod-network routes on each node.",
 		},
-		[]string{"node_name"},
+		[]string{labelNodeName},
 	)
 
 	// allocationDuration measures how long it takes to allocate a block.
 	allocationDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Namespace: "ipam",
+			Namespace: metricNamespace,
 			Name:      "allocation_duration_seconds",
 			Help:      "Time taken to allocate a CIDR block from the buddy allocator.",
 			Buckets:   prometheus.ExponentialBuckets(0.001, 2, 10), // 1ms to ~1s
@@ -80,27 +85,27 @@ var (
 	// blocksAllocated tracks the total number of buddy blocks currently allocated.
 	blocksAllocated = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Namespace: "ipam",
+			Namespace: metricNamespace,
 			Name:      "blocks_allocated",
 			Help:      "Number of CIDR blocks currently allocated per node.",
 		},
-		[]string{"node_name", "prefix_length"},
+		[]string{labelNodeName, "prefix_length"},
 	)
 
 	// leakedIPsDetected counts leaked IPs that were detected and reclaimed.
 	leakedIPsDetected = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Namespace: "ipam",
+			Namespace: metricNamespace,
 			Name:      "leaked_ips_total",
 			Help:      "Total number of leaked IP allocations detected and reclaimed.",
 		},
-		[]string{"node_name", "action"}, // action: "detected", "reclaimed"
+		[]string{labelNodeName, "action"}, // action: "detected", "reclaimed"
 	)
 
 	// poolCapacity tracks total capacity and usage at the pool level.
 	poolCapacity = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Namespace: "ipam",
+			Namespace: metricNamespace,
 			Name:      "pool_addresses",
 			Help:      "Total addresses in the IP pool.",
 		},
@@ -110,7 +115,7 @@ var (
 	// defragmentEvents counts buddy merge events during defragmentation.
 	defragmentEvents = prometheus.NewCounter(
 		prometheus.CounterOpts{
-			Namespace: "ipam",
+			Namespace: metricNamespace,
 			Name:      "defragment_merges_total",
 			Help:      "Total number of buddy block merges during defragmentation.",
 		},
