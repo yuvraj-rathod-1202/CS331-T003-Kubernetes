@@ -664,8 +664,6 @@ func (m *CNIModule) Remediate(
 	ctx context.Context,
 	evalResult *module.EvalResult,
 ) (*module.RemediateResult, error) {
-	logger := log.FromContext(ctx).WithName("cni-remediate")
-
 	if evalResult == nil || !evalResult.NeedsRemediation {
 		return &module.RemediateResult{Action: "none", Success: true}, nil
 	}
@@ -720,7 +718,7 @@ func (m *CNIModule) Remediate(
 	}, nil
 }
 
-func determineActionTypeFromReason(reason string) ActionType {
+func determineActionTypeFromReason(reason string) RemediationActionType {
 	switch {
 	case strings.Contains(reason, "calico-node") && strings.Contains(reason, "not ready"):
 		return ActionRestartCalicoNode
