@@ -32,6 +32,7 @@ package recovery
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -81,6 +82,9 @@ type RecoveryAction struct {
 // Manager handles CNI recovery operations.
 type Manager struct {
 	client client.Client
+
+	// mu guards recoveryHistory; RecoverNode runs in per-node goroutines.
+	mu sync.Mutex
 
 	// recoveryHistory tracks recent recovery actions for status reporting.
 	recoveryHistory []RecoveryAction
@@ -136,7 +140,7 @@ func (m *Manager) RecoverNode(ctx context.Context, nodeName string, cniNamespace
 		action.Duration = time.Since(start)
 		m.recordAction(action)
 		// Still try to untaint even on failure to avoid permanently blocking scheduling.
-		_ = m.UntaintNode(ctx, nodeName)
+		m.untaintBestEffort(nodeName)
 		return action, fmt.Errorf("restart CNI agent pod on node %s: %w", nodeName, err)
 	}
 
@@ -149,6 +153,7 @@ func (m *Manager) RecoverNode(ctx context.Context, nodeName string, cniNamespace
 		action.Error = "context cancelled during route wait"
 		action.Duration = time.Since(start)
 		m.recordAction(action)
+		m.untaintBestEffort(nodeName)
 		return action, ctx.Err()
 	case <-time.After(routeVerificationDelay):
 	}
@@ -234,6 +239,14 @@ func (m *Manager) UntaintNode(ctx context.Context, nodeName string) error {
 
 	logger.Info("Removed recovery taint", "node", nodeName)
 	return nil
+}
+
+// untaintBestEffort removes the recovery taint using a fresh context, since the
+// caller's ctx may already be cancelled or past its deadline.
+func (m *Manager) untaintBestEffort(nodeName string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = m.UntaintNode(ctx, nodeName)
 }
 
 // RestartCNIAgentPod deletes the CNI agent pod on a specific node.
@@ -336,6 +349,8 @@ func (m *Manager) VerifyRoutesRestored(ctx context.Context, nodeName string) (bo
 
 // GetRecoveryHistory returns recent recovery actions for status reporting.
 func (m *Manager) GetRecoveryHistory() []RecoveryAction {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	result := make([]RecoveryAction, len(m.recoveryHistory))
 	copy(result, m.recoveryHistory)
 	return result
@@ -343,6 +358,8 @@ func (m *Manager) GetRecoveryHistory() []RecoveryAction {
 
 // recordAction appends an action to the history, keeping the last 20 entries.
 func (m *Manager) recordAction(action *RecoveryAction) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.recoveryHistory = append(m.recoveryHistory, *action)
 	const maxHistory = 20
 	if len(m.recoveryHistory) > maxHistory {

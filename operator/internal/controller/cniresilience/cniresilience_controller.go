@@ -76,22 +76,27 @@ type CNIResilienceController struct {
 	// lastRecoveryAttempt tracks when we last tried recovery per node,
 	// to implement the recoveryBackoff cooldown.
 	lastRecoveryAttempt map[string]time.Time
+
+	// bothPathsDownTainted tracks nodes we tainted because both paths were
+	// down, so the taint can be removed once the primary path comes back.
+	bothPathsDownTainted map[string]bool
 }
 
 // NewCNIResilienceController creates the controller and wires sub-components.
 func NewCNIResilienceController(c client.Client, scheme *runtime.Scheme) *CNIResilienceController {
 	return &CNIResilienceController{
-		Client:              c,
-		Scheme:              scheme,
-		healthAgent:         healthagent.NewAgent(c),
-		recoveryManager:     recovery.NewManager(c),
-		failoverManager:     failover.NewManager(c),
-		lastRecoveryAttempt: make(map[string]time.Time),
+		Client:               c,
+		Scheme:               scheme,
+		healthAgent:          healthagent.NewAgent(c),
+		recoveryManager:      recovery.NewManager(c),
+		failoverManager:      failover.NewManager(c),
+		lastRecoveryAttempt:  make(map[string]time.Time),
+		bothPathsDownTainted: make(map[string]bool),
 	}
 }
 
-// +kubebuilder:rbac:groups=remediation.cn-operator.yuvraj-rathod-1202.github.io,resources=cniresiliencies,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=remediation.cn-operator.yuvraj-rathod-1202.github.io,resources=cniresiliencies/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=remediation.cn-operator.yuvraj-rathod-1202.github.io,resources=cniresiliences,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=remediation.cn-operator.yuvraj-rathod-1202.github.io,resources=cniresiliences/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;delete
 // +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch
@@ -149,14 +154,21 @@ func (r *CNIResilienceController) Reconcile(ctx context.Context, req ctrl.Reques
 		isCurrentlyFailedOver := r.failoverManager.IsNodeFailedOver(nodeName)
 
 		switch {
-		case primaryDown && backupUp && !isCurrentlyFailedOver:
-			// Primary failed; backup is alive - failover then recover.
-			logger.Info("Primary CNI down, backup healthy → failover + recover",
-				"node", nodeName,
-				"primaryConsecutiveFailures", health.PrimaryConsecutiveFailures,
-			)
+		case primaryDown && backupUp:
+			// Primary failed; backup is alive - failover (once) then recover.
+			if isCurrentlyFailedOver {
+				nodeStatus.ActivePath = activePathBackup
+				nodeStatus.Message = "Primary path still down; traffic on backup path"
+				anyFailedOver = true
+			} else {
+				logger.Info("Primary CNI down, backup healthy → failover + recover",
+					"node", nodeName,
+					"primaryConsecutiveFailures", health.PrimaryConsecutiveFailures,
+				)
+				nodeStatus.Message = "Primary path down; autoFailover disabled"
+			}
 
-			if cr.Spec.AutoFailover {
+			if cr.Spec.AutoFailover && !isCurrentlyFailedOver {
 				if event, foErr := r.failoverManager.FailoverNode(ctx, nodeName); foErr != nil {
 					logger.Error(foErr, "Failover failed", "node", nodeName)
 					nodeStatus.Message = fmt.Sprintf("Failover failed: %v", foErr)
@@ -194,8 +206,10 @@ func (r *CNIResilienceController) Reconcile(ctx context.Context, req ctrl.Reques
 			// Primary has recovered; fail back to primary.
 			logger.Info("Primary CNI recovered → failback", "node", nodeName)
 
+			r.clearBothPathsDownTaint(ctx, nodeName)
 			if event, fbErr := r.failoverManager.FailbackNode(ctx, nodeName); fbErr != nil {
 				logger.Error(fbErr, "Failback failed", "node", nodeName)
+				nodeStatus.ActivePath = activePathBackup
 				nodeStatus.Message = fmt.Sprintf("Failback failed: %v", fbErr)
 				anyFailedOver = true // still in failover state
 			} else if event.Success {
@@ -210,15 +224,25 @@ func (r *CNIResilienceController) Reconcile(ctx context.Context, req ctrl.Reques
 			logger.Error(fmt.Errorf("both CNI paths down"), "Catastrophic network failure",
 				"node", nodeName)
 			nodeStatus.Message = "BOTH primary and backup CNI paths are down"
+			if isCurrentlyFailedOver {
+				nodeStatus.ActivePath = activePathBackup
+			}
 			if taintErr := r.recoveryManager.TaintNode(ctx, nodeName); taintErr != nil {
 				logger.Error(taintErr, "Failed to taint node with both paths down", "node", nodeName)
+			} else {
+				r.bothPathsDownTainted[nodeName] = true
 			}
 			anyFailedOver = true
 
 		default:
-			// Both paths healthy and on primary.
+			// Primary healthy and not failed over.
+			r.clearBothPathsDownTaint(ctx, nodeName)
 			nodeStatus.ActivePath = activePathPrimary
-			nodeStatus.Message = "All paths healthy"
+			if backupUp {
+				nodeStatus.Message = "All paths healthy"
+			} else {
+				nodeStatus.Message = "Primary path healthy; backup path down"
+			}
 		}
 
 		newNodeStatuses = append(newNodeStatuses, nodeStatus)
@@ -264,6 +288,19 @@ func (r *CNIResilienceController) updateStatusAndRequeue(
 	return ctrl.Result{RequeueAfter: requeueInterval}, nil
 }
 
+// clearBothPathsDownTaint removes the taint applied when both paths were down,
+// once the primary path is healthy again.
+func (r *CNIResilienceController) clearBothPathsDownTaint(ctx context.Context, nodeName string) {
+	if !r.bothPathsDownTainted[nodeName] {
+		return
+	}
+	if err := r.recoveryManager.UntaintNode(ctx, nodeName); err != nil {
+		logf.FromContext(ctx).Error(err, "Failed to remove both-paths-down taint", "node", nodeName)
+		return
+	}
+	delete(r.bothPathsDownTainted, nodeName)
+}
+
 // recoveryAllowed returns true if we have not attempted recovery on this node
 // within the recoveryBackoff period.
 func (r *CNIResilienceController) recoveryAllowed(nodeName string) bool {
@@ -277,15 +314,11 @@ func (r *CNIResilienceController) recoveryAllowed(nodeName string) bool {
 // buildNodeStatus converts the health-agent's NodeHealthStatus to the CRD status type.
 func buildNodeStatus(nodeName string, h *healthagent.NodeHealthStatus) remediationv1alpha1.NodeCNIStatus {
 	now := metav1.Now()
-	activePath := activePathPrimary
-	if !h.PrimaryHealthy && h.BackupHealthy {
-		activePath = activePathBackup
-	}
 	return remediationv1alpha1.NodeCNIStatus{
 		NodeName:                   nodeName,
 		PrimaryHealthy:             h.PrimaryHealthy,
 		BackupHealthy:              h.BackupHealthy,
-		ActivePath:                 activePath,
+		ActivePath:                 activePathPrimary,
 		PrimaryConsecutiveFailures: h.PrimaryConsecutiveFailures,
 		BackupConsecutiveFailures:  h.BackupConsecutiveFailures,
 		LastProbeTime:              &now,
