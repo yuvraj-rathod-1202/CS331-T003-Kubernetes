@@ -671,7 +671,7 @@ func (m *CNIModule) Remediate(
 		return &module.RemediateResult{Action: "none (healthy)", Success: true}, nil
 	}
 
-	actionType := ActionNone
+	var actionType RemediationActionType
 	var unreadyPods []string
 	var disabledPools []string
 	var stuckPods []StuckPod
@@ -917,7 +917,6 @@ func signalStuckPodSlice(cr *module.CheckResult) []StuckPod {
 	}
 	return nil
 }
-
 
 func countIPAMStuck(pods []StuckPod) int {
 	n := 0
