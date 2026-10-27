@@ -36,8 +36,8 @@ import (
 	"fmt"
 	"time"
 
-	discoveryv1 "k8s.io/api/discovery/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -128,7 +128,7 @@ func NewManager(c client.Client) *Manager {
 //  2. For each relevant Service/EndpointSlice that includes those pods:
 //     a. Create a shadow EndpointSlice with the backup IPs.
 //     b. Mark the original EndpointSlice endpoints for this node as NotReady,
-//        so kube-proxy drains connections away from the broken primary IP.
+//     so kube-proxy drains connections away from the broken primary IP.
 //  3. Update nodeStates → StateBackup.
 func (m *Manager) FailoverNode(ctx context.Context, nodeName string) (*FailoverEvent, error) {
 	logger := logf.FromContext(ctx).WithName("failover").WithValues("node", nodeName)

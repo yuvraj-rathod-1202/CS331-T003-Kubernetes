@@ -41,11 +41,11 @@ import (
 	remediationv1alpha1 "CS331-CN-Project-1/operator/api/v1alpha1"
 	"CS331-CN-Project-1/operator/internal/controller"
 	cnimod "CS331-CN-Project-1/operator/internal/controller/cni"
+	cniresctrl "CS331-CN-Project-1/operator/internal/controller/cniresilience"
 	corednsmod "CS331-CN-Project-1/operator/internal/controller/coredns"
+	ipamctrl "CS331-CN-Project-1/operator/internal/controller/ipam"
 	netpolmod "CS331-CN-Project-1/operator/internal/controller/networkpolicy"
 	podconnmod "CS331-CN-Project-1/operator/internal/controller/podconnectivity"
-	cniresctrl "CS331-CN-Project-1/operator/internal/controller/cniresilience"
-	ipamctrl "CS331-CN-Project-1/operator/internal/controller/ipam"
 	// +kubebuilder:scaffold:imports
 )
 

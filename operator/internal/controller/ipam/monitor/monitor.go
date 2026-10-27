@@ -103,13 +103,13 @@ func NewMonitor(c client.Client) *Monitor {
 // CollectNodeUsage gathers IP usage for all nodes in the cluster.
 //
 // TODO: Implement:
-//   1. List all Nodes.
-//   2. For each Node, list all Pods running on it (using field selector spec.nodeName).
-//   3. Count pods with a valid PodIP (those are the allocated IPs).
-//   4. Get total capacity from NodeIPAllocation CRs (the sum of block addresses).
-//   5. Compute utilization percentage.
-//   6. Check for pods stuck in ContainerCreating (pod.Status.Phase + container statuses).
-//   7. Store results in nodeUsage map.
+//  1. List all Nodes.
+//  2. For each Node, list all Pods running on it (using field selector spec.nodeName).
+//  3. Count pods with a valid PodIP (those are the allocated IPs).
+//  4. Get total capacity from NodeIPAllocation CRs (the sum of block addresses).
+//  5. Compute utilization percentage.
+//  6. Check for pods stuck in ContainerCreating (pod.Status.Phase + container statuses).
+//  7. Store results in nodeUsage map.
 func (m *Monitor) CollectNodeUsage(ctx context.Context) (map[string]*NodeUsage, error) {
 	logger := logf.FromContext(ctx).WithName("ipam-monitor")
 	logger.V(1).Info("Collecting node IP usage")
@@ -122,10 +122,10 @@ func (m *Monitor) CollectNodeUsage(ctx context.Context) (map[string]*NodeUsage, 
 // DetectExhaustionEvents checks for FailedCreatePodSandBox events on a node.
 //
 // TODO: Implement:
-//   1. List Events in the default namespace (or all namespaces) with reason "FailedCreatePodSandBox".
-//   2. Filter events that mention "no IP addresses available" or similar.
-//   3. Group by node (from the event's involvedObject → pod → spec.nodeName).
-//   4. Return true if recent events (within last 5 minutes) exist for this node.
+//  1. List Events in the default namespace (or all namespaces) with reason "FailedCreatePodSandBox".
+//  2. Filter events that mention "no IP addresses available" or similar.
+//  3. Group by node (from the event's involvedObject → pod → spec.nodeName).
+//  4. Return true if recent events (within last 5 minutes) exist for this node.
 func (m *Monitor) DetectExhaustionEvents(ctx context.Context, nodeName string) (bool, error) {
 	_ = logf.FromContext(ctx).WithName("ipam-monitor")
 
@@ -137,12 +137,12 @@ func (m *Monitor) DetectExhaustionEvents(ctx context.Context, nodeName string) (
 // EvaluateSignals analyzes current usage and emits signals for the controller.
 //
 // TODO: Implement:
-//   1. Call CollectNodeUsage.
-//   2. For each node:
-//      a. If utilization > expandThreshold → emit SignalExpandNeeded.
-//      b. If utilization < 20% and node has multiple blocks → emit SignalNodeIdle.
-//      c. If exhaustion events detected → emit SignalExpandNeeded (urgent).
-//   3. Compute cluster-wide utilization. If > 90% → emit SignalPoolExhausted.
+//  1. Call CollectNodeUsage.
+//  2. For each node:
+//     a. If utilization > expandThreshold → emit SignalExpandNeeded.
+//     b. If utilization < 20% and node has multiple blocks → emit SignalNodeIdle.
+//     c. If exhaustion events detected → emit SignalExpandNeeded (urgent).
+//  3. Compute cluster-wide utilization. If > 90% → emit SignalPoolExhausted.
 func (m *Monitor) EvaluateSignals(ctx context.Context, expandThreshold int) ([]Signal, error) {
 	_ = logf.FromContext(ctx).WithName("ipam-monitor")
 

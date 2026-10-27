@@ -135,10 +135,10 @@ func (r *IPAMController) ensurePoolInitialized(ctx context.Context, ippool *reme
 // allocateBlockForNode allocates a block from the buddy pool for the given node.
 //
 // TODO: Implement:
-//   1. Determine how many addresses the node needs (based on its max-pods or a default).
-//   2. Call pool.Allocate(requestedAddrs, nodeName).
-//   3. Create or update the NodeIPAllocation CR for this node.
-//   4. Generate the host-local CNI config file on the node (or via ConfigMap).
+//  1. Determine how many addresses the node needs (based on its max-pods or a default).
+//  2. Call pool.Allocate(requestedAddrs, nodeName).
+//  3. Create or update the NodeIPAllocation CR for this node.
+//  4. Generate the host-local CNI config file on the node (or via ConfigMap).
 func (r *IPAMController) allocateBlockForNode(ctx context.Context, nodeName string, requestedAddrs int) error {
 	_ = logf.FromContext(ctx).WithName("ipam-controller")
 
@@ -153,9 +153,9 @@ func (r *IPAMController) allocateBlockForNode(ctx context.Context, nodeName stri
 // assigned to a node as separate ranges.
 //
 // TODO: Implement:
-//   1. Get all blocks for the node from the buddy pool.
-//   2. Build a host-local config JSON with a "ranges" array.
-//   3. Write it to a ConfigMap or directly to the node (via DaemonSet).
+//  1. Get all blocks for the node from the buddy pool.
+//  2. Build a host-local config JSON with a "ranges" array.
+//  3. Write it to a ConfigMap or directly to the node (via DaemonSet).
 //
 // Example host-local config:
 //

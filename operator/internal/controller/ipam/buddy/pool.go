@@ -62,10 +62,10 @@ func (p *Pool) AddCIDR(cidr string, minPrefixLen, maxPrefixLen int) error {
 // Allocate tries each CIDR's allocator in order until one succeeds.
 //
 // TODO: Implement allocation strategy:
-//   1. Try each allocator in order.
-//   2. Return the first successful allocation.
-//   3. If all fail, return an error indicating pool exhaustion.
-//   4. Consider a smarter strategy: prefer the allocator with the most free space.
+//  1. Try each allocator in order.
+//  2. Return the first successful allocation.
+//  3. If all fail, return an error indicating pool exhaustion.
+//  4. Consider a smarter strategy: prefer the allocator with the most free space.
 func (p *Pool) Allocate(requestedAddrs int, nodeName string) (*Block, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

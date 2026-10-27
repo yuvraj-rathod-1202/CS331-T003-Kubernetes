@@ -132,10 +132,10 @@ type BuddyAllocator struct {
 //   - maxPrefixLen: largest allocatable block prefix (e.g. 22 for /22)
 //
 // TODO: Implement this function.
-//   1. Parse the CIDR string into a *net.IPNet.
-//   2. Create the root Block with State = BlockFree.
-//   3. Initialize the freeBlocks index with the root at its prefix level.
-//   4. Validate that minPrefixLen >= root prefix and maxPrefixLen <= minPrefixLen.
+//  1. Parse the CIDR string into a *net.IPNet.
+//  2. Create the root Block with State = BlockFree.
+//  3. Initialize the freeBlocks index with the root at its prefix level.
+//  4. Validate that minPrefixLen >= root prefix and maxPrefixLen <= minPrefixLen.
 func NewBuddyAllocator(cidr string, minPrefixLen, maxPrefixLen int) (*BuddyAllocator, error) {
 	_, network, err := net.ParseCIDR(cidr)
 	if err != nil {
@@ -179,13 +179,13 @@ func NewBuddyAllocator(cidr string, minPrefixLen, maxPrefixLen int) (*BuddyAlloc
 // Returns the allocated Block, or an error if no space is available.
 //
 // TODO: Implement the allocation algorithm:
-//   1. Round requestedAddrs up to the next power of 2.
-//   2. Convert to a prefix length: prefixLen = 32 - log2(roundedSize).
-//   3. Clamp to [maxPrefixLen, minPrefixLen].
-//   4. Look in freeBlocks[prefixLen]. If a block exists, allocate it.
-//   5. If not, look at prefixLen-1 (larger block), split it, and recurse.
-//   6. Set block.State = BlockAllocated, block.NodeName = nodeName.
-//   7. Update the freeBlocks index.
+//  1. Round requestedAddrs up to the next power of 2.
+//  2. Convert to a prefix length: prefixLen = 32 - log2(roundedSize).
+//  3. Clamp to [maxPrefixLen, minPrefixLen].
+//  4. Look in freeBlocks[prefixLen]. If a block exists, allocate it.
+//  5. If not, look at prefixLen-1 (larger block), split it, and recurse.
+//  6. Set block.State = BlockAllocated, block.NodeName = nodeName.
+//  7. Update the freeBlocks index.
 func (a *BuddyAllocator) Allocate(requestedAddrs int, nodeName string) (*Block, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -202,11 +202,11 @@ func (a *BuddyAllocator) Allocate(requestedAddrs int, nodeName string) (*Block, 
 // Free returns a block to the allocator and attempts to merge it with its buddy.
 //
 // TODO: Implement the free algorithm:
-//   1. Validate the block is currently allocated.
-//   2. Set block.State = BlockFree, clear NodeName.
-//   3. Check if the buddy (sibling) is also free.
-//   4. If both buddies are free, merge them into the parent and recurse upward.
-//   5. Update the freeBlocks index at each step.
+//  1. Validate the block is currently allocated.
+//  2. Set block.State = BlockFree, clear NodeName.
+//  3. Check if the buddy (sibling) is also free.
+//  4. If both buddies are free, merge them into the parent and recurse upward.
+//  5. Update the freeBlocks index at each step.
 func (a *BuddyAllocator) Free(block *Block) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -223,9 +223,9 @@ func (a *BuddyAllocator) Free(block *Block) error {
 // Returns a list of merge events that were performed.
 //
 // TODO: Implement defragmentation:
-//   1. Walk the tree bottom-up.
-//   2. For each split node where both children are free, merge them.
-//   3. Record each merge as a MergeEvent.
+//  1. Walk the tree bottom-up.
+//  2. For each split node where both children are free, merge them.
+//  3. Record each merge as a MergeEvent.
 func (a *BuddyAllocator) Defragment() []MergeEvent {
 	a.mu.Lock()
 	defer a.mu.Unlock()

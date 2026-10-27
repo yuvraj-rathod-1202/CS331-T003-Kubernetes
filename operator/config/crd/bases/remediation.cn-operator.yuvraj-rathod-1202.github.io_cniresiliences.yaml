@@ -1,0 +1,224 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: cniresiliences.remediation.cn-operator.yuvraj-rathod-1202.github.io
+spec:
+  group: remediation.cn-operator.yuvraj-rathod-1202.github.io
+  names:
+    kind: CNIResilience
+    listKind: CNIResilienceList
+    plural: cniresiliences
+    singular: cniresilience
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.failoverCount
+      name: Failovers
+      type: integer
+    - jsonPath: .status.recoveryCount
+      name: Recoveries
+      type: integer
+    - jsonPath: .status.failoverActive
+      name: FailoverActive
+      type: boolean
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          CNIResilience is the Schema for the cniresiliencies API.
+          One per cluster — configures dual-CNI monitoring, failover and recovery.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: CNIResilienceSpec defines the desired state of CNIResilience.
+            properties:
+              autoFailover:
+                default: true
+                description: |-
+                  AutoFailover controls whether traffic is automatically switched
+                  to the backup path on primary failure.
+                type: boolean
+              autoRecover:
+                default: true
+                description: |-
+                  AutoRecover controls whether the controller automatically restarts
+                  the failed CNI agent and restores routes.
+                type: boolean
+              backupCNI:
+                description: BackupCNI describes the backup CNI (e.g. Flannel).
+                properties:
+                  addressSpace:
+                    description: AddressSpace is the CIDR used by this CNI (e.g. "10.244.0.0/16").
+                    type: string
+                  daemonSetName:
+                    description: DaemonSetName is the name of the CNI agent DaemonSet.
+                    type: string
+                  healthEndpoint:
+                    description: |-
+                      HealthEndpoint is the URL the health agent uses to check this CNI's agent.
+                      e.g. "http://localhost:9099/liveness" for Calico.
+                    type: string
+                  name:
+                    description: Name is a human-readable name (e.g. "calico", "flannel").
+                    type: string
+                  namespace:
+                    description: Namespace is the namespace where the CNI agent DaemonSet
+                      runs.
+                    type: string
+                required:
+                - addressSpace
+                - daemonSetName
+                - name
+                - namespace
+                type: object
+              failureThreshold:
+                default: 3
+                description: FailureThreshold is how many consecutive probe failures
+                  mark a path as down.
+                minimum: 1
+                type: integer
+              primaryCNI:
+                description: PrimaryCNI describes the primary CNI (e.g. Calico).
+                properties:
+                  addressSpace:
+                    description: AddressSpace is the CIDR used by this CNI (e.g. "10.244.0.0/16").
+                    type: string
+                  daemonSetName:
+                    description: DaemonSetName is the name of the CNI agent DaemonSet.
+                    type: string
+                  healthEndpoint:
+                    description: |-
+                      HealthEndpoint is the URL the health agent uses to check this CNI's agent.
+                      e.g. "http://localhost:9099/liveness" for Calico.
+                    type: string
+                  name:
+                    description: Name is a human-readable name (e.g. "calico", "flannel").
+                    type: string
+                  namespace:
+                    description: Namespace is the namespace where the CNI agent DaemonSet
+                      runs.
+                    type: string
+                required:
+                - addressSpace
+                - daemonSetName
+                - name
+                - namespace
+                type: object
+              probeIntervalSeconds:
+                default: 5
+                description: ProbeIntervalSeconds is how often the health agent probes
+                  each path.
+                maximum: 60
+                minimum: 1
+                type: integer
+              probeTimeoutSeconds:
+                default: 2
+                description: ProbeTimeoutSeconds is the timeout for a single probe.
+                type: integer
+            required:
+            - backupCNI
+            - primaryCNI
+            type: object
+          status:
+            description: CNIResilienceStatus defines the observed state of CNIResilience.
+            properties:
+              failoverActive:
+                description: FailoverActive is true if any node is currently using
+                  the backup path.
+                type: boolean
+              failoverCount:
+                description: FailoverCount is total number of failovers performed.
+                type: integer
+              lastReconcileTime:
+                description: LastReconcileTime is when the controller last ran.
+                format: date-time
+                type: string
+              nodeStatuses:
+                description: NodeStatuses contains per-node health information.
+                items:
+                  description: NodeCNIStatus holds the health of both CNI paths on
+                    a single node.
+                  properties:
+                    activePath:
+                      description: 'ActivePath is which path is currently carrying
+                        traffic: "primary" or "backup".'
+                      type: string
+                    backupConsecutiveFailures:
+                      description: BackupConsecutiveFailures is the current failure
+                        streak for the backup path.
+                      type: integer
+                    backupHealthy:
+                      description: BackupHealthy is true if the backup CNI path is
+                        working.
+                      type: boolean
+                    lastFailoverTime:
+                      description: LastFailoverTime is when the last failover happened
+                        on this node (if any).
+                      format: date-time
+                      type: string
+                    lastProbeTime:
+                      description: LastProbeTime is when this node was last probed.
+                      format: date-time
+                      type: string
+                    lastRecoveryTime:
+                      description: LastRecoveryTime is when the last recovery happened
+                        on this node (if any).
+                      format: date-time
+                      type: string
+                    message:
+                      description: Message is a human-readable status message.
+                      type: string
+                    nodeName:
+                      description: NodeName is the Kubernetes node name.
+                      type: string
+                    primaryConsecutiveFailures:
+                      description: PrimaryConsecutiveFailures is the current failure
+                        streak for the primary path.
+                      type: integer
+                    primaryHealthy:
+                      description: PrimaryHealthy is true if the primary CNI path
+                        is working.
+                      type: boolean
+                  required:
+                  - activePath
+                  - backupHealthy
+                  - nodeName
+                  - primaryHealthy
+                  type: object
+                type: array
+              phase:
+                description: 'Phase is the overall cluster-level state: "Healthy",
+                  "Degraded", "FailedOver".'
+                type: string
+              recoveryCount:
+                description: RecoveryCount is total number of automatic recoveries
+                  performed.
+                type: integer
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

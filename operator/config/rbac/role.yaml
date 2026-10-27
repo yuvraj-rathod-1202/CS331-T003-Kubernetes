@@ -83,9 +83,9 @@ rules:
   - update
   - watch
 - apiGroups:
-  - remediation.cn-operator.yuvraj-rathod-1202.github.io
+  - discovery.k8s.io
   resources:
-  - networkremediations
+  - endpointslices
   verbs:
   - create
   - delete
@@ -97,14 +97,32 @@ rules:
 - apiGroups:
   - remediation.cn-operator.yuvraj-rathod-1202.github.io
   resources:
-  - networkremediations/finalizers
+  - cniresiliencies
+  - ippools
+  - networkremediations
+  - nodeipallocations
   verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - remediation.cn-operator.yuvraj-rathod-1202.github.io
+  resources:
+  - cniresiliencies/status
+  - ippools/status
+  - networkremediations/status
+  - nodeipallocations/status
+  verbs:
+  - get
+  - patch
   - update
 - apiGroups:
   - remediation.cn-operator.yuvraj-rathod-1202.github.io
   resources:
-  - networkremediations/status
+  - networkremediations/finalizers
   verbs:
-  - get
-  - patch
   - update
