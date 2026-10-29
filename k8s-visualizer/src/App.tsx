@@ -1,13 +1,27 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useKubernetes } from './hooks/useKubernetes';
 import { ClusterMap } from './components/ClusterMap';
 import { ControlPanel } from './components/ControlPanel';
 import { LogTerminal } from './components/LogTerminal';
 import { PodLogsModal } from './components/PodLogsModal';
+import { Project2Demo } from './components/Project2Demo';
 import type { LogEntry } from './components/LogTerminal';
 import './index.css';
 
 function App() {
+  const [currentPath, setCurrentPath] = useState(window.location.pathname);
+
+  useEffect(() => {
+    const handlePopState = () => setCurrentPath(window.location.pathname);
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  // Dedicated Route: /project2
+  if (currentPath.startsWith('/project2')) {
+    return <Project2Demo />;
+  }
+
   const k8sApi = useKubernetes();
   const { nodes, pods, error, operatorStatus } = k8sApi;
   const [selectedPod, setSelectedPod] = useState<string | null>(null);
