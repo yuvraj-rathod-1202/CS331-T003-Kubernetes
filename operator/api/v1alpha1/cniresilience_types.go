@@ -147,7 +147,7 @@ type NodeCNIStatus struct {
 // +kubebuilder:printcolumn:name="Recoveries",type="integer",JSONPath=".status.recoveryCount"
 // +kubebuilder:printcolumn:name="FailoverActive",type="boolean",JSONPath=".status.failoverActive"
 
-// CNIResilience is the Schema for the cniresiliencies API.
+// CNIResilience is the Schema for the cniresiliences API.
 // One per cluster — configures dual-CNI monitoring, failover and recovery.
 type CNIResilience struct {
 	metav1.TypeMeta   `json:",inline"`

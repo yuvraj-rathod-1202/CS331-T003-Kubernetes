@@ -97,7 +97,7 @@ rules:
 - apiGroups:
   - remediation.cn-operator.yuvraj-rathod-1202.github.io
   resources:
-  - cniresiliencies
+  - cniresiliences
   - ippools
   - networkremediations
   - nodeipallocations
@@ -112,7 +112,7 @@ rules:
 - apiGroups:
   - remediation.cn-operator.yuvraj-rathod-1202.github.io
   resources:
-  - cniresiliencies/status
+  - cniresiliences/status
   - ippools/status
   - networkremediations/status
   - nodeipallocations/status
