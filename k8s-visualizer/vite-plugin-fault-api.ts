@@ -424,6 +424,146 @@ export function faultInjectorPlugin(_options: FaultApiOptions = {}): Plugin {
             });
           }
 
+          // -------------------------------------------------------------
+          // 5. CNI Resilience Status: GET /api/fault/cniresilience/status
+          // -------------------------------------------------------------
+          if (url.startsWith('/api/fault/cniresilience/status') && req.method === 'GET') {
+            try {
+              const crRes = await runShell('kubectl get cniresilience default-resilience -o json');
+              let crData = null;
+              if (crRes.code === 0 && crRes.stdout) {
+                try { crData = JSON.parse(crRes.stdout); } catch {}
+              }
+
+              const epRes = await runShell('kubectl get endpointslices -A -o json');
+              let epData = null;
+              if (epRes.code === 0 && epRes.stdout) {
+                try { epData = JSON.parse(epRes.stdout); } catch {}
+              }
+
+              const nodesRes = await runShell('kubectl get nodes -o json');
+              let nodesData = null;
+              if (nodesRes.code === 0 && nodesRes.stdout) {
+                try { nodesData = JSON.parse(nodesRes.stdout); } catch {}
+              }
+
+              const podsRes = await runShell('kubectl get pods -A -o json');
+              let podsData = null;
+              if (podsRes.code === 0 && podsRes.stdout) {
+                try { podsData = JSON.parse(podsRes.stdout); } catch {}
+              }
+
+              return sendJson(res, 200, {
+                success: true,
+                cr: crData,
+                endpointSlices: epData?.items || [],
+                nodes: nodesData?.items || [],
+                pods: podsData?.items || [],
+              });
+            } catch (statusErr: any) {
+              return sendJson(res, 200, {
+                success: false,
+                error: statusErr.message,
+                cr: null,
+                endpointSlices: [],
+                nodes: [],
+                pods: [],
+              });
+            }
+          }
+
+          // -------------------------------------------------------------
+          // 6. CNI Resilience Break: POST /api/fault/cniresilience/break
+          // -------------------------------------------------------------
+          if (url === '/api/fault/cniresilience/break' && req.method === 'POST') {
+            const { nodeName, method = 'vxlan' } = await parseJsonBody(req);
+            if (!nodeName) {
+              return sendJson(res, 400, { error: 'nodeName is required' });
+            }
+
+            let cmdRan = '';
+            let outMsg = '';
+
+            if (method === 'calico-agent') {
+              const killRes = await runShell(
+                `kubectl delete pod -n kube-system -l k8s-app=calico-node --field-selector spec.nodeName=${nodeName} --now`
+              );
+              cmdRan = `kubectl delete pod -n kube-system -l k8s-app=calico-node (on ${nodeName})`;
+              outMsg = killRes.stdout || killRes.stderr || 'Calico agent pod deleted';
+            } else {
+              // Sever VXLAN / Calico overlay on node
+              await execOnNode(
+                nodeName,
+                'iptables -I INPUT -p udp --dport 4789 -j DROP -m comment --comment "cniresilience-drop" 2>/dev/null || true'
+              );
+              await execOnNode(
+                nodeName,
+                'iptables -I FORWARD -s 10.244.0.0/16 -j DROP -m comment --comment "cniresilience-drop" 2>/dev/null || true'
+              );
+              cmdRan = 'iptables -I INPUT -p udp --dport 4789 -j DROP && iptables -I FORWARD -s 10.244.0.0/16 -j DROP';
+              outMsg = `Calico datapath dropped on ${nodeName}`;
+            }
+
+            return sendJson(res, 200, {
+              success: true,
+              nodeName,
+              method,
+              command: cmdRan,
+              message: outMsg,
+            });
+          }
+
+          // -------------------------------------------------------------
+          // 7. CNI Resilience Restore: POST /api/fault/cniresilience/restore
+          // -------------------------------------------------------------
+          if (url === '/api/fault/cniresilience/restore' && req.method === 'POST') {
+            const { nodeName } = await parseJsonBody(req);
+            if (!nodeName) {
+              return sendJson(res, 400, { error: 'nodeName is required' });
+            }
+
+            // Remove iptables rules repeatedly until clear
+            for (let i = 0; i < 5; i++) {
+              await execOnNode(
+                nodeName,
+                'iptables -D INPUT -p udp --dport 4789 -j DROP -m comment --comment "cniresilience-drop" 2>/dev/null || true'
+              );
+              await execOnNode(
+                nodeName,
+                'iptables -D FORWARD -s 10.244.0.0/16 -j DROP -m comment --comment "cniresilience-drop" 2>/dev/null || true'
+              );
+            }
+
+            return sendJson(res, 200, {
+              success: true,
+              nodeName,
+              command: 'iptables -D ... (cniresilience-drop cleaned)',
+              message: `Calico overlay datapath restored on ${nodeName}`,
+            });
+          }
+
+          // -------------------------------------------------------------
+          // 8. CNI Resilience Traffic Probe: POST /api/fault/cniresilience/probe
+          // -------------------------------------------------------------
+          if (url === '/api/fault/cniresilience/probe' && req.method === 'POST') {
+            const { serviceUrl = 'http://resilience-service.default.svc.cluster.local' } = await parseJsonBody(req);
+            const start = Date.now();
+            
+            // Try probing via a running pod in default or kube-system
+            const probeRes = await runShell(
+              `kubectl run temp-curl-${Date.now() % 10000} --rm -i --restart=Never --image=curlimages/curl -- curl -s -m 2 -I ${serviceUrl} || echo "TIMEOUT"`
+            );
+            const latency = Date.now() - start;
+            const ok = probeRes.stdout.includes('200 OK') || (!probeRes.stdout.includes('TIMEOUT') && probeRes.code === 0);
+
+            return sendJson(res, 200, {
+              success: ok,
+              latencyMs: latency,
+              status: ok ? '200 OK' : 'Probe Failed',
+              output: probeRes.stdout || probeRes.stderr,
+            });
+          }
+
           return sendJson(res, 404, { error: 'Unknown fault API endpoint' });
         } catch (err: any) {
           return sendJson(res, 500, { error: err.message || 'Internal server error' });

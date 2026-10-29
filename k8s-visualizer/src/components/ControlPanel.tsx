@@ -55,7 +55,6 @@ const CORRUPTED_UPSTREAM_COREFILE = `.:53 {
 }`;
 
 export function ControlPanel({ onLog, selectedPod, k8sPods, operatorStatus, k8sApi, onOpenLogs }: ControlPanelProps) {
-  const [iptablesDropped, setIptablesDropped] = useState<boolean>(false);
   const [vethInfo, setVethInfo] = useState<{ iface: string; isDown: boolean } | null>(null);
   const [tunl0Down, setTunl0Down] = useState<boolean>(false);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -499,7 +498,7 @@ export function ControlPanel({ onLog, selectedPod, k8sPods, operatorStatus, k8sA
         </div>
 
         {/* MODULE 3: NetworkPolicy */}
-        {/* <div className="experiment-card" style={{ padding: '10px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px' }}>
+        <div className="experiment-card" style={{ padding: '10px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px' }}>
           <h4><FileCode size={16} style={{display:'inline', marginRight: '6px'}} />3. NetworkPolicy Drift</h4>
           <p style={{fontSize: '0.75rem', color: '#aaa', margin: '4px 0'}}>Test silent policy drift when Felix crashes.</p>
           <div style={{ display: 'flex', gap: '6px', marginTop: '8px' }}>
@@ -510,7 +509,7 @@ export function ControlPanel({ onLog, selectedPod, k8sPods, operatorStatus, k8sA
               Remove Policy
             </button>
           </div>
-        </div> */}
+        </div>
 
         {/* MODULE 4: Pod Connectivity */}
         <div className="experiment-card" style={{ padding: '10px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px' }}>
