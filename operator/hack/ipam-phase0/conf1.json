@@ -1,0 +1,2 @@
+{"cniVersion":"0.4.0","name":"t","ipam":{"type":"host-local","dataDir":"/tmp/hltest",
+ "ranges":[[{"subnet":"10.244.1.0/28"}]]}}
