@@ -117,3 +117,24 @@ To make the demo clear, visual, and easy to follow during a presentation, the we
      - Operator probes policy enforcement boundaries.
      - Operator detects Felix engine drop / rule drift.
      - Operator restarts Felix / re-synchronizes policy engine $\to$ NetworkPolicy enforcement restored.
+---
+
+## Problem 1: Buddy-style dynamic IPAM demo (`/project1`)
+
+Run the dashboard (`cd k8s-visualizer && npm run dev`) and open `/project1`.
+The page is an in-browser simulation of the operator's IPAM planner (same rules
+and default parameters, time scaled up); it does not need a cluster.
+
+1. **Pool map**: each square is 16 addresses, coloured by the node that owns it.
+   Striped = Pending (routes being installed), dashed = Draining, grey = Quarantined.
+2. **Burst**: every node goes to 200 pods. Watch blocks go Pending → Active, nodes double
+   in place (two buddy blocks are served as one range), and stop at the capacity cap.
+3. **Calm**: demand drops to 15. Idle blocks drain, are quarantined, and return to the pool.
+4. **Skew**: one node goes hot while the others stay light; only that node grows.
+5. **Emergency grow / Shrink toggles**: turn them off and push demand past capacity to see
+   what each mechanism contributes.
+6. **Evaluation tab**: results of `operator/cmd/ipam-sim` against fixed /24, fixed /25 and
+   Calico-style blocks, plus the checks run on a real 3-node minikube cluster
+   (`operator/docs/ipam-evaluation.md`).
+
+`/project1?preset=burst` starts mid-burst; `?tab=eval` or `?tab=how` opens a tab.
