@@ -2,6 +2,7 @@ import type { Plugin } from 'vite';
 import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
 import type { IncomingMessage, ServerResponse } from 'http';
+import { nodeVerdicts, type Links } from './path-verdict.js';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -159,31 +160,45 @@ async function countFaultRules(nodeName: string): Promise<number | null> {
   return Number.isNaN(count) ? null : count;
 }
 
-// Sends one real request from traffic-client to each pod's own IP, so the result
-// shows whether that exact path carries traffic. Kubernetes status cannot show this.
-async function probePodPaths(podIPs: string[]) {
+// Every node runs a path-probe pod. Each one sends a real request to all the others,
+// so a failure can be blamed on the right node instead of on one fixed observer.
+async function probeNodePaths(nodeNames: string[]) {
   const measuredAt = Date.now();
-  const ips = podIPs.filter(ip => /^[0-9.]+$/.test(ip));
-  if (ips.length === 0) return { measuredAt, results: {} };
-
-  const requests = ips
-    .map(ip => `(echo "${ip} $(curl -s -m 1 -o /dev/null -w '%{http_code} %{time_total}' http://${ip})") &`)
-    .join(' ');
-  try {
-    const { stdout } = await execFileAsync(
-      'kubectl',
-      ['exec', 'traffic-client', '-n', 'default', '--', 'sh', '-c', `${requests} wait`],
-      { timeout: 6000 }
-    );
-    const results: Record<string, { httpCode: string; seconds: number }> = {};
-    for (const line of stdout.split('\n')) {
-      const match = line.trim().match(/^([0-9.]+) (\d{3}) ([\d.]+)$/);
-      if (match) results[match[1]] = { httpCode: match[2], seconds: Number(match[3]) };
-    }
-    return { measuredAt, results };
-  } catch (err: any) {
-    return { measuredAt, results: {}, error: err.stderr?.trim() || err.message };
+  const probes = await kubectlJson(['get', 'pods', '-n', 'default', '-l', 'app=path-probe', '-o', 'json']);
+  if (!probes.ok) {
+    return { measuredAt, nodes: nodeVerdicts(nodeNames, {}), error: probes.error };
   }
+
+  const running: any[] = probes.data.items.filter((p: any) => p.status.phase === 'Running' && p.status.podIP);
+  const links: Links = {};
+  const failures: string[] = [];
+
+  await Promise.all(running.map(async source => {
+    const requests = running
+      .filter(target => target.spec.nodeName !== source.spec.nodeName)
+      .map(target => `(echo "${target.spec.nodeName} $(curl -s -m 1 -o /dev/null -w '%{http_code}' http://${target.status.podIP})") &`)
+      .join(' ');
+    try {
+      const { stdout } = await execFileAsync(
+        'kubectl',
+        ['exec', source.metadata.name, '-n', 'default', '--', 'sh', '-c', `${requests} wait`],
+        { timeout: 6000 }
+      );
+      links[source.spec.nodeName] = {};
+      for (const line of stdout.split('\n')) {
+        const match = line.trim().match(/^(\S+) (\d{3})$/);
+        if (match) links[source.spec.nodeName][match[1]] = match[2] === '200';
+      }
+    } catch (err: any) {
+      failures.push(`${source.metadata.name}: ${err.stderr?.trim() || err.message}`);
+    }
+  }));
+
+  return {
+    measuredAt,
+    nodes: nodeVerdicts(nodeNames, links),
+    error: running.length === 0 ? 'no path-probe pods are running' : failures.join('; ') || undefined,
+  };
 }
 
 export function faultInjectorPlugin(_options: FaultApiOptions = {}): Plugin {
@@ -493,10 +508,9 @@ export function faultInjectorPlugin(_options: FaultApiOptions = {}): Plugin {
             }
 
             const nodeNames: string[] = nodes.data.items.map((n: any) => n.metadata.name);
-            const podIPs: string[] = pods.ok ? pods.data.items.flatMap((p: any) => p.status.podIP ?? []) : [];
             const [faultCounts, paths] = await Promise.all([
               Promise.all(nodeNames.map(countFaultRules)),
-              probePodPaths(podIPs),
+              probeNodePaths(nodeNames),
             ]);
 
             // A failed read is reported, so it never looks like "nothing there".

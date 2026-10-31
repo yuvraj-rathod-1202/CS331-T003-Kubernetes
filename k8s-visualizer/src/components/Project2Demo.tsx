@@ -12,6 +12,7 @@ import {
   Terminal as TerminalIcon,
   XCircle,
 } from 'lucide-react';
+import type { NodePath } from '../../path-verdict';
 import './Project2Demo.css';
 
 // Everything on this page comes from the API below. Nothing is simulated: if a
@@ -33,7 +34,7 @@ interface ClusterState {
   nadConfig?: string | null;
   paths?: {
     measuredAt: number;
-    results: Record<string, { httpCode: string; seconds: number }>;
+    nodes: Record<string, NodePath>;
     error?: string;
   };
   sourceErrors?: string[];
@@ -92,24 +93,10 @@ function clockTime(ms: number): string {
   return new Date(ms).toLocaleTimeString('en-GB');
 }
 
-// The node's real state: did requests through its pods' IPs just work?
-// Only an HTTP 200 counts as working; anything unmeasured is never shown as healthy.
-function nodePath(state: ClusterState, nodeName: string): { label: string; state: 'working' | 'broken' | 'unknown' } {
-  if (state.paths?.error) return { label: `Not measured: ${state.paths.error}`, state: 'unknown' };
-  const ips: string[] = (state.pods ?? [])
-    .filter(p => p.spec.nodeName === nodeName)
-    .flatMap(p => p.status.podIP ?? []);
-  if (ips.length === 0) return { label: 'Not measured (no pod here)', state: 'unknown' };
-
-  const measured = ips.map(ip => state.paths?.results[ip]);
-  if (measured.some(r => !r)) return { label: 'Not measured (no result)', state: 'unknown' };
-  const failed = measured.filter(r => r!.httpCode !== '200');
-  if (failed.length > 0) {
-    const reason = failed[0]!.httpCode === '000' ? 'no reply' : `HTTP ${failed[0]!.httpCode}`;
-    return { label: `Broken (${reason}, ${failed.length} of ${ips.length} pods)`, state: 'broken' };
-  }
-  const ms = Math.max(...measured.map(r => r!.seconds * 1000));
-  return { label: `Working (HTTP 200, ${ms.toFixed(1)} ms)`, state: 'working' };
+// The node's real state, worked out from requests between the path-probe pods.
+// Anything unmeasured is never shown as healthy.
+function nodePath(state: ClusterState, nodeName: string): NodePath {
+  return state.paths?.nodes[nodeName] ?? { state: 'unknown', label: 'Not measured (no probe result)' };
 }
 
 // Flattens the cluster into "name → value" pairs. Comparing two snapshots gives
@@ -271,12 +258,10 @@ export function Project2Demo() {
   const pathByNode = new Map(nodes.map(n => [n.metadata.name as string, nodePath(cluster, n.metadata.name)]));
   const anyPathBroken = [...pathByNode.values()].some(p => p.state === 'broken');
   const failuresNow = recentFailure || anyPathBroken;
-  const brokenIPs = new Set(Object.entries(cluster.paths?.results ?? {})
-    .filter(([, r]) => r.httpCode !== '200')
-    .map(([ip]) => ip));
   const operatorSeen = cr?.status?.lastReconcileTime ? clockTime(new Date(cr.status.lastReconcileTime).getTime()) : null;
 
   const notices: string[] = [...(cluster.sourceErrors ?? [])];
+  if (cluster.paths?.error) notices.push(`Path probes: ${cluster.paths.error}. Apply experiments/manifests/resilience-workload.yaml.`);
   if (!cr) notices.push('No CNIResilience CR, so the operator columns are empty and its toggles are off. Apply operator/config/samples/cniresilience_sample.yaml.');
   else if (!operator.running) notices.push('The operator is not running: everything under "Operator says" is old data. Start it with make run.');
   if (!backupType) notices.push('Backup network is not installed: no Multus NetworkAttachmentDefinition "flannel-backup" was found.');
@@ -477,7 +462,7 @@ export function Project2Demo() {
                       {shadow && <span className="p2-tag warn">SHADOW</span>}
                     </div>
                     {(slice.endpoints ?? []).map((ep: any) => {
-                      const ready = ep.conditions?.ready !== false && !brokenIPs.has(ep.addresses[0]);
+                      const ready = ep.conditions?.ready !== false && pathByNode.get(ep.nodeName)?.state !== 'broken';
                       const readyLabel = ep.conditions?.ready === false ? 'not ready' : ready ? 'ready' : 'ready, path broken';
                       return (
                         <div key={ep.addresses[0]} className="p2-endpoint">
