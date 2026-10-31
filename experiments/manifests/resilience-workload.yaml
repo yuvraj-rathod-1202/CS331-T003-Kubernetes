@@ -1,3 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: resilience-service
+  namespace: default
+spec:
+  selector:
+    app: resilience-target
+  ports:
+  - port: 80
+    targetPort: 80
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -15,20 +27,39 @@ spec:
       annotations:
         k8s.v1.cni.cncf.io/networks: kube-system/flannel-backup
     spec:
+      # One replica per node, so a fault on one node never hides behind two pods there.
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels:
+            app: resilience-target
       containers:
       - name: web
         image: nginx:alpine
         ports:
         - containerPort: 80
 ---
+# Real traffic source for the /project2 page. Prints one line per request:
+#   <unix time> <http code> <seconds>     (http code 000 = no response within 1 s)
+# Uses the ClusterIP from the environment so a DNS failure is not counted as a Service failure.
 apiVersion: v1
-kind: Service
+kind: Pod
 metadata:
-  name: resilience-service
+  name: traffic-client
   namespace: default
 spec:
-  selector:
-    app: resilience-target
-  ports:
-  - port: 80
-    targetPort: 80
+  nodeSelector:
+    node-role.kubernetes.io/control-plane: ""
+  containers:
+  - name: client
+    image: curlimages/curl
+    command:
+    - sh
+    - -c
+    - |
+      while true; do
+        echo "$(date +%s) $(curl -s -o /dev/null -m 1 -w '%{http_code} %{time_total}' "http://${RESILIENCE_SERVICE_SERVICE_HOST:-resilience-service}")"
+        sleep 1
+      done
