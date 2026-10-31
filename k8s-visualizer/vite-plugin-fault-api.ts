@@ -159,6 +159,33 @@ async function countFaultRules(nodeName: string): Promise<number | null> {
   return Number.isNaN(count) ? null : count;
 }
 
+// Sends one real request from traffic-client to each pod's own IP, so the result
+// shows whether that exact path carries traffic. Kubernetes status cannot show this.
+async function probePodPaths(podIPs: string[]) {
+  const measuredAt = Date.now();
+  const ips = podIPs.filter(ip => /^[0-9.]+$/.test(ip));
+  if (ips.length === 0) return { measuredAt, results: {} };
+
+  const requests = ips
+    .map(ip => `(echo "${ip} $(curl -s -m 1 -o /dev/null -w '%{http_code} %{time_total}' http://${ip})") &`)
+    .join(' ');
+  try {
+    const { stdout } = await execFileAsync(
+      'kubectl',
+      ['exec', 'traffic-client', '-n', 'default', '--', 'sh', '-c', `${requests} wait`],
+      { timeout: 6000 }
+    );
+    const results: Record<string, { httpCode: string; seconds: number }> = {};
+    for (const line of stdout.split('\n')) {
+      const match = line.trim().match(/^([0-9.]+) (\d{3}) ([\d.]+)$/);
+      if (match) results[match[1]] = { httpCode: match[2], seconds: Number(match[3]) };
+    }
+    return { measuredAt, results };
+  } catch (err: any) {
+    return { measuredAt, results: {}, error: err.stderr?.trim() || err.message };
+  }
+}
+
 export function faultInjectorPlugin(_options: FaultApiOptions = {}): Plugin {
   return {
     name: 'k8s-fault-injector-api',
@@ -466,7 +493,20 @@ export function faultInjectorPlugin(_options: FaultApiOptions = {}): Plugin {
             }
 
             const nodeNames: string[] = nodes.data.items.map((n: any) => n.metadata.name);
-            const faultCounts = await Promise.all(nodeNames.map(countFaultRules));
+            const podIPs: string[] = pods.ok ? pods.data.items.flatMap((p: any) => p.status.podIP ?? []) : [];
+            const [faultCounts, paths] = await Promise.all([
+              Promise.all(nodeNames.map(countFaultRules)),
+              probePodPaths(podIPs),
+            ]);
+
+            // A failed read is reported, so it never looks like "nothing there".
+            const absent = /NotFound|doesn't have a resource type/;
+            const sources: [string, typeof pods][] = [
+              ['workload pods', pods], ['calico-node pods', calicoPods], ['EndpointSlices', slices],
+              ['CNIResilience CR', cr], ['backup network', nad],
+            ];
+            const sourceErrors = sources.flatMap(([name, source]) =>
+              !source.ok && !absent.test(source.error) ? [`Could not read ${name}: ${source.error}`] : []);
 
             return sendJson(res, 200, {
               success: true,
@@ -477,6 +517,8 @@ export function faultInjectorPlugin(_options: FaultApiOptions = {}): Plugin {
               calicoPods: calicoPods.ok ? calicoPods.data.items : [],
               endpointSlices: slices.ok ? slices.data.items : [],
               nadConfig: nad.ok ? nad.data.spec?.config ?? null : null,
+              paths,
+              sourceErrors,
             });
           }
 
