@@ -4,6 +4,7 @@ import { ClusterMap } from './components/ClusterMap';
 import { ControlPanel } from './components/ControlPanel';
 import { LogTerminal } from './components/LogTerminal';
 import { PodLogsModal } from './components/PodLogsModal';
+import { Project1Demo } from './components/Project1Demo';
 import { Project2Demo } from './components/Project2Demo';
 import type { LogEntry } from './components/LogTerminal';
 import './index.css';
@@ -16,6 +17,11 @@ function App() {
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
+
+  // Dedicated Route: /project1
+  if (currentPath.startsWith('/project1')) {
+    return <Project1Demo />;
+  }
 
   // Dedicated Route: /project2
   if (currentPath.startsWith('/project2')) {

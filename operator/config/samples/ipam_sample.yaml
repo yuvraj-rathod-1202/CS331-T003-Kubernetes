@@ -1,7 +1,9 @@
 # Sample IPPool CR — apply this to the cluster to start the IPAM controller.
 #
-# This creates a pool with a single /16 CIDR range and configures the
-# buddy allocator with /28 minimum blocks and /22 maximum blocks.
+# Pool CIDRs are filled in order: the second CIDR is only used once the first
+# is full. Every CIDR must avoid the Service CIDR, the node network and Docker
+# bridges, so list those under reservedCIDRs; the controller also rejects any
+# CIDR that contains a node's InternalIP.
 #
 # Usage:
 #   kubectl apply -f config/samples/ipam_sample.yaml
@@ -11,7 +13,21 @@ metadata:
   name: default-pool
 spec:
   cidrs:
-    - "10.244.0.0/16"
-  minBlockSize: 28       # Smallest block: /28 = 16 addresses
-  maxBlockSize: 22       # Largest block: /22 = 1024 addresses
-  expandThresholdPercent: 80  # Expand when a node reaches 80% usage
+    - "10.244.0.0/22"     # fills first
+    - "10.200.0.0/23"     # discontiguous spill CIDR
+  reservedCIDRs:
+    - "10.96.0.0/12"      # Service CIDR
+    - "192.168.49.0/24"   # minikube node network
+    - "172.17.0.0/16"     # Docker bridge
+  minBlockSize: 28            # Smallest block: /28 = 16 addresses
+  maxBlockSize: 22            # Largest single block: /22 = 1024 addresses
+  expandThresholdPercent: 80  # Grow when a node is 80% used...
+  triggerFloor: 8             # ...or has fewer than 8 free addresses
+  growthPercent: 50           # Grow by 50% of current capacity (power of two)
+  capacityCapPercent: 120      # Never exceed 120% of the node's max pods
+  initialBlockPercent: 25     # First block: 25% of max pods (min 16 addresses)
+  shrinkThresholdPercent: 50   # Give a block back only if the rest would be <= 50% used
+  shrinkCooldownSeconds: 300   # A block must have been Active this long before it can drain
+  quarantineSeconds: 60        # A drained block is held back this long before reuse
+  lowWaterPercent: 10          # Pool reports Degraded below 10% free addresses
+  # disableShrink: true        # Never drain; blocks are only ever added

@@ -6,6 +6,16 @@ metadata:
 rules:
 - apiGroups:
   - ""
+  resourceNames:
+  - kube-proxy
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - ""
   resources:
   - configmaps
   - nodes
@@ -20,8 +30,10 @@ rules:
   resources:
   - events
   verbs:
+  - create
   - get
   - list
+  - patch
   - watch
 - apiGroups:
   - ""
@@ -54,6 +66,15 @@ rules:
   - get
   - list
   - watch
+- apiGroups:
+  - apps
+  resourceNames:
+  - kube-proxy
+  resources:
+  - daemonsets
+  verbs:
+  - get
+  - patch
 - apiGroups:
   - apps
   resources:
@@ -100,6 +121,7 @@ rules:
   - cniresiliences
   - ippools
   - networkremediations
+  - nodeblocks
   - nodeipallocations
   verbs:
   - create
@@ -115,6 +137,7 @@ rules:
   - cniresiliences/status
   - ippools/status
   - networkremediations/status
+  - nodeblocks/status
   - nodeipallocations/status
   verbs:
   - get
