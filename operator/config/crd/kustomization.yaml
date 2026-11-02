@@ -3,6 +3,9 @@
 # It should be run by config/default
 resources:
 - bases/remediation.cn-operator.yuvraj-rathod-1202.github.io_networkremediations.yaml
+- bases/remediation.cn-operator.yuvraj-rathod-1202.github.io_ippools.yaml
+- bases/remediation.cn-operator.yuvraj-rathod-1202.github.io_nodeblocks.yaml
+- bases/remediation.cn-operator.yuvraj-rathod-1202.github.io_nodeipallocations.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

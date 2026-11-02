@@ -54,6 +54,13 @@ spec:
           spec:
             description: IPPoolSpec defines the desired state of an IPPool.
             properties:
+              capacityCapPercent:
+                default: 120
+                description: |-
+                  CapacityCapPercent caps a node's total capacity at this percentage of its
+                  allocatable pod count, so a leak cannot grow a node forever. Default: 120.
+                minimum: 100
+                type: integer
               cidrs:
                 description: |-
                   CIDRs is the list of CIDR blocks available for allocation.
@@ -62,6 +69,10 @@ spec:
                   type: string
                 minItems: 1
                 type: array
+              disableShrink:
+                description: DisableShrink turns off draining. Blocks are then only
+                  ever added.
+                type: boolean
               expandThresholdPercent:
                 default: 80
                 description: |-
@@ -69,6 +80,32 @@ spec:
                   controller proactively allocates an additional block. Default: 80.
                 maximum: 95
                 minimum: 50
+                type: integer
+              growthPercent:
+                default: 50
+                description: |-
+                  GrowthPercent is how much a node grows by, as a percentage of its current
+                  capacity, rounded up to a power of two (at least one minimum block).
+                  Default: 50.
+                maximum: 100
+                minimum: 1
+                type: integer
+              initialBlockPercent:
+                default: 25
+                description: |-
+                  InitialBlockPercent sizes a new node's first block as a percentage of its
+                  allocatable pod count, rounded up to a power of two, with a floor of
+                  16 addresses. This block is also the node's capacity floor. Default: 25.
+                maximum: 100
+                minimum: 1
+                type: integer
+              lowWaterPercent:
+                default: 10
+                description: |-
+                  LowWaterPercent: the pool reports Degraded when the free share of its
+                  address space falls below this. Default: 10.
+                maximum: 90
+                minimum: 0
                 type: integer
               maxBlockSize:
                 default: 22
@@ -86,6 +123,46 @@ spec:
                 maximum: 30
                 minimum: 24
                 type: integer
+              quarantineSeconds:
+                default: 60
+                description: |-
+                  QuarantineSeconds is how long a drained block is held back before it can
+                  be handed to another node, so stale routes and late packets cannot reach a
+                  new owner. Default: 60.
+                minimum: 0
+                type: integer
+              reservedCIDRs:
+                description: |-
+                  ReservedCIDRs are ranges the pool must not overlap, such as the Service
+                  CIDR, the node network or Docker bridges. Pool CIDRs that overlap one of
+                  these, or a node's InternalIP, are rejected.
+                items:
+                  type: string
+                type: array
+              shrinkCooldownSeconds:
+                default: 300
+                description: |-
+                  ShrinkCooldownSeconds is how long a block must have been Active before it
+                  can be drained. Default: 300.
+                minimum: 0
+                type: integer
+              shrinkThresholdPercent:
+                default: 50
+                description: |-
+                  ShrinkThresholdPercent: a node gives a block back only if, once the block
+                  is drained, its remaining capacity would be at most this percent used.
+                  Keep it well below ExpandThresholdPercent, or blocks flap. Default: 50.
+                maximum: 90
+                minimum: 1
+                type: integer
+              triggerFloor:
+                default: 8
+                description: |-
+                  TriggerFloor is the absolute number of free addresses below which a node
+                  grows, even when its utilisation is still under ExpandThresholdPercent.
+                  It should cover pod start rate x reaction time. Default: 8.
+                minimum: 0
+                type: integer
             required:
             - cidrs
             type: object
@@ -97,6 +174,32 @@ spec:
                   assigned to nodes.
                 format: int64
                 type: integer
+              cidrs:
+                description: |-
+                  CIDRs reports how much of each pool CIDR is handed out. CIDRs are filled
+                  in order, so a later one stays Standby until the earlier ones are full.
+                items:
+                  description: CIDRUsage is the usage of one pool CIDR.
+                  properties:
+                    allocated:
+                      format: int64
+                      type: integer
+                    cidr:
+                      type: string
+                    state:
+                      description: State is Active (some of it is handed out), Standby
+                        (none yet) or Full.
+                      type: string
+                    total:
+                      format: int64
+                      type: integer
+                  required:
+                  - allocated
+                  - cidr
+                  - state
+                  - total
+                  type: object
+                type: array
               freeAddresses:
                 description: FreeAddresses is TotalAddresses - AllocatedAddresses.
                 format: int64
@@ -105,6 +208,9 @@ spec:
                 description: LastReconcileTime is the last time the controller reconciled
                   this pool.
                 format: date-time
+                type: string
+              message:
+                description: Message explains a Degraded, Exhausted or Inactive phase.
                 type: string
               nodeAllocations:
                 description: NodeAllocations summarises per-node block assignments.
@@ -141,8 +247,9 @@ spec:
                   type: object
                 type: array
               phase:
-                description: 'Phase is the current state of the pool: "Ready", "Exhausted",
-                  "Degraded".'
+                description: |-
+                  Phase is the current state of the pool: "Ready", "Exhausted", "Degraded",
+                  or "Inactive" when another IPPool is serving the cluster's nodes.
                 type: string
               totalAddresses:
                 description: TotalAddresses is the total number of addresses across

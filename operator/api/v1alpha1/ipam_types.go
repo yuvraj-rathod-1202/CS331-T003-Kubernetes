@@ -65,6 +65,73 @@ type IPPoolSpec struct {
 	// +kubebuilder:validation:Minimum=50
 	// +kubebuilder:validation:Maximum=95
 	ExpandThresholdPercent int `json:"expandThresholdPercent,omitempty"`
+
+	// TriggerFloor is the absolute number of free addresses below which a node
+	// grows, even when its utilisation is still under ExpandThresholdPercent.
+	// It should cover pod start rate x reaction time. Default: 8.
+	// +kubebuilder:default=8
+	// +kubebuilder:validation:Minimum=0
+	TriggerFloor int `json:"triggerFloor,omitempty"`
+
+	// GrowthPercent is how much a node grows by, as a percentage of its current
+	// capacity, rounded up to a power of two (at least one minimum block).
+	// Default: 50.
+	// +kubebuilder:default=50
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=100
+	GrowthPercent int `json:"growthPercent,omitempty"`
+
+	// CapacityCapPercent caps a node's total capacity at this percentage of its
+	// allocatable pod count, so a leak cannot grow a node forever. Default: 120.
+	// +kubebuilder:default=120
+	// +kubebuilder:validation:Minimum=100
+	CapacityCapPercent int `json:"capacityCapPercent,omitempty"`
+
+	// InitialBlockPercent sizes a new node's first block as a percentage of its
+	// allocatable pod count, rounded up to a power of two, with a floor of
+	// 16 addresses. This block is also the node's capacity floor. Default: 25.
+	// +kubebuilder:default=25
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=100
+	InitialBlockPercent int `json:"initialBlockPercent,omitempty"`
+
+	// ReservedCIDRs are ranges the pool must not overlap, such as the Service
+	// CIDR, the node network or Docker bridges. Pool CIDRs that overlap one of
+	// these, or a node's InternalIP, are rejected.
+	// +optional
+	ReservedCIDRs []string `json:"reservedCIDRs,omitempty"`
+
+	// ShrinkThresholdPercent: a node gives a block back only if, once the block
+	// is drained, its remaining capacity would be at most this percent used.
+	// Keep it well below ExpandThresholdPercent, or blocks flap. Default: 50.
+	// +kubebuilder:default=50
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=90
+	ShrinkThresholdPercent int `json:"shrinkThresholdPercent,omitempty"`
+
+	// ShrinkCooldownSeconds is how long a block must have been Active before it
+	// can be drained. Default: 300.
+	// +kubebuilder:default=300
+	// +kubebuilder:validation:Minimum=0
+	ShrinkCooldownSeconds int `json:"shrinkCooldownSeconds,omitempty"`
+
+	// QuarantineSeconds is how long a drained block is held back before it can
+	// be handed to another node, so stale routes and late packets cannot reach a
+	// new owner. Default: 60.
+	// +kubebuilder:default=60
+	// +kubebuilder:validation:Minimum=0
+	QuarantineSeconds int `json:"quarantineSeconds,omitempty"`
+
+	// LowWaterPercent: the pool reports Degraded when the free share of its
+	// address space falls below this. Default: 10.
+	// +kubebuilder:default=10
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=90
+	LowWaterPercent int `json:"lowWaterPercent,omitempty"`
+
+	// DisableShrink turns off draining. Blocks are then only ever added.
+	// +optional
+	DisableShrink bool `json:"disableShrink,omitempty"`
 }
 
 // IPPoolStatus defines the observed state of an IPPool.
@@ -78,8 +145,16 @@ type IPPoolStatus struct {
 	// FreeAddresses is TotalAddresses - AllocatedAddresses.
 	FreeAddresses int64 `json:"freeAddresses,omitempty"`
 
-	// Phase is the current state of the pool: "Ready", "Exhausted", "Degraded".
+	// Phase is the current state of the pool: "Ready", "Exhausted", "Degraded",
+	// or "Inactive" when another IPPool is serving the cluster's nodes.
 	Phase string `json:"phase,omitempty"`
+
+	// Message explains a Degraded, Exhausted or Inactive phase.
+	Message string `json:"message,omitempty"`
+
+	// CIDRs reports how much of each pool CIDR is handed out. CIDRs are filled
+	// in order, so a later one stays Standby until the earlier ones are full.
+	CIDRs []CIDRUsage `json:"cidrs,omitempty"`
 
 	// NodeAllocations summarises per-node block assignments.
 	NodeAllocations []NodeAllocationSummary `json:"nodeAllocations,omitempty"`
@@ -212,9 +287,108 @@ type NodeIPAllocationList struct {
 	Items           []NodeIPAllocation `json:"items"`
 }
 
+// ============================================================
+// NodeBlock — one allocated block
+// ============================================================
+
+// NodeBlock phases.
+const (
+	// NodeBlockPending: reserved by the controller, routes and CNI config not
+	// yet in place everywhere.
+	NodeBlockPending = "Pending"
+	// NodeBlockActive: routes acknowledged and the owner's CNI config uses it.
+	NodeBlockActive = "Active"
+	// NodeBlockDraining: removed from the CNI config, waiting to empty.
+	NodeBlockDraining = "Draining"
+	// NodeBlockQuarantined: routes withdrawn, held back before reuse.
+	NodeBlockQuarantined = "Quarantined"
+	// NodeBlockReleased: returned to the pool.
+	NodeBlockReleased = "Released"
+)
+
+// NodeBlockSpec is written only by the controller.
+type NodeBlockSpec struct {
+	// NodeName is the node that owns the block.
+	NodeName string `json:"nodeName"`
+
+	// PoolRef is the IPPool the block was carved from.
+	PoolRef string `json:"poolRef"`
+
+	// CIDR is the block, aligned to its own size (e.g. "10.244.0.64/27").
+	CIDR string `json:"cidr"`
+
+	// Drain asks the owner to stop handing out addresses from the block. The
+	// controller sets it to shrink a node; it clears it again if the node needs
+	// the space back before the drain finishes.
+	// +optional
+	Drain bool `json:"drain,omitempty"`
+}
+
+// NodeBlockStatus is written only by the node agent (and, for lifecycle phases
+// the agent cannot observe, by the controller).
+type NodeBlockStatus struct {
+	// Phase is Pending, Active, Draining, Quarantined or Released.
+	Phase string `json:"phase,omitempty"`
+
+	// UsedAddresses is how many addresses in the block hold a lease, counted
+	// from the node's host-local lease files.
+	UsedAddresses int `json:"usedAddresses,omitempty"`
+
+	// ReclaimedLeases counts leaked host-local leases the agent removed from
+	// this block: leases with no pod behind them.
+	ReclaimedLeases int `json:"reclaimedLeases,omitempty"`
+
+	// RoutesAckedBy lists the nodes that have installed a route for this block.
+	RoutesAckedBy []string `json:"routesAckedBy,omitempty"`
+
+	// LastTransitionTime is when Phase last changed.
+	LastTransitionTime *metav1.Time `json:"lastTransitionTime,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+// +kubebuilder:resource:scope=Cluster
+// +kubebuilder:printcolumn:name="Node",type="string",JSONPath=".spec.nodeName"
+// +kubebuilder:printcolumn:name="CIDR",type="string",JSONPath=".spec.cidr"
+// +kubebuilder:printcolumn:name="Used",type="integer",JSONPath=".status.usedAddresses"
+// +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase"
+
+// NodeBlock is one buddy block assigned to one node. Its name is derived from
+// the CIDR, so the API server's name uniqueness prevents the same block being
+// allocated twice. The controller keeps no private state: it rebuilds every
+// buddy tree from these objects.
+type NodeBlock struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	Spec   NodeBlockSpec   `json:"spec,omitempty"`
+	Status NodeBlockStatus `json:"status,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+
+// NodeBlockList contains a list of NodeBlock.
+type NodeBlockList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []NodeBlock `json:"items"`
+}
+
 func init() {
 	SchemeBuilder.Register(func(s *runtime.Scheme) error {
-		s.AddKnownTypes(SchemeGroupVersion, &IPPool{}, &IPPoolList{}, &NodeIPAllocation{}, &NodeIPAllocationList{})
+		s.AddKnownTypes(SchemeGroupVersion,
+			&IPPool{}, &IPPoolList{},
+			&NodeIPAllocation{}, &NodeIPAllocationList{},
+			&NodeBlock{}, &NodeBlockList{})
 		return nil
 	})
+}
+
+// CIDRUsage is the usage of one pool CIDR.
+type CIDRUsage struct {
+	CIDR string `json:"cidr"`
+	// State is Active (some of it is handed out), Standby (none yet) or Full.
+	State     string `json:"state"`
+	Total     int64  `json:"total"`
+	Allocated int64  `json:"allocated"`
 }

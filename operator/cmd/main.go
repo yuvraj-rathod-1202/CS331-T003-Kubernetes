@@ -20,7 +20,10 @@ import (
 	"context"
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"os"
+	"slices"
+	"strings"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -67,12 +70,18 @@ func main() {
 	var metricsCertPath, metricsCertName, metricsCertKey string
 	var webhookCertPath, webhookCertName, webhookCertKey string
 	var enableLeaderElection bool
+	var controllersFlag string
+	var ipamConfigureKubeProxy bool
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
+	flag.StringVar(&controllersFlag, "controllers", "all",
+		"Comma-separated controllers to run: networkremediation, ipam, cniresilience, or all.")
+	flag.BoolVar(&ipamConfigureKubeProxy, "ipam-configure-kube-proxy", false,
+		"IPAM: set kube-proxy's local-traffic detection for multi-pool pods and restart kube-proxy.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
@@ -187,57 +196,69 @@ func main() {
 		os.Exit(1)
 	}
 
-	reconciler := &controller.NetworkRemediationReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}
-
-	// Register all four remediation modules.
-	// Each module implements the Check → Evaluate → Remediate pipeline.
-	reconciler.RegisterModule(
-		cnimod.New(mgr.GetClient()),
-		func(spec *remediationv1alpha1.NetworkRemediationSpec) bool { return spec.CNI.Enabled },
-		func(status *remediationv1alpha1.NetworkRemediationStatus, ms remediationv1alpha1.ModuleStatus) {
-			status.CNI = ms
-		},
-	)
-	reconciler.RegisterModule(
-		corednsmod.New(mgr.GetClient()),
-		func(spec *remediationv1alpha1.NetworkRemediationSpec) bool { return spec.CoreDNS.Enabled },
-		func(status *remediationv1alpha1.NetworkRemediationStatus, ms remediationv1alpha1.ModuleStatus) {
-			status.CoreDNS = ms
-		},
-	)
-	reconciler.RegisterModule(
-		netpolmod.New(mgr.GetClient()),
-		func(spec *remediationv1alpha1.NetworkRemediationSpec) bool { return spec.NetworkPolicy.Enabled },
-		func(status *remediationv1alpha1.NetworkRemediationStatus, ms remediationv1alpha1.ModuleStatus) {
-			status.NetworkPolicy = ms
-		},
-	)
-	podConnMod, err := podconnmod.New(mgr.GetClient(), mgr.GetConfig())
+	enabled, err := parseControllers(controllersFlag)
 	if err != nil {
-		setupLog.Error(err, "Failed to create pod connectivity module")
+		setupLog.Error(err, "Invalid --controllers")
 		os.Exit(1)
 	}
-	reconciler.RegisterModule(
-		podConnMod,
-		func(spec *remediationv1alpha1.NetworkRemediationSpec) bool { return spec.PodConnectivity.Enabled },
-		func(status *remediationv1alpha1.NetworkRemediationStatus, ms remediationv1alpha1.ModuleStatus) {
-			status.PodConnectivity = ms
-		},
-	)
+	setupLog.Info("Controllers enabled", "controllers", controllersFlag)
 
-	if err := reconciler.SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "Failed to create controller", "controller", "networkremediation")
-		os.Exit(1)
+	if enabled["networkremediation"] {
+		reconciler := &controller.NetworkRemediationReconciler{
+			Client: mgr.GetClient(),
+			Scheme: mgr.GetScheme(),
+		}
+
+		// Register all four remediation modules.
+		// Each module implements the Check → Evaluate → Remediate pipeline.
+		reconciler.RegisterModule(
+			cnimod.New(mgr.GetClient()),
+			func(spec *remediationv1alpha1.NetworkRemediationSpec) bool { return spec.CNI.Enabled },
+			func(status *remediationv1alpha1.NetworkRemediationStatus, ms remediationv1alpha1.ModuleStatus) {
+				status.CNI = ms
+			},
+		)
+		reconciler.RegisterModule(
+			corednsmod.New(mgr.GetClient()),
+			func(spec *remediationv1alpha1.NetworkRemediationSpec) bool { return spec.CoreDNS.Enabled },
+			func(status *remediationv1alpha1.NetworkRemediationStatus, ms remediationv1alpha1.ModuleStatus) {
+				status.CoreDNS = ms
+			},
+		)
+		reconciler.RegisterModule(
+			netpolmod.New(mgr.GetClient()),
+			func(spec *remediationv1alpha1.NetworkRemediationSpec) bool { return spec.NetworkPolicy.Enabled },
+			func(status *remediationv1alpha1.NetworkRemediationStatus, ms remediationv1alpha1.ModuleStatus) {
+				status.NetworkPolicy = ms
+			},
+		)
+		podConnMod, err := podconnmod.New(mgr.GetClient(), mgr.GetConfig())
+		if err != nil {
+			setupLog.Error(err, "Failed to create pod connectivity module")
+			os.Exit(1)
+		}
+		reconciler.RegisterModule(
+			podConnMod,
+			func(spec *remediationv1alpha1.NetworkRemediationSpec) bool { return spec.PodConnectivity.Enabled },
+			func(status *remediationv1alpha1.NetworkRemediationStatus, ms remediationv1alpha1.ModuleStatus) {
+				status.PodConnectivity = ms
+			},
+		)
+
+		if err := reconciler.SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "Failed to create controller", "controller", "networkremediation")
+			os.Exit(1)
+		}
 	}
 
 	// Problem 1: Dynamic Buddy-Style IPAM Controller (Lead: Ramji, with Viraj & Param)
-	ipamReconciler := ipamctrl.NewIPAMController(mgr.GetClient(), mgr.GetScheme())
-	if err := ipamReconciler.SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "Failed to create controller", "controller", "ipam")
-		os.Exit(1)
+	if enabled["ipam"] {
+		ipamReconciler := ipamctrl.NewIPAMController(mgr.GetClient(), mgr.GetScheme())
+		ipamReconciler.ConfigureKubeProxy = ipamConfigureKubeProxy
+		if err := ipamReconciler.SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "Failed to create controller", "controller", "ipam")
+			os.Exit(1)
+		}
 	}
 
 	// Register the spec.nodeName field index on Pods.
@@ -260,10 +281,12 @@ func main() {
 	}
 
 	// Problem 2: CNI Resilience Controller (Lead: Yuvraj, with Deep & Arpan)
-	cniResReconciler := cniresctrl.NewCNIResilienceController(mgr.GetClient(), mgr.GetScheme())
-	if err := cniResReconciler.SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "Failed to create controller", "controller", "cniresilience")
-		os.Exit(1)
+	if enabled["cniresilience"] {
+		cniResReconciler := cniresctrl.NewCNIResilienceController(mgr.GetClient(), mgr.GetScheme())
+		if err := cniResReconciler.SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "Failed to create controller", "controller", "cniresilience")
+			os.Exit(1)
+		}
 	}
 	// +kubebuilder:scaffold:builder
 
@@ -281,4 +304,29 @@ func main() {
 		setupLog.Error(err, "Failed to run manager")
 		os.Exit(1)
 	}
+}
+
+// parseControllers turns the --controllers value into a set. "all" enables
+// every controller, so the default behaves as before the flag existed.
+func parseControllers(v string) (map[string]bool, error) {
+	known := []string{"networkremediation", "ipam", "cniresilience"}
+	out := map[string]bool{}
+	for name := range strings.SplitSeq(v, ",") {
+		name = strings.TrimSpace(name)
+		switch {
+		case name == "":
+		case name == "all":
+			for _, k := range known {
+				out[k] = true
+			}
+		case slices.Contains(known, name):
+			out[name] = true
+		default:
+			return nil, fmt.Errorf("unknown controller %q (known: %s, all)", name, strings.Join(known, ", "))
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no controllers selected")
+	}
+	return out, nil
 }

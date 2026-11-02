@@ -1,0 +1,121 @@
+# Per-node IPAM agent for Problem 1 (buddy-style dynamic IPAM).
+#
+# The agent runs on every node. It:
+#   - installs a route "block via owner node IP" for every other node's blocks
+#     and acknowledges them in NodeBlock.status.routesAckedBy;
+#   - writes /etc/cni/net.d/10-buddy.conflist (ptp + host-local) from the
+#     blocks the node owns, and promotes new blocks Pending -> Active;
+#   - drains blocks the controller asks it to (removes them from the config,
+#     waits until empty, then reports Quarantined);
+#   - reports usage, counted from host-local's lease files, and removes leases
+#     that no pod on the node holds (leak reclaim).
+#
+# It must be hostNetwork: it provides the IPAM, so it cannot depend on it.
+# It writes only NodeBlock status; the controller writes spec.
+#
+# Prerequisites (see docs/ipam-phase0-assumptions.md):
+#   - kube-controller-manager runs with --allocate-node-cidrs=false;
+#   - kube-proxy uses detectLocalMode: InterfaceNamePrefix (prefix "veth"),
+#     otherwise pods outside kube-proxy's cluster CIDR are masqueraded when
+#     they reach a Service. Run the manager with --ipam-configure-kube-proxy
+#     to have it set this, or patch the kube-proxy ConfigMap yourself;
+#   - the IPPool CRDs and an IPPool exist (config/samples/ipam_sample.yaml).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ipam-agent
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ipam-agent
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  # Leak reclaim compares this node's leases with the pods scheduled on it.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: ["remediation.cn-operator.yuvraj-rathod-1202.github.io"]
+    resources: ["nodeblocks"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["remediation.cn-operator.yuvraj-rathod-1202.github.io"]
+    resources: ["nodeblocks/status"]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ipam-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ipam-agent
+subjects:
+  - kind: ServiceAccount
+    name: ipam-agent
+    namespace: kube-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ipam-agent
+  namespace: kube-system
+  labels:
+    app: ipam-agent
+    app.kubernetes.io/component: node-agent
+    app.kubernetes.io/part-of: buddy-ipam
+spec:
+  selector:
+    matchLabels:
+      app: ipam-agent
+  template:
+    metadata:
+      labels:
+        app: ipam-agent
+    spec:
+      hostNetwork: true
+      hostPID: true        # nsenter into the host to clean stale iptables rules
+      dnsPolicy: ClusterFirstWithHostNet
+      serviceAccountName: ipam-agent
+      priorityClassName: system-node-critical
+      tolerations:
+        # Run everywhere, including nodes that are NotReady for want of a CNI.
+        - operator: Exists
+      containers:
+        - name: ipam-agent
+          image: ipam-agent:dev
+          imagePullPolicy: IfNotPresent
+          args:
+            - --interval=30s
+            - --promote-timeout=30s
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          securityContext:
+            privileged: true   # CAP_NET_ADMIN for routes; writes to host paths
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          volumeMounts:
+            - name: cni-conf
+              mountPath: /etc/cni/net.d
+            - name: cni-data
+              mountPath: /var/lib/cni/networks
+      volumes:
+        - name: cni-conf
+          hostPath:
+            path: /etc/cni/net.d
+            type: DirectoryOrCreate
+        - name: cni-data
+          hostPath:
+            path: /var/lib/cni/networks
+            type: DirectoryOrCreate

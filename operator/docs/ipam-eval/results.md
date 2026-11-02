@@ -1,0 +1,32 @@
+| scenario | policy | pods served % | unmet pod-min | peak unmet | utilisation % | addrs/node | peak routes | block ops |
+|---|---|---|---|---|---|---|---|---|
+| steady | buddy | 100.0 | 4 | 50 | 62.5 | 128 | 150 | 200 |
+| steady | static-/24 | 100.0 | 0 | 0 | 31.2 | 256 | 50 | 0 |
+| steady | static-/25 | 100.0 | 0 | 0 | 62.5 | 128 | 50 | 0 |
+| steady | calico-64 | 100.0 | 0 | 0 | 62.5 | 128 | 100 | 100 |
+| steady | buddy-no-emergency | 100.0 | 4 | 50 | 62.5 | 128 | 150 | 200 |
+| steady | buddy-no-shrink | 100.0 | 4 | 50 | 62.5 | 128 | 150 | 200 |
+| skewed | buddy | 100.0 | 8 | 60 | 56.7 | 86 | 65 | 70 |
+| skewed | static-/24 | 100.0 | 0 | 0 | 19.1 | 256 | 50 | 0 |
+| skewed | static-/25 | 80.6 | 13523 | 475 | 30.9 | 128 | 50 | 0 |
+| skewed | calico-64 | 100.0 | 0 | 0 | 58.9 | 83 | 65 | 66 |
+| skewed | buddy-no-emergency | 100.0 | 8 | 60 | 56.7 | 86 | 65 | 70 |
+| skewed | buddy-no-shrink | 100.0 | 8 | 60 | 56.7 | 86 | 65 | 70 |
+| burst | buddy | 100.0 | 0 | 0 | 35.0 | 218 | 200 | 594 |
+| burst | static-/24 | 100.0 | 0 | 0 | 32.0 | 256 | 50 | 0 |
+| burst | static-/25 | 73.1 | 64062 | 3750 | 46.8 | 128 | 50 | 0 |
+| burst | calico-64 | 100.0 | 0 | 0 | 38.2 | 217 | 200 | 212 |
+| burst | buddy-no-emergency | 100.0 | 0 | 0 | 35.1 | 217 | 200 | 592 |
+| burst | buddy-no-shrink | 100.0 | 0 | 0 | 33.9 | 247 | 200 | 250 |
+| wave | buddy | 100.0 | 268 | 1017 | 40.9 | 175 | 125 | 679 |
+| wave | static-/24 | 100.0 | 0 | 0 | 27.8 | 256 | 50 | 0 |
+| wave | static-/25 | 96.6 | 14478 | 222 | 53.7 | 128 | 50 | 0 |
+| wave | calico-64 | 100.0 | 0 | 0 | 52.4 | 137 | 115 | 337 |
+| wave | buddy-no-emergency | 100.0 | 268 | 1017 | 40.9 | 175 | 126 | 668 |
+| wave | buddy-no-shrink | 100.0 | 268 | 1017 | 37.4 | 192 | 122 | 159 |
+| tight-pool | buddy | 100.0 | 2 | 20 | 64.8 | 86 | 56 | 56 |
+| tight-pool | static-/24 | 57.1 | 27864 | 960 | 31.2 | 102 | 16 | 0 |
+| tight-pool | static-/25 | 72.3 | 17812 | 620 | 39.6 | 102 | 32 | 0 |
+| tight-pool | calico-64 | 100.0 | 0 | 0 | 67.3 | 83 | 52 | 53 |
+| tight-pool | buddy-no-emergency | 100.0 | 2 | 20 | 64.8 | 86 | 56 | 56 |
+| tight-pool | buddy-no-shrink | 100.0 | 2 | 20 | 64.8 | 86 | 56 | 56 |
