@@ -2,6 +2,7 @@ import type { Plugin } from 'vite';
 import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
 import type { IncomingMessage, ServerResponse } from 'http';
+import { nodeVerdicts, type Links } from './path-verdict.js';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -157,6 +158,47 @@ async function countFaultRules(nodeName: string): Promise<number | null> {
   const { stdout } = await execOnNode(nodeName, `iptables-save | grep -c ${FAULT_TAG} || true`);
   const count = parseInt(stdout, 10);
   return Number.isNaN(count) ? null : count;
+}
+
+// Every node runs a path-probe pod. Each one sends a real request to all the others,
+// so a failure can be blamed on the right node instead of on one fixed observer.
+async function probeNodePaths(nodeNames: string[]) {
+  const measuredAt = Date.now();
+  const probes = await kubectlJson(['get', 'pods', '-n', 'default', '-l', 'app=path-probe', '-o', 'json']);
+  if (!probes.ok) {
+    return { measuredAt, nodes: nodeVerdicts(nodeNames, {}), error: probes.error };
+  }
+
+  const running: any[] = probes.data.items.filter((p: any) => p.status.phase === 'Running' && p.status.podIP);
+  const links: Links = {};
+  const failures: string[] = [];
+
+  await Promise.all(running.map(async source => {
+    const requests = running
+      .filter(target => target.spec.nodeName !== source.spec.nodeName)
+      .map(target => `(echo "${target.spec.nodeName} $(curl -s -m 1 -o /dev/null -w '%{http_code}' http://${target.status.podIP})") &`)
+      .join(' ');
+    try {
+      const { stdout } = await execFileAsync(
+        'kubectl',
+        ['exec', source.metadata.name, '-n', 'default', '--', 'sh', '-c', `${requests} wait`],
+        { timeout: 6000 }
+      );
+      links[source.spec.nodeName] = {};
+      for (const line of stdout.split('\n')) {
+        const match = line.trim().match(/^(\S+) (\d{3})$/);
+        if (match) links[source.spec.nodeName][match[1]] = match[2] === '200';
+      }
+    } catch (err: any) {
+      failures.push(`${source.metadata.name}: ${err.stderr?.trim() || err.message}`);
+    }
+  }));
+
+  return {
+    measuredAt,
+    nodes: nodeVerdicts(nodeNames, links),
+    error: running.length === 0 ? 'no path-probe pods are running' : failures.join('; ') || undefined,
+  };
 }
 
 export function faultInjectorPlugin(_options: FaultApiOptions = {}): Plugin {
@@ -466,7 +508,19 @@ export function faultInjectorPlugin(_options: FaultApiOptions = {}): Plugin {
             }
 
             const nodeNames: string[] = nodes.data.items.map((n: any) => n.metadata.name);
-            const faultCounts = await Promise.all(nodeNames.map(countFaultRules));
+            const [faultCounts, paths] = await Promise.all([
+              Promise.all(nodeNames.map(countFaultRules)),
+              probeNodePaths(nodeNames),
+            ]);
+
+            // A failed read is reported, so it never looks like "nothing there".
+            const absent = /NotFound|doesn't have a resource type/;
+            const sources: [string, typeof pods][] = [
+              ['workload pods', pods], ['calico-node pods', calicoPods], ['EndpointSlices', slices],
+              ['CNIResilience CR', cr], ['backup network', nad],
+            ];
+            const sourceErrors = sources.flatMap(([name, source]) =>
+              !source.ok && !absent.test(source.error) ? [`Could not read ${name}: ${source.error}`] : []);
 
             return sendJson(res, 200, {
               success: true,
@@ -477,6 +531,8 @@ export function faultInjectorPlugin(_options: FaultApiOptions = {}): Plugin {
               calicoPods: calicoPods.ok ? calicoPods.data.items : [],
               endpointSlices: slices.ok ? slices.data.items : [],
               nadConfig: nad.ok ? nad.data.spec?.config ?? null : null,
+              paths,
+              sourceErrors,
             });
           }
 

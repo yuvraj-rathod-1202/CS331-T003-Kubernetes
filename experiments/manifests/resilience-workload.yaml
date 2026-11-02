@@ -63,3 +63,27 @@ spec:
         echo "$(date +%s) $(curl -s -o /dev/null -m 1 -w '%{http_code} %{time_total}' "http://${RESILIENCE_SERVICE_SERVICE_HOST:-resilience-service}")"
         sleep 1
       done
+---
+# One pod on every node. Each answers HTTP and sends requests to the others, so the
+# /project2 page can tell which node is broken. Runs on all nodes, tainted or not.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: path-probe
+  namespace: default
+spec:
+  selector:
+    matchLabels:
+      app: path-probe
+  template:
+    metadata:
+      labels:
+        app: path-probe
+    spec:
+      tolerations:
+      - operator: Exists
+      containers:
+      - name: probe
+        image: nginx:alpine
+        ports:
+        - containerPort: 80

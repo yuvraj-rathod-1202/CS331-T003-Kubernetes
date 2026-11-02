@@ -12,6 +12,7 @@ import {
   Terminal as TerminalIcon,
   XCircle,
 } from 'lucide-react';
+import type { NodePath } from '../../path-verdict';
 import './Project2Demo.css';
 
 // Everything on this page comes from the API below. Nothing is simulated: if a
@@ -19,6 +20,7 @@ import './Project2Demo.css';
 const POLL_MS = 2000;
 const OPERATOR_STALE_SECONDS = 30;
 const MAX_EVENTS = 60;
+const TRAFFIC_STALE_SECONDS = 10;
 
 interface ClusterState {
   success: boolean;
@@ -30,6 +32,12 @@ interface ClusterState {
   calicoPods?: any[];
   endpointSlices?: any[];
   nadConfig?: string | null;
+  paths?: {
+    measuredAt: number;
+    nodes: Record<string, NodePath>;
+    error?: string;
+  };
+  sourceErrors?: string[];
 }
 
 interface TrafficSample {
@@ -81,6 +89,16 @@ function operatorState(cr: any, now: number): { label: string; running: boolean 
   return { label: 'Running', running: true };
 }
 
+function clockTime(ms: number): string {
+  return new Date(ms).toLocaleTimeString('en-GB');
+}
+
+// The node's real state, worked out from requests between the path-probe pods.
+// Anything unmeasured is never shown as healthy.
+function nodePath(state: ClusterState, nodeName: string): NodePath {
+  return state.paths?.nodes[nodeName] ?? { state: 'unknown', label: 'Not measured (no probe result)' };
+}
+
 // Flattens the cluster into "name → value" pairs. Comparing two snapshots gives
 // the event log, so every line in it is a change that was really observed.
 function snapshot(state: ClusterState): Map<string, string> {
@@ -101,6 +119,7 @@ function snapshot(state: ClusterState): Map<string, string> {
     const taints = (node.spec.taints ?? []).map((t: any) => t.key).join(', ') || 'none';
     out.set(`${name}: node`, isConditionTrue(node, 'Ready') ? 'Ready' : 'NotReady');
     out.set(`${name}: taints`, taints);
+    out.set(`${name}: data path`, nodePath(state, name).state);
     out.set(`${name}: demo fault rules`, String(state.faultRules?.[name] ?? 'unknown'));
   }
   for (const pod of state.calicoPods ?? []) {
@@ -233,9 +252,16 @@ export function Project2Demo() {
   const sortedMs = okSamples.map(s => s.seconds * 1000).sort((a, b) => a - b);
   const medianMs = sortedMs.length ? sortedMs[Math.floor(sortedMs.length / 2)] : null;
   const lastSample = samples[samples.length - 1];
-  const failuresNow = lastSample ? lastSample.httpCode !== '200' : false;
+  const nowSeconds = now / 1000;
+  const trafficStale = !!lastSample && nowSeconds - lastSample.epoch > TRAFFIC_STALE_SECONDS;
+  const recentFailure = samples.some(s => s.httpCode !== '200' && nowSeconds - s.epoch <= TRAFFIC_STALE_SECONDS);
+  const pathByNode = new Map(nodes.map(n => [n.metadata.name as string, nodePath(cluster, n.metadata.name)]));
+  const anyPathBroken = [...pathByNode.values()].some(p => p.state === 'broken');
+  const failuresNow = recentFailure || anyPathBroken;
+  const operatorSeen = cr?.status?.lastReconcileTime ? clockTime(new Date(cr.status.lastReconcileTime).getTime()) : null;
 
-  const notices: string[] = [];
+  const notices: string[] = [...(cluster.sourceErrors ?? [])];
+  if (cluster.paths?.error) notices.push(`Path probes: ${cluster.paths.error}. Apply experiments/manifests/resilience-workload.yaml.`);
   if (!cr) notices.push('No CNIResilience CR, so the operator columns are empty and its toggles are off. Apply operator/config/samples/cniresilience_sample.yaml.');
   else if (!operator.running) notices.push('The operator is not running: everything under "Operator says" is old data. Start it with make run.');
   if (!backupType) notices.push('Backup network is not installed: no Multus NetworkAttachmentDefinition "flannel-backup" was found.');
@@ -251,7 +277,11 @@ export function Project2Demo() {
         </div>
         <div className="p2-pills">
           <Pill label="Operator" value={operator.label} tone={operator.running ? 'good' : 'bad'} />
-          <Pill label="Phase" value={cr?.status?.phase ?? 'none'} tone={cr?.status?.phase === 'Healthy' ? 'good' : cr?.status?.phase ? 'warn' : 'none'} />
+          <Pill
+            label="Phase"
+            value={cr?.status?.phase ? (operator.running ? cr.status.phase : `${cr.status.phase} (stale since ${operatorSeen})`) : 'none'}
+            tone={cr?.status?.phase === 'Healthy' && operator.running ? 'good' : cr?.status?.phase ? 'warn' : 'none'}
+          />
           <Pill label="Failovers" value={String(cr?.status?.failoverCount ?? 0)} tone="none" />
           <Pill label="Recovery attempts" value={String(cr?.status?.recoveryCount ?? 0)} tone="none" />
         </div>
@@ -268,7 +298,11 @@ export function Project2Demo() {
         <section className="p2-panel p2-q-traffic">
           <h2>Service traffic <span className="p2-muted">measured by the traffic-client pod</span></h2>
           <div className="p2-stats">
-            <Stat label="Now" value={lastSample ? (failuresNow ? 'FAILING' : 'OK') : '—'} tone={lastSample ? (failuresNow ? 'bad' : 'good') : 'none'} />
+            <Stat
+              label="Now"
+              value={!lastSample ? '—' : trafficStale ? `Stale since ${clockTime(lastSample.epoch * 1000)}` : failuresNow ? 'FAILING' : 'OK'}
+              tone={!lastSample ? 'none' : trafficStale || failuresNow ? 'bad' : 'good'}
+            />
             <Stat label={`Availability (last ${samples.length})`} value={availability === null ? '—' : `${availability}%`} tone="none" />
             <Stat label="Median response" value={medianMs === null ? '—' : `${medianMs.toFixed(1)} ms`} tone="none" />
             <Stat label="Failed requests" value={String(samples.length - okSamples.length)} tone={samples.length !== okSamples.length ? 'bad' : 'none'} />
@@ -301,10 +335,11 @@ export function Project2Demo() {
               const faults = cluster.faultRules?.[name];
               const taints = node.spec.taints ?? [];
               const nodePods = (cluster.pods ?? []).filter(p => p.spec.nodeName === name);
+              const path = pathByNode.get(name)!;
               return (
                 <button
                   key={name}
-                  className={`p2-node ${name === targetNode ? 'selected' : ''} ${faults ? 'faulted' : ''}`}
+                  className={`p2-node ${name === targetNode ? 'selected' : ''} ${faults || path.state === 'broken' ? 'faulted' : ''}`}
                   onClick={() => setSelectedNode(name)}
                 >
                   <div className="p2-node-head">
@@ -319,12 +354,15 @@ export function Project2Demo() {
                   <dl className="p2-facts">
                     <Fact label="Kubernetes node" value={isConditionTrue(node, 'Ready') ? 'Ready' : 'NotReady'} good={isConditionTrue(node, 'Ready')} />
                     <Fact label="calico-node pod" value={calico ? (isConditionTrue(calico, 'Ready') ? 'Ready' : 'NotReady') : 'Missing'} good={!!calico && isConditionTrue(calico, 'Ready')} />
-                    <Fact label="Injected fault" value={faults === null || faults === undefined ? 'Unknown' : faults > 0 ? `Active (${faults} rule${faults > 1 ? 's' : ''})` : 'None'} good={faults === 0} />
+                    <Fact label="Injected fault" value={faults === null || faults === undefined ? 'Unknown' : faults > 0 ? `Active (${faults} rule${faults > 1 ? 's' : ''})` : path.state === 'broken' ? 'None from this page' : 'None'} good={faults === 0 && path.state !== 'broken'} />
                     <Fact label="Taints" value={taints.length ? taints.map((t: any) => t.key.split('/').pop()).join(', ') : 'None'} good={taints.length === 0} />
+                    <Fact label="Data path" value={path.label} good={path.state === 'working'} />
                   </dl>
 
                   <h3>Operator says</h3>
-                  {opStatus ? (
+                  {opStatus && !operator.running ? (
+                    <p className="p2-muted p2-small">Stale since {operatorSeen}</p>
+                  ) : opStatus ? (
                     <>
                       <dl className="p2-facts">
                         <Fact label="Primary" value={opStatus.primaryHealthy ? 'Healthy' : 'Down'} good={opStatus.primaryHealthy} />
@@ -424,11 +462,12 @@ export function Project2Demo() {
                       {shadow && <span className="p2-tag warn">SHADOW</span>}
                     </div>
                     {(slice.endpoints ?? []).map((ep: any) => {
-                      const ready = ep.conditions?.ready !== false;
+                      const ready = ep.conditions?.ready !== false && pathByNode.get(ep.nodeName)?.state !== 'broken';
+                      const readyLabel = ep.conditions?.ready === false ? 'not ready' : ready ? 'ready' : 'ready, path broken';
                       return (
                         <div key={ep.addresses[0]} className="p2-endpoint">
                           <span className="p2-mono p2-small">{ep.addresses[0]} <span className="p2-muted">{ep.nodeName}</span></span>
-                          <span className={`p2-tag ${ready ? 'good' : 'bad'}`}>{ready ? 'ready' : 'not ready'}</span>
+                          <span className={`p2-tag ${ready ? 'good' : 'bad'}`}>{readyLabel}</span>
                         </div>
                       );
                     })}
