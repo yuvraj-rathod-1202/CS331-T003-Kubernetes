@@ -1,12 +1,11 @@
 # DaemonSet for the CNI health agent.
 #
-# The health agent runs on every node and probes both CNI paths.
-# It needs:
-#   - hostNetwork: true (to access both the primary and backup networks)
-#   - CAP_NET_RAW capability (for ICMP probes)
-#   - Access to the node's routing table and interfaces
-#
-# TODO: Update the image name after building the health agent binary.
+# The agent is a normal pod, not hostNetwork, so its probes cross the real pod data
+# path. It answers on port 9100, probes one peer each round, and writes results to an
+# annotation on its own Node. Build it with:
+#   go build -o bin/healthagent ./cmd/healthagent
+#   docker build -f Dockerfile.healthagent -t cni-health-agent:dev bin
+#   minikube -p k8s-experiments image load cni-health-agent:dev
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -25,85 +24,59 @@ spec:
       labels:
         app: cni-health-agent
         app.kubernetes.io/component: health-agent
-      annotations:
-        # Attach the Flannel backup network so the agent can probe over it
-        k8s.v1.cni.cncf.io/networks: flannel-backup
     spec:
-      hostNetwork: true
-      hostPID: false
       serviceAccountName: cni-health-agent
       tolerations:
-        # Run on all nodes, including control plane
+        # Run on all nodes, including control plane and tainted ones
         - operator: Exists
       containers:
         - name: health-agent
-          # TODO(Deep): Replace with the actual image after building
-          image: ghcr.io/yuvraj-rathod-1202/cni-health-agent:latest
+          image: cni-health-agent:dev
           imagePullPolicy: IfNotPresent
           ports:
             - name: probe
               containerPort: 9100
-              protocol: TCP
-            - name: metrics
-              containerPort: 9101
               protocol: TCP
           env:
             - name: NODE_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-            - name: PROBE_INTERVAL
-              value: "5"
-            - name: PROBE_TIMEOUT
-              value: "2"
-            - name: FAILURE_THRESHOLD
-              value: "3"
           securityContext:
-            capabilities:
-              add:
-                - NET_RAW      # For ICMP probes
-                - NET_ADMIN    # For reading routes and interfaces
+            allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
-            runAsNonRoot: false  # Needed for raw sockets
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities:
+              drop: ["ALL"]
           resources:
             requests:
-              cpu: 50m
-              memory: 64Mi
+              cpu: 20m
+              memory: 32Mi
             limits:
-              cpu: 200m
-              memory: 128Mi
-          livenessProbe:
-            httpGet:
-              path: /healthz
-              port: metrics
-            initialDelaySeconds: 10
-            periodSeconds: 30
-          readinessProbe:
-            httpGet:
-              path: /readyz
-              port: metrics
-            initialDelaySeconds: 5
-            periodSeconds: 10
+              cpu: 100m
+              memory: 64Mi
 ---
-# ServiceAccount for the health agent
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: cni-health-agent
   namespace: kube-system
 ---
-# ClusterRole for the health agent to read nodes and pods
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: cni-health-agent
 rules:
   - apiGroups: [""]
-    resources: ["nodes", "pods"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["apps"]
-    resources: ["daemonsets"]
-    verbs: ["get", "list", "watch"]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["patch"]
+  - apiGroups: ["remediation.cn-operator.yuvraj-rathod-1202.github.io"]
+    resources: ["cniresiliences"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

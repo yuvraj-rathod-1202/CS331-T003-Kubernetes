@@ -3,7 +3,7 @@
 # This configures:
 #   - Calico as the primary CNI (10.244.0.0/16)
 #   - Flannel as the backup CNI (192.168.0.0/16)
-#   - 5-second probe interval with 3 failure threshold
+#   - 2-second probe interval with 3 failure threshold
 #   - Automatic recovery and failover enabled
 #
 # Usage:
@@ -25,8 +25,8 @@ spec:
     daemonSetName: kube-flannel-ds
     healthEndpoint: ""  # Flannel has no built-in health endpoint
     addressSpace: "192.168.0.0/16"
-  probeIntervalSeconds: 5
-  probeTimeoutSeconds: 2
+  probeIntervalSeconds: 2
+  probeTimeoutSeconds: 1
   failureThreshold: 3
   autoRecover: true
   autoFailover: true
