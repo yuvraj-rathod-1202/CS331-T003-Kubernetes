@@ -16,29 +16,30 @@ limitations under the License.
 
 // Package cniresilience implements the top-level controller for Problem 2.
 //
-// This controller reconciles the CNIResilience CR. On each reconcile, it:
-//  1. Reads per-node health status from the health agent
-//  2. For each node where the primary path is down:
-//     a. If autoRecover: calls recoveryManager.RecoverNode.
-//     b. If autoFailover: calls failoverManager.FailoverNode.
-//  3. For nodes that were failed-over but whose primary has recovered:
-//     calls failoverManager.FailbackNode to restore traffic to primary.
-//  4. Updates the CNIResilience CR status with per-node health and counters.
+// On each reconcile it reads the per-node health the agents reported, then:
+//   - primary path broken: fail over (if a backup works) and restart the CNI agent;
+//   - primary path working again: fail back and remove the recovery taint;
+//   - anything unproven: take no action and say so in the status.
 //
-// This is an intentionally thin orchestration layer — the heavy lifting lives
-// in the healthagent, recovery, and failover packages.
+// The heavy lifting lives in the healthagent, recovery and failover packages.
 package cniresilience
 
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	remediationv1alpha1 "CS331-CN-Project-1/operator/api/v1alpha1"
 	"CS331-CN-Project-1/operator/internal/controller/cniresilience/failover"
@@ -49,12 +50,14 @@ import (
 const (
 	requeueInterval = 10 * time.Second
 
-	// phaseHealthy is the overall phase when all nodes have healthy primary paths.
+	// phaseHealthy is the overall phase when all nodes are proven healthy.
 	phaseHealthy = "Healthy"
 	// phaseDegraded is when one or more nodes have a failed primary path.
 	phaseDegraded = "Degraded"
 	// phaseFailedOver is when at least one node has failed over to the backup path.
 	phaseFailedOver = "FailedOver"
+	// phaseUnknown is when some node has no agent reports, so nothing is proven.
+	phaseUnknown = "Unknown"
 
 	activePathPrimary = "primary"
 	activePathBackup  = "backup"
@@ -69,29 +72,29 @@ type CNIResilienceController struct {
 	client.Client
 	Scheme *runtime.Scheme
 
-	healthAgent     *healthagent.Agent
 	recoveryManager *recovery.Manager
 	failoverManager *failover.Manager
+
+	// mu guards the maps below; recovery runs in per-node goroutines.
+	mu sync.Mutex
 
 	// lastRecoveryAttempt tracks when we last tried recovery per node,
 	// to implement the recoveryBackoff cooldown.
 	lastRecoveryAttempt map[string]time.Time
 
-	// bothPathsDownTainted tracks nodes we tainted because both paths were
-	// down, so the taint can be removed once the primary path comes back.
-	bothPathsDownTainted map[string]bool
+	// recoveryPending marks nodes restarted but not yet proven working again.
+	recoveryPending map[string]bool
 }
 
 // NewCNIResilienceController creates the controller and wires sub-components.
 func NewCNIResilienceController(c client.Client, scheme *runtime.Scheme) *CNIResilienceController {
 	return &CNIResilienceController{
-		Client:               c,
-		Scheme:               scheme,
-		healthAgent:          healthagent.NewAgent(c),
-		recoveryManager:      recovery.NewManager(c),
-		failoverManager:      failover.NewManager(c),
-		lastRecoveryAttempt:  make(map[string]time.Time),
-		bothPathsDownTainted: make(map[string]bool),
+		Client:              c,
+		Scheme:              scheme,
+		recoveryManager:     recovery.NewManager(c),
+		failoverManager:     failover.NewManager(c),
+		lastRecoveryAttempt: make(map[string]time.Time),
+		recoveryPending:     make(map[string]bool),
 	}
 }
 
@@ -99,241 +102,242 @@ func NewCNIResilienceController(c client.Client, scheme *runtime.Scheme) *CNIRes
 // +kubebuilder:rbac:groups=remediation.cn-operator.yuvraj-rathod-1202.github.io,resources=cniresiliences/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;delete
+// +kubebuilder:rbac:groups="",resources=pods/status,verbs=get;patch
 // +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is the main control loop for CNI resilience monitoring and response.
-//
-// Sequence:
-//  1. Fetch CNIResilience CR (one per cluster).
-//  2. Configure the health agent from the CR spec (probe interval, timeout, threshold).
-//  3. Run a probe cycle against all peer nodes.
-//  4. For each node that is now unhealthy on the primary path:
-//     a. Failover (create shadow EndpointSlices with backup IPs).
-//     b. Recover (restart CNI agent, taint/untaint node).
-//  5. For each node that is healthy on the primary path but still in failover state:
-//     Failback (restore original EndpointSlices).
-//  6. Update CR status with per-node health summary and global counters.
 func (r *CNIResilienceController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := logf.FromContext(ctx).WithName("cniresilience-controller")
 
-	// 1. Fetch CR.
 	var cr remediationv1alpha1.CNIResilience
 	if err := r.Get(ctx, req.NamespacedName, &cr); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	logger.Info("Reconciling CNIResilience", "name", cr.Name)
+	original := cr.DeepCopy()
 
-	// 2. Configure agent.
-	r.healthAgent.Configure(
-		cr.Spec.ProbeIntervalSeconds,
-		cr.Spec.ProbeTimeoutSeconds,
-		cr.Spec.FailureThreshold,
-	)
-
-	// 3. Probe all nodes.
-	nodeHealthMap, err := r.healthAgent.ProbeAllNodes(ctx)
+	failedOver, err := r.failoverManager.FailedOverNodes(ctx)
 	if err != nil {
-		logger.Error(err, "Health agent probe cycle failed; will retry")
-		// Update last-reconcile time and requeue. Don't fail hard — a transient
-		// API server hiccup should not cascade into a crash loop.
-		return r.updateStatusAndRequeue(ctx, &cr, nil)
+		return ctrl.Result{}, err
+	}
+	if err := r.failoverManager.EnsureGates(ctx, failedOver); err != nil {
+		return ctrl.Result{}, err
 	}
 
-	// 4 & 5. Act on health changes.
-	newNodeStatuses := make([]remediationv1alpha1.NodeCNIStatus, 0, len(nodeHealthMap))
-	failoverCount := cr.Status.FailoverCount
-	recoveryCount := cr.Status.RecoveryCount
-	anyFailedOver := false
+	healthByNode, err := healthagent.ReadNodeHealth(ctx, r.Client, time.Now())
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 
-	for nodeName, health := range nodeHealthMap {
-		nodeStatus := buildNodeStatus(nodeName, health)
+	previous := make(map[string]remediationv1alpha1.NodeCNIStatus, len(cr.Status.NodeStatuses))
+	for _, s := range cr.Status.NodeStatuses {
+		previous[s.NodeName] = s
+	}
 
-		primaryDown := !health.PrimaryHealthy
-		backupUp := health.BackupHealthy
-		isCurrentlyFailedOver := r.failoverManager.IsNodeFailedOver(nodeName)
-
+	statuses := make([]remediationv1alpha1.NodeCNIStatus, 0, len(healthByNode))
+	for nodeName, health := range healthByNode {
+		status := buildNodeStatus(nodeName, health, previous[nodeName])
 		switch {
-		case primaryDown && backupUp:
-			// Primary failed; backup is alive - failover (once) then recover.
-			if isCurrentlyFailedOver {
-				nodeStatus.ActivePath = activePathBackup
-				nodeStatus.Message = "Primary path still down; traffic on backup path"
-				anyFailedOver = true
-			} else {
-				logger.Info("Primary CNI down, backup healthy → failover + recover",
-					"node", nodeName,
-					"primaryConsecutiveFailures", health.PrimaryConsecutiveFailures,
-				)
-				nodeStatus.Message = "Primary path down; autoFailover disabled"
+		case !health.Measured:
+			// Nothing is proven, so nothing is changed.
+			if failedOver[nodeName] {
+				status.ActivePath = activePathBackup
 			}
 
-			if cr.Spec.AutoFailover && !isCurrentlyFailedOver {
-				if event, foErr := r.failoverManager.FailoverNode(ctx, nodeName); foErr != nil {
-					logger.Error(foErr, "Failover failed", "node", nodeName)
-					nodeStatus.Message = fmt.Sprintf("Failover failed: %v", foErr)
-				} else if event.Success {
-					failoverCount++
-					nodeStatus.ActivePath = activePathBackup
-					nodeStatus.Message = "Failed over to backup path"
-					now := metav1.Now()
-					nodeStatus.LastFailoverTime = &now
-					anyFailedOver = true
-				}
-			}
+		case !health.PrimaryHealthy:
+			r.handlePrimaryDown(ctx, &cr, nodeName, health, failedOver, &status)
 
-			if cr.Spec.AutoRecover && r.recoveryAllowed(nodeName) {
-				r.lastRecoveryAttempt[nodeName] = time.Now()
-				// Run recovery asynchronously so the reconcile loop is not blocked
-				// for up to 60 seconds waiting for the CNI pod to restart.
-				go func(nn string, spec remediationv1alpha1.CNIResilienceSpec) {
-					recCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-					defer cancel()
-					if action, recErr := r.recoveryManager.RecoverNode(
-						recCtx, nn,
-						spec.PrimaryCNI.Namespace,
-						spec.PrimaryCNI.DaemonSetName,
-					); recErr != nil {
-						logger.Error(recErr, "CNI recovery failed", "node", nn)
-					} else if action.Success {
-						logger.Info("CNI recovery succeeded", "node", nn, "duration", action.Duration)
-					}
-				}(nodeName, cr.Spec)
-				recoveryCount++
+		case !health.Working:
+			// Not proven broken, but not proven working either: keep what is in place.
+			if failedOver[nodeName] {
+				status.ActivePath = activePathBackup
 			}
-
-		case !primaryDown && isCurrentlyFailedOver:
-			// Primary has recovered; fail back to primary.
-			logger.Info("Primary CNI recovered → failback", "node", nodeName)
-
-			r.clearBothPathsDownTaint(ctx, nodeName)
-			if event, fbErr := r.failoverManager.FailbackNode(ctx, nodeName); fbErr != nil {
-				logger.Error(fbErr, "Failback failed", "node", nodeName)
-				nodeStatus.ActivePath = activePathBackup
-				nodeStatus.Message = fmt.Sprintf("Failback failed: %v", fbErr)
-				anyFailedOver = true // still in failover state
-			} else if event.Success {
-				nodeStatus.ActivePath = activePathPrimary
-				nodeStatus.Message = "Recovered; traffic restored to primary path"
-				now := metav1.Now()
-				nodeStatus.LastFailoverTime = &now
+			if status.Message == "" {
+				status.Message = "A peer's probe is failing; this node is not blamed"
 			}
-
-		case primaryDown && !backupUp:
-			// Both paths down - catastrophic. Taint node and alert.
-			logger.Error(fmt.Errorf("both CNI paths down"), "Catastrophic network failure",
-				"node", nodeName)
-			nodeStatus.Message = "BOTH primary and backup CNI paths are down"
-			if isCurrentlyFailedOver {
-				nodeStatus.ActivePath = activePathBackup
-			}
-			if taintErr := r.recoveryManager.TaintNode(ctx, nodeName); taintErr != nil {
-				logger.Error(taintErr, "Failed to taint node with both paths down", "node", nodeName)
-			} else {
-				r.bothPathsDownTainted[nodeName] = true
-			}
-			anyFailedOver = true
 
 		default:
-			// Primary healthy and not failed over.
-			r.clearBothPathsDownTaint(ctx, nodeName)
-			nodeStatus.ActivePath = activePathPrimary
-			if backupUp {
-				nodeStatus.Message = "All paths healthy"
-			} else {
-				nodeStatus.Message = "Primary path healthy; backup path down"
+			if failedOver[nodeName] {
+				logger.Info("Primary path is back, failing back", "node", nodeName)
+				if err := r.failoverManager.FailbackNode(ctx, nodeName); err != nil {
+					status.ActivePath = activePathBackup
+					status.Message = fmt.Sprintf("Failback failed: %v", err)
+					statuses = append(statuses, status)
+					continue
+				}
+				delete(failedOver, nodeName)
+			}
+			if err := r.recoveryManager.UntaintNode(ctx, nodeName); err != nil {
+				logger.Error(err, "Failed to remove recovery taint", "node", nodeName)
+			}
+			if r.finishRecovery(nodeName) {
+				cr.Status.RecoveryCount++
+				now := metav1.Now()
+				status.LastRecoveryTime = &now
+			}
+			if status.Message == "" {
+				status.Message = "Primary path working"
 			}
 		}
-
-		newNodeStatuses = append(newNodeStatuses, nodeStatus)
+		statuses = append(statuses, status)
 	}
 
-	// 6. Update status.
-	cr.Status.NodeStatuses = newNodeStatuses
-	cr.Status.FailoverCount = failoverCount
-	cr.Status.RecoveryCount = recoveryCount
-	cr.Status.FailoverActive = anyFailedOver
-	cr.Status.Phase = computePhase(anyFailedOver, newNodeStatuses)
-
-	return r.updateStatusAndRequeue(ctx, &cr, nil)
+	cr.Status.NodeStatuses = statuses
+	cr.Status.FailoverActive = len(failedOver) > 0
+	cr.Status.Phase = computePhase(cr.Status.FailoverActive, healthByNode)
+	return r.updateStatusAndRequeue(ctx, original, &cr)
 }
 
-// SetupWithManager sets up the controller with the Manager.
+// handlePrimaryDown taints the node, fails over if a backup works, and restarts the CNI agent.
+func (r *CNIResilienceController) handlePrimaryDown(
+	ctx context.Context,
+	cr *remediationv1alpha1.CNIResilience,
+	nodeName string,
+	health *healthagent.NodeHealthStatus,
+	failedOver map[string]bool,
+	status *remediationv1alpha1.NodeCNIStatus,
+) {
+	logger := logf.FromContext(ctx).WithName("cniresilience-controller")
+	backupWorks := health.BackupMeasured && health.BackupHealthy
+
+	switch {
+	case failedOver[nodeName]:
+		status.ActivePath = activePathBackup
+		status.Message = "Primary path down; traffic on backup path"
+	case !health.BackupMeasured:
+		status.Message = "Primary path down; no backup path exists"
+	case !backupWorks:
+		status.Message = "Primary and backup paths are both down"
+	case !cr.Spec.AutoFailover:
+		status.Message = "Primary path down; autoFailover disabled"
+	default:
+		logger.Info("Primary path down, backup works: failing over", "node", nodeName)
+		if _, err := r.failoverManager.FailoverNode(ctx, nodeName); err != nil {
+			logger.Error(err, "Failover failed", "node", nodeName)
+			status.Message = fmt.Sprintf("Failover failed: %v", err)
+		} else {
+			failedOver[nodeName] = true
+			cr.Status.FailoverCount++
+			status.ActivePath = activePathBackup
+			status.Message = "Failed over to backup path"
+			now := metav1.Now()
+			status.LastFailoverTime = &now
+		}
+	}
+
+	if cr.Spec.AutoRecover {
+		// The taint holds for as long as the node is down, cooldown or not.
+		if err := r.recoveryManager.TaintNode(ctx, nodeName); err != nil {
+			logger.Error(err, "Failed to taint node", "node", nodeName)
+		}
+	}
+	if cr.Spec.AutoRecover && r.claimRecovery(nodeName) {
+		// Runs on its own so the loop is not blocked while the CNI pod restarts.
+		go func(spec remediationv1alpha1.CNIResilienceSpec) {
+			recCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			defer cancel()
+			if _, err := r.recoveryManager.RecoverNode(recCtx, nodeName, spec.PrimaryCNI.Namespace, spec.PrimaryCNI.DaemonSetName); err != nil {
+				logger.Error(err, "CNI recovery failed", "node", nodeName)
+			}
+		}(cr.Spec)
+	}
+}
+
+// claimRecovery returns true if a recovery attempt on this node may start now.
+func (r *CNIResilienceController) claimRecovery(nodeName string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if last, ok := r.lastRecoveryAttempt[nodeName]; ok && time.Since(last) < recoveryBackoff {
+		return false
+	}
+	r.lastRecoveryAttempt[nodeName] = time.Now()
+	r.recoveryPending[nodeName] = true
+	return true
+}
+
+// finishRecovery reports whether a restarted node has now been proven working.
+func (r *CNIResilienceController) finishRecovery(nodeName string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	pending := r.recoveryPending[nodeName]
+	delete(r.recoveryPending, nodeName)
+	return pending
+}
+
+// SetupWithManager sets up the controller with the Manager. It reconciles on spec
+// changes and agent reports. Status writes must not trigger it, or it would spin.
 func (r *CNIResilienceController) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&remediationv1alpha1.CNIResilience{}).
+		For(&remediationv1alpha1.CNIResilience{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		Watches(&corev1.Node{}, handler.EnqueueRequestsFromMapFunc(r.allCRs),
+			builder.WithPredicates(predicate.AnnotationChangedPredicate{})).
 		Named("cniresilience").
 		Complete(r)
 }
 
+func (r *CNIResilienceController) allCRs(ctx context.Context, _ client.Object) []reconcile.Request {
+	var list remediationv1alpha1.CNIResilienceList
+	if err := r.List(ctx, &list); err != nil {
+		return nil
+	}
+	requests := make([]reconcile.Request, 0, len(list.Items))
+	for i := range list.Items {
+		requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
+	}
+	return requests
+}
+
 // Helpers
 
-// updateStatusAndRequeue updates the CR status and returns a requeue result.
+// updateStatusAndRequeue patches the CR status and returns a requeue result. A patch
+// is used because the cached copy can lag our own last write, and an Update would
+// then fail with a conflict. This controller is the only writer of status.
 func (r *CNIResilienceController) updateStatusAndRequeue(
 	ctx context.Context,
-	cr *remediationv1alpha1.CNIResilience,
-	statusErr error,
+	original, cr *remediationv1alpha1.CNIResilience,
 ) (ctrl.Result, error) {
 	now := metav1.Now()
 	cr.Status.LastReconcileTime = &now
-
-	if err := r.Status().Update(ctx, cr); err != nil {
-		logf.FromContext(ctx).Error(err, "Failed to update CNIResilience status")
+	if err := r.Status().Patch(ctx, cr, client.MergeFrom(original)); err != nil {
 		return ctrl.Result{}, err
-	}
-
-	if statusErr != nil {
-		return ctrl.Result{RequeueAfter: requeueInterval}, statusErr
 	}
 	return ctrl.Result{RequeueAfter: requeueInterval}, nil
 }
 
-// clearBothPathsDownTaint removes the taint applied when both paths were down,
-// once the primary path is healthy again.
-func (r *CNIResilienceController) clearBothPathsDownTaint(ctx context.Context, nodeName string) {
-	if !r.bothPathsDownTainted[nodeName] {
-		return
-	}
-	if err := r.recoveryManager.UntaintNode(ctx, nodeName); err != nil {
-		logf.FromContext(ctx).Error(err, "Failed to remove both-paths-down taint", "node", nodeName)
-		return
-	}
-	delete(r.bothPathsDownTainted, nodeName)
-}
-
-// recoveryAllowed returns true if we have not attempted recovery on this node
-// within the recoveryBackoff period.
-func (r *CNIResilienceController) recoveryAllowed(nodeName string) bool {
-	last, ok := r.lastRecoveryAttempt[nodeName]
-	if !ok {
-		return true
-	}
-	return time.Since(last) >= recoveryBackoff
-}
-
-// buildNodeStatus converts the health-agent's NodeHealthStatus to the CRD status type.
-func buildNodeStatus(nodeName string, h *healthagent.NodeHealthStatus) remediationv1alpha1.NodeCNIStatus {
+// buildNodeStatus converts agent health to the CRD status type. A node with no
+// reports is not called healthy; times carry over from the previous status.
+func buildNodeStatus(
+	nodeName string,
+	h *healthagent.NodeHealthStatus,
+	previous remediationv1alpha1.NodeCNIStatus,
+) remediationv1alpha1.NodeCNIStatus {
 	now := metav1.Now()
 	return remediationv1alpha1.NodeCNIStatus{
-		NodeName:                   nodeName,
-		PrimaryHealthy:             h.PrimaryHealthy,
-		BackupHealthy:              h.BackupHealthy,
-		ActivePath:                 activePathPrimary,
-		PrimaryConsecutiveFailures: h.PrimaryConsecutiveFailures,
-		BackupConsecutiveFailures:  h.BackupConsecutiveFailures,
-		LastProbeTime:              &now,
+		NodeName:         nodeName,
+		PrimaryHealthy:   h.Measured && h.PrimaryHealthy,
+		BackupHealthy:    h.BackupMeasured && h.BackupHealthy,
+		ActivePath:       activePathPrimary,
+		LastProbeTime:    &now,
+		LastFailoverTime: previous.LastFailoverTime,
+		LastRecoveryTime: previous.LastRecoveryTime,
+		Message:          h.Note,
 	}
 }
 
-// computePhase derives the cluster-level phase string from per-node statuses.
-func computePhase(anyFailedOver bool, statuses []remediationv1alpha1.NodeCNIStatus) string {
+// computePhase derives the cluster-level phase. Healthy needs proof: every node's
+// probes must work. Without this, a failure too wide to pin on one node read as Healthy.
+func computePhase(anyFailedOver bool, health map[string]*healthagent.NodeHealthStatus) string {
 	if anyFailedOver {
 		return phaseFailedOver
 	}
-	for _, s := range statuses {
-		if !s.PrimaryHealthy {
-			return phaseDegraded
+	phase := phaseHealthy
+	for _, h := range health {
+		if !h.Measured || h.Ambiguous {
+			return phaseUnknown
+		}
+		if !h.Working {
+			phase = phaseDegraded
 		}
 	}
-	return phaseHealthy
+	return phase
 }
