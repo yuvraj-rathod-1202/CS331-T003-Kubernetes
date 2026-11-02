@@ -1,11 +1,14 @@
-# Multus NetworkAttachmentDefinition for the Flannel backup CNI.
+# Multus NetworkAttachmentDefinition for the Flannel backup network.
 #
-# This tells Multus how to create the secondary interface (net1) in each pod.
-# Pods annotated with k8s.v1.cni.cncf.io/networks: flannel-backup will get
-# a second interface connected to the Flannel VXLAN overlay.
+# Pods annotated with k8s.v1.cni.cncf.io/networks: kube-system/flannel-backup get a
+# second interface, net1, on the Flannel VXLAN overlay (10.244.0.0/16, from the node
+# podCIDRs). Their main interface, eth0, stays on Calico (172.16.0.0/16).
 #
-# TODO: Adjust the config after installing Flannel on the cluster.
-# The "delegate" section should match Flannel's actual CNI config.
+# Needs flanneld running on every node (flannel-backup.yaml): the flannel plugin
+# reads this node's subnet from /run/flannel/subnet.env.
+#
+# isDefaultGateway false: net1 only gets a route for 10.244.0.0/16. The default
+# route stays on eth0, so normal traffic keeps using Calico.
 apiVersion: k8s.cni.cncf.io/v1
 kind: NetworkAttachmentDefinition
 metadata:
@@ -16,18 +19,9 @@ spec:
     {
       "cniVersion": "0.3.1",
       "name": "flannel-backup",
-      "type": "bridge",
-      "bridge": "cni-flannel1",
-      "isDefaultGateway": false,
-      "ipMasq": false,
-      "hairpinMode": true,
-      "ipam": {
-        "type": "host-local",
-        "subnet": "192.168.0.0/16",
-        "rangeStart": "192.168.1.10",
-        "rangeEnd": "192.168.1.200",
-        "routes": [
-          { "dst": "192.168.0.0/16" }
-        ]
+      "type": "flannel",
+      "delegate": {
+        "isDefaultGateway": false,
+        "hairpinMode": true
       }
     }

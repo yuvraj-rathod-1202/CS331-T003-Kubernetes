@@ -105,7 +105,8 @@ func (m *Manager) EnsureGates(ctx context.Context, failedOver map[string]bool) e
 
 // FailoverNode moves traffic for the node's pods to their backup IPs. Only pods with
 // a backup IP are touched: a pod without one has nowhere to go, so it keeps its place.
-// It returns how many pods moved.
+// It returns how many shadow slices it wrote. Zero means no Service sends traffic to
+// these pods, so nothing moved and no gate is touched: the node is not failed over.
 func (m *Manager) FailoverNode(ctx context.Context, nodeName string) (int, error) {
 	logger := logf.FromContext(ctx).WithName("failover").WithValues("node", nodeName)
 
@@ -127,17 +128,24 @@ func (m *Manager) FailoverNode(ctx context.Context, nodeName string) (int, error
 	if err := m.client.List(ctx, &slicesAll); err != nil {
 		return 0, fmt.Errorf("list EndpointSlices: %w", err)
 	}
+	written := 0
 	for i := range slicesAll.Items {
 		slice := &slicesAll.Items[i]
 		if slice.Labels[shadowLabelKey] == shadowLabelVal {
 			continue
 		}
-		if err := m.applyShadow(ctx, slice, nodeName, backupIPs); err != nil {
-			return 0, err
+		wrote, err := m.applyShadow(ctx, slice, nodeName, backupIPs)
+		if err != nil {
+			return written, err
+		}
+		if wrote {
+			written++
 		}
 	}
+	if written == 0 {
+		return 0, nil
+	}
 
-	moved := 0
 	for i := range pods {
 		pod := &pods[i]
 		if _, ok := backupIPs[pod.Status.PodIP]; !ok {
@@ -148,11 +156,10 @@ func (m *Manager) FailoverNode(ctx context.Context, nodeName string) (int, error
 			continue
 		}
 		if err := m.setGate(ctx, pod, corev1.ConditionFalse); err != nil {
-			return moved, err
+			return written, err
 		}
-		moved++
 	}
-	return moved, nil
+	return written, nil
 }
 
 // FailbackNode undoes FailoverNode for one node. Gates go back on before the shadows
@@ -170,6 +177,31 @@ func (m *Manager) FailbackNode(ctx context.Context, nodeName string) error {
 		}
 	}
 
+	return m.deleteShadows(ctx, nodeName)
+}
+
+// IsolateNode takes the node's gated pods out of their Services: the gate goes off
+// and the node's shadow slices are removed. It is for a node that neither path
+// reaches, so traffic goes only to pods elsewhere instead of to a dead address.
+// FailbackNode or FailoverNode brings the pods back. It returns how many pods are out.
+func (m *Manager) IsolateNode(ctx context.Context, nodeName string) (int, error) {
+	pods, err := m.podsOnNode(ctx, nodeName)
+	if err != nil {
+		return 0, err
+	}
+	isolated := 0
+	for i := range pods {
+		if hasGate(&pods[i]) {
+			if err := m.setGate(ctx, &pods[i], corev1.ConditionFalse); err != nil {
+				return isolated, err
+			}
+			isolated++
+		}
+	}
+	return isolated, m.deleteShadows(ctx, nodeName)
+}
+
+func (m *Manager) deleteShadows(ctx context.Context, nodeName string) error {
 	var shadows discoveryv1.EndpointSliceList
 	if err := m.client.List(ctx, &shadows, client.MatchingLabels{
 		shadowLabelKey: shadowLabelVal, shadowNodeLabelKey: nodeName,
@@ -192,9 +224,10 @@ func (m *Manager) podsOnNode(ctx context.Context, nodeName string) ([]corev1.Pod
 	return pods.Items, nil
 }
 
-// applyShadow creates or updates this node's shadow of one slice. Each node has its
-// own shadow, so two broken nodes in one slice cannot overwrite each other.
-func (m *Manager) applyShadow(ctx context.Context, original *discoveryv1.EndpointSlice, nodeName string, backupIPs map[string]string) error {
+// applyShadow creates or updates this node's shadow of one slice, and reports whether
+// the slice had pods to shadow. Each node has its own shadow, so two broken nodes in
+// one slice cannot overwrite each other.
+func (m *Manager) applyShadow(ctx context.Context, original *discoveryv1.EndpointSlice, nodeName string, backupIPs map[string]string) (bool, error) {
 	var endpoints []discoveryv1.Endpoint
 	for _, ep := range original.Endpoints {
 		if ep.NodeName == nil || *ep.NodeName != nodeName {
@@ -216,7 +249,7 @@ func (m *Manager) applyShadow(ctx context.Context, original *discoveryv1.Endpoin
 		}
 	}
 	if len(endpoints) == 0 {
-		return nil
+		return false, nil
 	}
 
 	shadow := &discoveryv1.EndpointSlice{
@@ -239,16 +272,16 @@ func (m *Manager) applyShadow(ctx context.Context, original *discoveryv1.Endpoin
 	if apierrors.IsAlreadyExists(err) {
 		existing := &discoveryv1.EndpointSlice{}
 		if err := m.client.Get(ctx, client.ObjectKeyFromObject(shadow), existing); err != nil {
-			return fmt.Errorf("get shadow slice %s: %w", shadow.Name, err)
+			return false, fmt.Errorf("get shadow slice %s: %w", shadow.Name, err)
 		}
 		existing.Endpoints = endpoints
 		existing.Ports = original.Ports
 		err = m.client.Update(ctx, existing)
 	}
 	if err != nil {
-		return fmt.Errorf("apply shadow slice %s: %w", shadow.Name, err)
+		return false, fmt.Errorf("apply shadow slice %s: %w", shadow.Name, err)
 	}
-	return nil
+	return true, nil
 }
 
 func (m *Manager) setGate(ctx context.Context, pod *corev1.Pod, status corev1.ConditionStatus) error {

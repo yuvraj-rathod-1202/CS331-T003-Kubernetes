@@ -61,9 +61,12 @@ const (
 
 	activePathPrimary = "primary"
 	activePathBackup  = "backup"
+	// activePathNone: neither path reaches the node, so its pods are out of the Service.
+	activePathNone = "none"
 
-	// Minimum time between recovery attempts for the same node, to avoid tight
-	// restart loops that could OOM-kill the CNI agent on a broken node.
+	// Minimum time between recovery attempts for the same node. Restarts already happen
+	// once per fault episode; this also limits a node that keeps flapping between
+	// working and broken, since each flap starts a new episode.
 	recoveryBackoff = 2 * time.Minute
 )
 
@@ -159,14 +162,18 @@ func (r *CNIResilienceController) Reconcile(ctx context.Context, req ctrl.Reques
 		default:
 			if failedOver[nodeName] {
 				logger.Info("Primary path is back, failing back", "node", nodeName)
-				if err := r.failoverManager.FailbackNode(ctx, nodeName); err != nil {
-					status.ActivePath = activePathBackup
-					status.Message = fmt.Sprintf("Failback failed: %v", err)
-					statuses = append(statuses, status)
-					continue
-				}
-				delete(failedOver, nodeName)
 			}
+			// Also run when not failed over: an isolated node has no shadow but its
+			// gates are off, and they must come back on.
+			if err := r.failoverManager.FailbackNode(ctx, nodeName); err != nil {
+				if failedOver[nodeName] {
+					status.ActivePath = activePathBackup
+				}
+				status.Message = fmt.Sprintf("Failback failed: %v", err)
+				statuses = append(statuses, status)
+				continue
+			}
+			delete(failedOver, nodeName)
 			if err := r.recoveryManager.UntaintNode(ctx, nodeName); err != nil {
 				logger.Error(err, "Failed to remove recovery taint", "node", nodeName)
 			}
@@ -201,21 +208,45 @@ func (r *CNIResilienceController) handlePrimaryDown(
 	backupWorks := health.BackupMeasured && health.BackupHealthy
 
 	switch {
-	case failedOver[nodeName]:
+	case failedOver[nodeName] && backupWorks:
 		status.ActivePath = activePathBackup
 		status.Message = "Primary path down; traffic on backup path"
-	case !health.BackupMeasured:
-		status.Message = "Primary path down; no backup path exists"
-	case !backupWorks:
-		status.Message = "Primary and backup paths are both down"
 	case !cr.Spec.AutoFailover:
+		if failedOver[nodeName] {
+			status.ActivePath = activePathBackup
+		}
 		status.Message = "Primary path down; autoFailover disabled"
+	case !backupWorks:
+		// Neither path works: a shadow would send traffic to a dead backup address.
+		status.Message = "Primary and backup paths are both down"
+		if !health.BackupMeasured {
+			status.Message = "Primary path down; no backup path exists"
+		}
+		isolated, err := r.failoverManager.IsolateNode(ctx, nodeName)
+		if err != nil {
+			logger.Error(err, "Isolating node failed", "node", nodeName)
+			status.Message += fmt.Sprintf("; taking its pods out of the Service failed: %v", err)
+			if failedOver[nodeName] {
+				status.ActivePath = activePathBackup
+			}
+		} else {
+			delete(failedOver, nodeName)
+			status.ActivePath = activePathNone
+			if isolated > 0 {
+				status.Message += fmt.Sprintf("; %d pod(s) taken out of the Service", isolated)
+			}
+		}
 	default:
-		logger.Info("Primary path down, backup works: failing over", "node", nodeName)
-		if _, err := r.failoverManager.FailoverNode(ctx, nodeName); err != nil {
+		shadows, err := r.failoverManager.FailoverNode(ctx, nodeName)
+		switch {
+		case err != nil:
 			logger.Error(err, "Failover failed", "node", nodeName)
 			status.Message = fmt.Sprintf("Failover failed: %v", err)
-		} else {
+		case shadows == 0:
+			// Counting this would claim a failover that moved nothing.
+			status.Message = "Primary path down; no Service sends traffic to pods on this node, so nothing to move"
+		default:
+			logger.Info("Primary path down, backup works: failed over", "node", nodeName)
 			failedOver[nodeName] = true
 			cr.Status.FailoverCount++
 			status.ActivePath = activePathBackup
@@ -225,13 +256,27 @@ func (r *CNIResilienceController) handlePrimaryDown(
 		}
 	}
 
-	if cr.Spec.AutoRecover {
-		// The taint holds for as long as the node is down, cooldown or not.
-		if err := r.recoveryManager.TaintNode(ctx, nodeName); err != nil {
-			logger.Error(err, "Failed to taint node", "node", nodeName)
-		}
+	if !cr.Spec.AutoRecover {
+		return
 	}
-	if cr.Spec.AutoRecover && r.claimRecovery(nodeName) {
+	// The taint holds for as long as the node is down, and it is removed only once the
+	// node is proven working. So it marks one fault episode, and being in the cluster it
+	// survives an operator restart. The CNI agent is restarted once per episode: only in
+	// the round that adds the taint. In the lab a restart never fixed a data-path fault,
+	// and each restart briefly takes the node's network down (NetworkUnavailable).
+	added, err := r.recoveryManager.TaintNode(ctx, nodeName)
+	if err != nil {
+		// Try again next round; no restart without the taint that marks the episode.
+		logger.Error(err, "Failed to taint node", "node", nodeName)
+		return
+	}
+	if !added {
+		if status.Message != "" {
+			status.Message += "; CNI agent already restarted once for this fault"
+		}
+		return
+	}
+	if r.claimRecovery(nodeName) {
 		// Runs on its own so the loop is not blocked while the CNI pod restarts.
 		go func(spec remediationv1alpha1.CNIResilienceSpec) {
 			recCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)

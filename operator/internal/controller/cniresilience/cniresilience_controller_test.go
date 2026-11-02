@@ -70,7 +70,10 @@ func TestRepairNeedsProofNotJustNoVerdict(t *testing.T) {
 	taint := corev1.Taint{Key: "cniresilience.cn-operator/recovering", Effect: corev1.TaintEffectNoSchedule}
 	c := fake.NewClientBuilder().WithScheme(scheme).
 		WithObjects(cr, node("a", "b", false), node("b", "c", true, taint), node("c", "a", true)).
-		WithStatusSubresource(cr).Build()
+		WithStatusSubresource(cr).
+		WithIndex(&corev1.Pod{}, "spec.nodeName", func(o client.Object) []string {
+			return []string{o.(*corev1.Pod).Spec.NodeName}
+		}).Build()
 	r := NewCNIResilienceController(c, scheme)
 	r.recoveryPending["b"] = true
 	ctx := context.Background()
@@ -114,5 +117,111 @@ func TestHealthyNeedsProof(t *testing.T) {
 		if got := computePhase(false, tc.health); got != tc.want {
 			t.Fatalf("%+v: got %s, want %s", tc.health, got, tc.want)
 		}
+	}
+}
+
+// The lab showed calico-node being deleted every 2 minutes for as long as a fault
+// lasted, and an operator restart cleared the in-memory cooldown. The CNI agent must
+// be restarted once per fault episode, even across an operator restart, and again
+// only after the node has been proven working and then broke again.
+func TestRestartOncePerFault(t *testing.T) {
+	const calicoNamespace = "kube-system"
+	scheme := runtime.NewScheme()
+	for _, add := range []func(*runtime.Scheme) error{clientgoscheme.AddToScheme, remediationv1alpha1.AddToScheme} {
+		if err := add(scheme); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cr := &remediationv1alpha1.CNIResilience{
+		ObjectMeta: metav1.ObjectMeta{Name: "r"},
+		Spec: remediationv1alpha1.CNIResilienceSpec{
+			PrimaryCNI:  remediationv1alpha1.CNIConfig{Namespace: calicoNamespace, DaemonSetName: "calico-node"},
+			AutoRecover: true,
+		},
+	}
+	nodes := []client.Object{cr}
+	for _, name := range []string{"a", "b", "c"} {
+		nodes = append(nodes, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name}})
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodes...).WithStatusSubresource(cr).
+		WithIndex(&corev1.Pod{}, "spec.nodeName", func(o client.Object) []string {
+			return []string{o.(*corev1.Pod).Spec.NodeName}
+		}).Build()
+	ctx := context.Background()
+
+	// b broken: every probe into and out of b fails, a and c reach each other.
+	reports := func(bWorks bool) {
+		t.Helper()
+		peers := map[string]string{
+			"a": fmt.Sprintf(`"b":{"primary":%t},"c":{"primary":true}`, bWorks),
+			"b": fmt.Sprintf(`"a":{"primary":%t},"c":{"primary":%t}`, bWorks, bWorks),
+			"c": fmt.Sprintf(`"a":{"primary":true},"b":{"primary":%t}`, bWorks),
+		}
+		for name, p := range peers {
+			n := &corev1.Node{}
+			if err := c.Get(ctx, client.ObjectKey{Name: name}, n); err != nil {
+				t.Fatal(err)
+			}
+			n.Annotations = map[string]string{healthagent.ReportAnnotation: fmt.Sprintf(`{"time":%d,"peers":{%s}}`, time.Now().Unix(), p)}
+			if err := c.Update(ctx, n); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	addCalico := func(name string) {
+		t.Helper()
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: calicoNamespace, Labels: map[string]string{"k8s-app": "calico-node"}},
+			Spec:       corev1.PodSpec{NodeName: "b"},
+		}
+		if err := c.Create(ctx, pod); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// reconcile runs one round on a fresh controller, as after an operator restart,
+	// and reports whether the calico pod on b was deleted.
+	reconcile := func(pod string) bool {
+		t.Helper()
+		r := NewCNIResilienceController(c, scheme)
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKey{Name: "r"}}); err != nil {
+			t.Fatal(err)
+		}
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) {
+			if err := c.Get(ctx, client.ObjectKey{Namespace: calicoNamespace, Name: pod}, &corev1.Pod{}); err != nil {
+				return true
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		return false
+	}
+	tainted := func() bool {
+		n := &corev1.Node{}
+		if err := c.Get(ctx, client.ObjectKey{Name: "b"}, n); err != nil {
+			t.Fatal(err)
+		}
+		return len(n.Spec.Taints) == 1
+	}
+
+	reports(false)
+	health, err := healthagent.ReadNodeHealth(ctx, c, time.Now())
+	if err != nil || health["b"].PrimaryHealthy || !health["a"].PrimaryHealthy || !health["c"].PrimaryHealthy {
+		t.Fatalf("test setup: b must be the only broken node, got a=%+v b=%+v c=%+v %v", *health["a"], *health["b"], *health["c"], err)
+	}
+	addCalico("calico-1")
+	if !reconcile("calico-1") || !tainted() {
+		t.Fatal("first round of a fault must taint b and restart its calico pod")
+	}
+	addCalico("calico-2")
+	if reconcile("calico-2") || !tainted() {
+		t.Fatal("same fault, operator restarted: calico must not be restarted again")
+	}
+	reports(true)
+	if reconcile("calico-2") || tainted() {
+		t.Fatal("proven working: taint must go, no restart")
+	}
+	reports(false)
+	if !reconcile("calico-2") || !tainted() {
+		t.Fatal("a new fault must get one restart")
 	}
 }

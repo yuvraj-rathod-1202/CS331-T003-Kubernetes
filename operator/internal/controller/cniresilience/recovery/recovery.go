@@ -115,20 +115,21 @@ func (m *Manager) RecoverNode(ctx context.Context, nodeName string, cniNamespace
 	return action, nil
 }
 
-// TaintNode applies the recovery NoSchedule taint to a node (idempotent).
-func (m *Manager) TaintNode(ctx context.Context, nodeName string) error {
+// TaintNode applies the recovery NoSchedule taint to a node (idempotent). It reports
+// whether this call added the taint, which marks the start of a new fault episode.
+func (m *Manager) TaintNode(ctx context.Context, nodeName string) (bool, error) {
 	logger := logf.FromContext(ctx).WithName("recovery")
 
 	node := &corev1.Node{}
 	if err := m.client.Get(ctx, client.ObjectKey{Name: nodeName}, node); err != nil {
-		return fmt.Errorf("get node: %w", err)
+		return false, fmt.Errorf("get node: %w", err)
 	}
 
 	// Check if taint already exists to remain idempotent.
 	for _, t := range node.Spec.Taints {
 		if t.Key == recoveryTaintKey && t.Effect == recoveryTaintEffect {
 			logger.V(1).Info("Recovery taint already present", "node", nodeName)
-			return nil
+			return false, nil
 		}
 	}
 
@@ -138,11 +139,11 @@ func (m *Manager) TaintNode(ctx context.Context, nodeName string) error {
 	})
 
 	if err := m.client.Update(ctx, node); err != nil {
-		return fmt.Errorf("update node taints: %w", err)
+		return false, fmt.Errorf("update node taints: %w", err)
 	}
 
 	logger.Info("Applied recovery taint", "node", nodeName)
-	return nil
+	return true, nil
 }
 
 // UntaintNode removes the recovery taint from a node (idempotent).

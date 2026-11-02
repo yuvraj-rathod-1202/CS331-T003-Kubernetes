@@ -27,11 +27,30 @@ spec:
       annotations:
         k8s.v1.cni.cncf.io/networks: kube-system/flannel-backup
     spec:
+      # The operator turns this condition off when the pod's node loses its primary
+      # path, so the Service stops using the primary IP and uses the shadow slice with
+      # the net1 (backup) IP instead. The pod is Ready only while the operator has set
+      # it True, so the operator must be running for these pods to receive traffic.
+      readinessGates:
+      - conditionType: cniresilience.cn-operator/primary-path
+      # Workers only: traffic-client runs on the control-plane node, so every request
+      # crosses between nodes and a node fault cannot hide behind a local replica.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: DoesNotExist
       # One replica per node, so a fault on one node never hides behind two pods there.
       topologySpreadConstraints:
       - maxSkew: 1
         topologyKey: kubernetes.io/hostname
         whenUnsatisfiable: DoNotSchedule
+        # Count only pods of the same version, so old pods leaving during a rollout
+        # cannot push both new replicas onto one node.
+        matchLabelKeys:
+        - pod-template-hash
         labelSelector:
           matchLabels:
             app: resilience-target

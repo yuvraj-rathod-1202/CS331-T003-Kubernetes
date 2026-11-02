@@ -24,6 +24,10 @@ spec:
       labels:
         app: cni-health-agent
         app.kubernetes.io/component: health-agent
+      annotations:
+        # Second interface net1 on the Flannel backup network, so the agents measure
+        # the backup path too (deploy/multus-nad.yaml).
+        k8s.v1.cni.cncf.io/networks: kube-system/flannel-backup
     spec:
       serviceAccountName: cni-health-agent
       tolerations:

@@ -117,7 +117,8 @@ type NodeCNIStatus struct {
 	// BackupHealthy is true if the backup CNI path is working.
 	BackupHealthy bool `json:"backupHealthy"`
 
-	// ActivePath is which path is currently carrying traffic: "primary" or "backup".
+	// ActivePath is which path is currently carrying traffic: "primary", "backup", or
+	// "none" when neither reaches the node and its pods are out of the Service.
 	ActivePath string `json:"activePath"`
 
 	// PrimaryConsecutiveFailures is the current failure streak for the primary path.
