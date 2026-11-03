@@ -1,4 +1,4 @@
-# Problem 1 decision log
+# Project 2 (IPAM): decision log
 
 Decisions made while building the buddy IPAM, with the reason and what would
 change them.

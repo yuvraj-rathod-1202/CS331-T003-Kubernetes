@@ -1,4 +1,4 @@
-# IPAM evaluation (Problem 1)
+# IPAM evaluation (Project 2)
 
 How the buddy controller compares with the usual alternatives. Regenerate with
 

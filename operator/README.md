@@ -1,203 +1,158 @@
-# Network Remediation Operator
+# Operator (Project 1 and Project 2)
 
-A custom Kubernetes operator that detects and auto-heals networking failures in a Kubernetes cluster. The operator monitors CNI plugin health, CoreDNS performance, NetworkPolicy enforcement, and pod-to-pod connectivity.
+One Go/Kubebuilder manager binary holds the controllers of **two separate projects**.
+They share the binary and the API group, nothing else: different custom resources,
+different controllers, different cluster setups.
+
+| Controller | Project | Custom resources | What it does | Docs |
+|---|---|---|---|---|
+| `networkremediation` | 1 | `NetworkRemediation` | Detects and repairs CNI, CoreDNS, NetworkPolicy and pod-to-pod failures (Check → Evaluate → Remediate modules) | [`docs/architecture.md`](docs/architecture.md) |
+| `ipam` | 2, Problem 1 | `IPPool`, `NodeBlock` | Buddy-style dynamic pod IP allocation | [`docs/ipam-controller.md`](docs/ipam-controller.md) |
+| `cniresilience` | 2, Problem 2 | `CNIResilience` | Dual-CNI (Calico + Flannel) failover and recovery | [`docs/cni-resilience.md`](docs/cni-resilience.md) |
+
+Pick controllers with `--controllers` (comma-separated, or `all`):
+
+```bash
+go run ./cmd/main.go                                       # default: ipam,cniresilience (Project 2)
+go run ./cmd/main.go --controllers=networkremediation      # Project 1
+go run ./cmd/main.go --controllers=ipam --ipam-configure-kube-proxy
+go run ./cmd/main.go --controllers=all
+```
+
+`make run` runs `go run ./cmd/main.go` with no flags, so it starts the Project 2
+controllers. Project 1 is off by default because its PodConnectivity module cordons and
+taints a node on a fault and never reverses it.
 
 ## Prerequisites
 
-Before developing this operator, ensure you have the following installed:
+| Tool | Version |
+|---|---|
+| Go | 1.26 (see `go.mod`) |
+| Docker | Latest |
+| minikube | v1.37 tested |
+| kubectl | Latest |
+| Kubebuilder | v4.15+ (only to scaffold new APIs) |
 
-### Required
+## Project structure
 
-| Tool | Version | Installation |
-|------|---------|-------------|
-| **Go** | 1.27.0+ | [go.dev/dl](https://go.dev/dl/) |
-| **Kubebuilder** | v4.15.0+ | [kubebuilder.io/quick-start](https://book.kubebuilder.io/quick-start) |
-| **kubectl** | Latest | [kubernetes.io/docs/tasks/tools](https://kubernetes.io/docs/tasks/tools/) |
-| **Minikube** | Latest | [minikube.sigs.k8s.io/docs/start](https://minikube.sigs.k8s.io/docs/start/) |
-| **Docker** | Latest | [docs.docker.com/get-docker](https://docs.docker.com/get-docker/) |
-
-### Verify Installation
-
-```bash
-go version          # Should show go1.27.0 or later
-kubebuilder version # Should show v4.15.0 or later
-kubectl version     # Should show client version
-minikube version    # Should show minikube version
-docker version      # Should show Docker version
-```
-
-## Getting Started
-
-```bash
-cd CN-Project-1/operator
-
-# Download Go dependencies
-go mod download
-
-# Read the architecture guide before starting
-# docs/architecture.md
-```
-
-## Project Structure
-
-```
+```text
 operator/
-├── cmd/main.go                          # Entrypoint - sets up manager, registers modules
+├── cmd/
+│   ├── main.go                     # Manager; --controllers selects what runs
+│   ├── ipam-agent/                 # P2: IPAM node agent (DaemonSet)
+│   ├── ipam-sim/                   # P2: IPAM simulator and charts
+│   └── healthagent/                # P2: CNI health agent (DaemonSet)
 ├── api/v1alpha1/
-│   ├── networkremediation_types.go      # Top-level CRD types (Spec, Status)
-│   ├── cni_types.go                     # CNI module spec types
-│   ├── coredns_types.go                 # CoreDNS module spec types
-│   ├── networkpolicy_types.go           # NetworkPolicy module spec types
-│   └── podconnectivity_types.go         # PodConnectivity module spec types
-├── pkg/module/
-│   └── module.go                        # Module interface - Check/Evaluate/Remediate
+│   ├── networkremediation_types.go # P1: top-level CR
+│   ├── cni_types.go, coredns_types.go, networkpolicy_types.go, podconnectivity_types.go  # P1 module specs
+│   ├── ipam_types.go               # P2: IPPool, NodeBlock
+│   └── cniresilience_types.go      # P2: CNIResilience
+├── pkg/module/module.go            # P1: Check/Evaluate/Remediate interface
 ├── internal/controller/
-│   ├── networkremediation_controller.go # Top-level dispatcher
-│   ├── cni/                             # CNI module
-│   ├── coredns/                         # CoreDNS module
-│   ├── networkpolicy/                   # NetworkPolicy module
-│   └── podconnectivity/                 # PodConnectivity module
-├── docs/
-│   ├── architecture.md                  # Architecture guide (READ THIS FIRST)
-│   └── coredns-remediation.md           # CoreDNS Failure Modes & Remediation Policy Guide
-└── config/
-    ├── crd/bases/                       # Generated CRD YAML
-    ├── rbac/                            # Generated RBAC
-    └── samples/                         # Sample CR manifests
+│   ├── networkremediation_controller.go   # P1 dispatcher
+│   ├── cni/, coredns/, networkpolicy/, podconnectivity/   # P1 modules
+│   ├── ipam/                       # P2: controller, buddy/, agent/, sim/
+│   └── cniresilience/              # P2: controller, healthagent/, failover/, recovery/
+├── deploy/                         # P2 manifests
+│   ├── ipam-agent.yaml
+│   ├── healthagent-daemonset.yaml, healthagent-networkpolicy.yaml
+│   ├── calico-primary-pool.yaml, flannel-backup.yaml, multus-nad.yaml
+├── hack/ipam-phase0/               # P2: scripts used to test IPAM assumptions
+├── Dockerfile.agent                # P2: ipam-agent image
+├── Dockerfile.healthagent          # P2: health agent image
+├── config/
+│   ├── crd/bases/                  # Generated CRDs (both projects)
+│   ├── rbac/                       # Generated RBAC
+│   └── samples/                    # networkremediation (P1), ipam_sample, cniresilience_sample (P2)
+└── docs/                           # See the table below
 ```
 
-See [docs/architecture.md](docs/architecture.md) and [docs/coredns-remediation.md](docs/coredns-remediation.md) for architecture explanation and CoreDNS remediation workflows.
+`NodeIPAllocation` and `internal/controller/ipam/monitor/` are left over from an early
+Project 2 scaffold and are not used by the IPAM controller.
 
-## Development Workflow
+## Docs
 
-### 1. Modify CRD Types
+| Project | File |
+|---|---|
+| 1 | [`architecture.md`](docs/architecture.md), [`cni-remediation-policy.md`](docs/cni-remediation-policy.md), [`coredns-remediation.md`](docs/coredns-remediation.md), [`networkpolicy-remediation.md`](docs/networkpolicy-remediation.md), [`pod_connectivity_operator.md`](docs/pod_connectivity_operator.md) |
+| 2, IPAM | [`ipam-controller.md`](docs/ipam-controller.md), [`ipam-agent.md`](docs/ipam-agent.md), [`ipam-evaluation.md`](docs/ipam-evaluation.md) (results in [`ipam-eval/`](docs/ipam-eval/)), [`ipam-phase0-assumptions.md`](docs/ipam-phase0-assumptions.md), [`ipam-decision-log.md`](docs/ipam-decision-log.md) |
+| 2, CNI resilience | [`cni-resilience.md`](docs/cni-resilience.md), [`../experiments/cni-resilience-experiment.md`](../experiments/cni-resilience-experiment.md) |
 
-When adding new fields to your module's spec:
+## Build and test
 
 ```bash
-# 1. Edit your module's types file in api/v1alpha1/
-#    (e.g., api/v1alpha1/cni_types.go for CNI)
+make build                 # bin/manager
+make test                  # unit tests + envtest, all controllers
+make lint
 
-# 2. Regenerate CRD manifests and DeepCopy methods
+# One package at a time
+go test ./internal/controller/cni/... -v              # P1
+go test ./internal/controller/ipam/... -v             # P2 IPAM
+go test ./internal/controller/cniresilience/... -v    # P2 CNI resilience
+```
+
+After editing any `*_types.go` file or RBAC marker:
+
+```bash
 make manifests
 make generate
 ```
 
-### 2. Implement Module Logic
-
-Your module lives in `internal/controller/<module>/controller.go`. Implement the three methods:
-- `Check()` - gather health signals
-- `Evaluate()` - analyze signals, decide if remediation is needed
-- `Remediate()` - execute the fix
-
-### 3. Add RBAC Permissions
-
-If your module needs to access Kubernetes resources, add RBAC markers in your controller:
-
-```go
-// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;delete
-```
-
-Then run `make manifests` to regenerate RBAC rules.
-
-## Building
+## Running Project 1
 
 ```bash
-# Build the operator binary
-make build
-```
-
-## Running Tests
-
-```bash
-# Run all tests (includes lint, vet, unit tests, envtest)
-make test
-
-# Run tests for a specific module
-go test ./internal/controller/cni/... -v
-go test ./internal/controller/coredns/... -v
-go test ./internal/controller/networkpolicy/... -v
-go test ./internal/controller/podconnectivity/... -v
-
-# Run with coverage report
-go test ./... -coverprofile=cover.out
-go tool cover -html=cover.out
-
-# Run linter only
-make lint
-```
-
-## Running Locally on Minikube
-
-### 1. Start Minikube with Calico CNI
-
-```bash
-# Start a multi-node cluster with Calico
 minikube start --cni=calico --nodes=2 -p k8s-experiments
-
-# Verify nodes are ready
-kubectl get nodes
-
-# Verify Calico is running
-kubectl get pods -n kube-system -l k8s-app=calico-node
-```
-
-### 2. Install CRDs
-
-```bash
-# Install the NetworkRemediation CRD into the cluster
 make install
-
-# Verify
-kubectl get crd networkremediations.remediation.cn-operator.yuvraj-rathod-1202.github.io
-```
-
-### 3. Apply Sample CR
-
-```bash
-# Apply the sample NetworkRemediation resource
 kubectl apply -f config/samples/remediation_v1alpha1_networkremediation.yaml
-
-# Verify
-kubectl get networkremediation
-```
-
-### 4. Run the Operator Locally
-
-```bash
-# Run the operator against your Minikube cluster
-make run
-```
-
-The operator will connect to the cluster specified in your `~/.kube/config` and start the reconciliation loop. You should see logs for each module's Check → Evaluate → Remediate cycle.
-
-### 5. Check Status
-
-```bash
-# View the CR status
+go run ./cmd/main.go --controllers=networkremediation
 kubectl get networkremediation cluster-network-remediation -o yaml
+```
 
-# Watch logs
-make run 2>&1 | grep -E "(Check|Evaluate|Remediate)"
+Adding a Project 1 module: implement `Check()`, `Evaluate()` and `Remediate()` in
+`internal/controller/<module>/controller.go` (see [`docs/architecture.md`](docs/architecture.md)).
+
+## Running Project 2
+
+The two problems need different clusters: IPAM replaces the node's CNI, while CNI
+resilience runs Calico and Flannel side by side.
+
+**IPAM simulation** (no cluster):
+```bash
+go run ./cmd/ipam-sim --out docs/ipam-eval --seeds 3
+```
+
+**IPAM on a cluster** (flags explained in [`docs/ipam-phase0-assumptions.md`](docs/ipam-phase0-assumptions.md)):
+```bash
+minikube start -p buddy-ipam --driver=docker --container-runtime=docker --nodes=3 \
+  --cni=false --memory=1900 \
+  --extra-config=controller-manager.allocate-node-cidrs=false \
+  --extra-config=kubelet.max-pods=600
+# remove /etc/cni/net.d/87-podman-bridge.conflist on every node
+make install
+kubectl apply -f config/samples/ipam_sample.yaml
+docker build -f Dockerfile.agent -t ipam-agent:dev .
+minikube -p buddy-ipam image load ipam-agent:dev
+kubectl apply -f deploy/ipam-agent.yaml
+go run ./cmd/main.go --controllers=ipam --ipam-configure-kube-proxy
+kubectl get nodeblocks -w
+```
+
+**CNI resilience:** full setup (Calico on `172.16.0.0/16`, Multus, Flannel, health agent,
+workload) in [`../experiments/cni-resilience-experiment.md`](../experiments/cni-resilience-experiment.md), then:
+```bash
+make run
+kubectl get cniresilience default-resilience -o yaml
 ```
 
 ## Uninstalling
 
 ```bash
-# Remove the sample CR
-kubectl delete -f config/samples/remediation_v1alpha1_networkremediation.yaml
-
-# Remove the CRDs
-make uninstall
+kubectl delete -f config/samples/remediation_v1alpha1_networkremediation.yaml   # P1 CR
+kubectl delete -f config/samples/ipam_sample.yaml -f config/samples/cniresilience_sample.yaml   # P2 CRs
+make uninstall                      # CRDs
 ```
 
-## CI/CD
+## CI
 
-This project uses GitHub Actions for continuous integration. The CI pipeline (`.github/workflows/ci.yaml`) runs on every push and pull request to `main`:
-
-1. **Lint** - golangci-lint for code quality
-2. **Test** - `make test` (unit tests + envtest)
-3. **Build** - compile the operator binary
-4. **Manifests** - verify generated CRD/RBAC manifests are up to date
-
-Make sure `make test` passes locally before pushing.
+`.github/workflows/ci.yaml` runs on every push and pull request to `main`: lint,
+`make test`, build, and a check that generated CRD/RBAC manifests are up to date.

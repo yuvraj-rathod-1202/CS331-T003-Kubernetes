@@ -1,4 +1,4 @@
-# Problem 1 — Phase 0: assumption table
+# Project 2 (IPAM) — Phase 0: assumption table
 
 Each assumption in the buddy-IPAM design that we were not sure of, tested on a
 3-node minikube cluster (profile `buddy-ipam`, docker driver, docker runtime,

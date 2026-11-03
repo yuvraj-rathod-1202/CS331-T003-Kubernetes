@@ -1,4 +1,21 @@
-# Kubernetes Network Self-Healing Operator - Presentation & Demo
+# Presentation & Demo Guide
+
+This guide covers **two separate projects**:
+
+- **Part A: Project 1**, the network self-healing operator (dashboard page `/`).
+- **Part B: Project 2**, IPAM efficiency (`/project1`) and CNI resilience (`/project2`).
+  The page names follow the problem numbers inside Project 2, not the project numbers.
+
+Start the dashboard with `cd k8s-visualizer && npm install && npm run dev` and open
+`http://localhost:5173`.
+
+---
+
+# Part A: Project 1, Network Self-Healing Operator
+
+Run the operator with `cd operator && go run ./cmd/main.go --controllers=networkremediation`
+(with no flag only the Project 2 controllers run). Full setup:
+[`experiments/demo_experiments.md`](experiments/demo_experiments.md).
 
 ## 1. Dashboard UI & Layout Recommendations
 
@@ -119,6 +136,8 @@ To make the demo clear, visual, and easy to follow during a presentation, the we
      - Operator restarts Felix / re-synchronizes policy engine $\to$ NetworkPolicy enforcement restored.
 ---
 
+# Part B: Project 2, IPAM Efficiency & CNI Resilience
+
 ## Problem 1: Buddy-style dynamic IPAM demo (`/project1`)
 
 Run the dashboard (`cd k8s-visualizer && npm run dev`) and open `/project1`.
@@ -138,3 +157,29 @@ and default parameters, time scaled up); it does not need a cluster.
    (`operator/docs/ipam-evaluation.md`).
 
 `/project1?preset=burst` starts mid-burst; `?tab=eval` or `?tab=how` opens a tab.
+
+## Problem 2: Dual-CNI resilience demo (`/project2`)
+
+This page reads the live cluster; nothing is simulated. Set up the cluster first with
+[`experiments/cni-resilience-experiment.md`](experiments/cni-resilience-experiment.md), then
+run the operator (`cd operator && make run`) and the dashboard, and open `/project2`.
+
+1. **Healthy start**: operator `Running`, phase `Healthy`, every node card shows its data
+   path working, active path `primary`, and the traffic bars (one request per second from
+   `traffic-client`) are all green.
+2. **Block pod traffic** on a worker: about half the requests fail until the node is blamed
+   (10–31 s). Then phase `FailedOver`, active path `backup`, a shadow EndpointSlice with the
+   pod's Flannel (`net1`) address appears, the node gets the recovery taint, and all requests
+   succeed again.
+3. **Reset the lab**: the operator fails back within about 10 s with no failed request;
+   shadow and taint are removed.
+4. **Auto failover off**, then block again: the node is blamed and tainted but traffic is
+   not moved, so about half the requests keep failing. This is what plain Kubernetes does.
+5. **Delete calico-node pod**: the pod is replaced, no request fails and the operator does
+   nothing, because existing routes stay in the kernel.
+6. **Drop IPIP tunnel**: another primary-path fault (Calico's `tunl0`).
+7. The **EndpointSlices** and **Observed changes** tabs show the shadow slices and every change the
+   page saw in the cluster.
+
+Measured results for all ten experiments, and manual faults (blocking the backup path too,
+freezing a node), are in the experiment guide. Design: [`operator/docs/cni-resilience.md`](operator/docs/cni-resilience.md).

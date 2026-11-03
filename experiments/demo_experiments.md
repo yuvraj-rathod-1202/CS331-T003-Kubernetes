@@ -1,4 +1,5 @@
-# Complete Presentation & Demo Guide: 12 Network Failure Experiments
+# Project 1: Complete Presentation & Demo Guide: 12 Network Failure Experiments
+
 
 This document provides a comprehensive step-by-step setup and presentation guide for demonstrating all the experiments detailed in the project research report (`report/report.tex`).
 
@@ -65,7 +66,7 @@ Start the Go operator controller manager:
 **In Terminal 2 (keep running in background):**
 ```bash
 cd operator
-go run ./cmd/main.go
+go run ./cmd/main.go --controllers=networkremediation
 ```
 
 ### Step 6: Start the Web App (`k8s-visualizer`)

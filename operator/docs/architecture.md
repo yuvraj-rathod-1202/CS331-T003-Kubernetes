@@ -1,4 +1,7 @@
-# Network Remediation Operator - Architecture Guide
+# Network Remediation Operator - Architecture Guide (Project 1)
+
+This document explains the architecture of the **Project 1** network remediation operator (`NetworkRemediation` and its four modules). Read this before implementing a Project 1 module.
+
 
 This document explains the architecture of the network remediation operator for the team. Read this before implementing your module.
 

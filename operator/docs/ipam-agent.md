@@ -1,4 +1,4 @@
-# IPAM node agent (Problem 1)
+# IPAM node agent (Project 2)
 
 `cmd/ipam-agent` runs on every node as a privileged `hostNetwork` DaemonSet
 (`deploy/ipam-agent.yaml`). It is the data-plane half of the controller: the

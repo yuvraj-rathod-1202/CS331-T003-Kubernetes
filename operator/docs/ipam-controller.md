@@ -1,4 +1,4 @@
-# IPAM controller (Problem 1)
+# IPAM controller (Project 2)
 
 The controller hands out pod address space to nodes in buddy blocks and grows a
 node when it runs low. Pod startup never waits on it: `host-local` on the node
@@ -97,8 +97,9 @@ below `lowWaterPercent`.
 
 ## Running selected controllers
 
-`--controllers=ipam` runs only this controller; the default `all` runs
-`networkremediation`, `ipam` and `cniresilience`.
+`--controllers=ipam` runs only this controller. The default is
+`ipam,cniresilience` (both Project 2 controllers); `all` also adds Project 1's
+`networkremediation`.
 
 ## Rules worth knowing
 
