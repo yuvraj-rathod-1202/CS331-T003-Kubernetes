@@ -283,7 +283,7 @@ export function Project2Demo() {
             tone={cr?.status?.phase === 'Healthy' && operator.running ? 'good' : cr?.status?.phase ? 'warn' : 'none'}
           />
           <Pill label="Failovers" value={String(cr?.status?.failoverCount ?? 0)} tone="none" />
-          <Pill label="Recovery attempts" value={String(cr?.status?.recoveryCount ?? 0)} tone="none" />
+          <Pill label="Recoveries" value={String(cr?.status?.recoveryCount ?? 0)} tone="none" />
         </div>
       </header>
 
@@ -398,7 +398,7 @@ export function Project2Demo() {
             <ActionButton
               icon={<Flame size={16} />}
               title="Block pod traffic"
-              detail="Adds an iptables FORWARD DROP for 10.244.0.0/16 on the node"
+              detail="Adds an iptables FORWARD DROP for Calico pod traffic (172.16.0.0/16) on the node"
               tone="danger"
               disabled={!!busy || !targetNode || !!targetFaultRules}
               onClick={() => runAction('Block pod traffic', '/api/fault/cniresilience/break', { nodeName: targetNode, method: 'pod-traffic' })}
@@ -414,7 +414,7 @@ export function Project2Demo() {
             <ActionButton
               icon={<RotateCcw size={16} />}
               title="Reset the lab"
-              detail="Removes demo rules, the recovery taint and shadow slices on all nodes"
+              detail="Removes demo rules on all nodes. If the operator is stopped, also its recovery taint and shadow slices"
               tone="good"
               disabled={!!busy}
               onClick={() => runAction('Reset the lab', '/api/fault/cniresilience/restore', {})}

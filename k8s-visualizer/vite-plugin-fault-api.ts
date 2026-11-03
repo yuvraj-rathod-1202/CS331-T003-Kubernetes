@@ -137,12 +137,18 @@ function sendJson(res: ServerResponse, status: number, data: any) {
 }
 
 const CR_NAME = 'default-resilience';
+// Same rule as the page: no reconcile for 30 s means the operator is not running.
+const OPERATOR_STALE_MS = 30_000;
 const SAFE_NAME = /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/;
 const RECOVERY_TAINT = 'cniresilience.cn-operator/recovering:NoSchedule';
 const FAULT_TAG = 'cniresilience-drop';
-const POD_DROP_RULE = `FORWARD -s 10.244.0.0/16 -j DROP -m comment --comment "${FAULT_TAG}"`;
-// Older demo versions also inserted this; the lab uses IPIP, so it never matched a packet.
-const LEGACY_VXLAN_RULE = `INPUT -p udp --dport 4789 -j DROP -m comment --comment "${FAULT_TAG}"`;
+const POD_DROP_RULE = `FORWARD -s 172.16.0.0/16 -j DROP -m comment --comment "${FAULT_TAG}"`;
+// Deletes every rule tagged FAULT_TAG in every table: this page's rules, rules from
+// older page versions, and hand-made test rules such as raw-table link drops.
+// iptables -S prints each rule in a form that, with -A turned into -D, deletes it.
+const REMOVE_TAGGED_RULES =
+  `for t in filter nat mangle raw; do iptables -t $t -S | grep -- '--comment ${FAULT_TAG}' | ` +
+  `sed 's/^-A /-D /' | while read -r rule; do eval iptables -t $t $rule; done; done; true`;
 
 async function kubectlJson(args: string[]): Promise<{ ok: true; data: any } | { ok: false; error: string }> {
   try {
@@ -613,23 +619,28 @@ export function faultInjectorPlugin(_options: FaultApiOptions = {}): Plugin {
             }
             const nodeNames: string[] = nodes.data.items.map((n: any) => n.metadata.name);
 
+            // While the operator runs, it undoes its own taint and shadows once its probes
+            // see the path working. Deleting them first makes it see "broken, not failed
+            // over" and fail over and restart the CNI agent again (seen in the lab).
+            const cr = await kubectlJson(['get', 'cniresilience', CR_NAME, '-o', 'json']);
+            const last = cr.ok ? cr.data.status?.lastReconcileTime : undefined;
+            const operatorRunning = !!last && Date.now() - new Date(last).getTime() <= OPERATOR_STALE_MS;
+
             const remaining = await Promise.all(nodeNames.map(async name => {
-              await execOnNode(
-                name,
-                `while iptables -D ${POD_DROP_RULE} 2>/dev/null; do :; done; ` +
-                `while iptables -D ${LEGACY_VXLAN_RULE} 2>/dev/null; do :; done; true`
-              );
-              await runShell(`kubectl taint nodes ${name} ${RECOVERY_TAINT}-`);
+              await execOnNode(name, REMOVE_TAGGED_RULES);
+              if (!operatorRunning) await runShell(`kubectl taint nodes ${name} ${RECOVERY_TAINT}-`);
               return countFaultRules(name);
             }));
-            const shadows = await runShell(
-              'kubectl delete endpointslices -A -l cniresilience.cn-operator/shadow=true'
-            );
+            const shadows = operatorRunning
+              ? { code: 0, stdout: 'Operator is running, so it removes its own taints and shadow slices.', stderr: '' }
+              : await runShell('kubectl delete endpointslices -A -l cniresilience.cn-operator/shadow=true');
 
             const clean = remaining.every(count => count === 0) && shadows.code === 0;
             return sendJson(res, clean ? 200 : 500, {
               success: clean,
-              command: 'iptables -D (demo rules), kubectl taint (recovery taint), kubectl delete endpointslices (shadows)',
+              command: operatorRunning
+                ? 'iptables -D (demo rules)'
+                : 'iptables -D (demo rules), kubectl taint (recovery taint), kubectl delete endpointslices (shadows)',
               message: `Rules left per node: ${nodeNames.map((n, i) => `${n}=${remaining[i]}`).join(', ')}. ${shadows.stdout}`,
               error: clean ? undefined : shadows.stderr || 'Some rules could not be removed',
             });

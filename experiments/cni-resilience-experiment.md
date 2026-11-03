@@ -1,276 +1,161 @@
-# Complete Experiment Guide: Problem 2 — Dual-CNI Resilience, Failover, & Recovery
+# Problem 2: Dual-CNI Resilience, Failover and Recovery
 
-This document provides a **complete, step-by-step operational guide** to set up, run, evaluate, and demonstrate the CNI Resilience experiment from start to finish.
+How to set up and run the experiment, and what you see when you do. Every result below
+was measured on the lab cluster on 2026-11-02 (3 nodes, K8s v1.37, Calico v3.32.2,
+Flannel v0.26.7, Multus). Numbers are from those runs, not promises.
 
----
+## 1. The idea in one paragraph
 
-## 1. Prerequisites & System Requirements
+Every app pod gets two network cards. `eth0` is on Calico (the main network, `172.16.0.0/16`).
+`net1` is on Flannel (the backup network, `10.244.0.0/16`), added by Multus. A small
+health agent on every node sends real requests to the agents on other nodes over both
+networks, and writes what it saw on its Node. The operator reads those reports. When a
+node's Calico path is proven broken but its Flannel path works, the operator moves that
+node's Service traffic to the pods' `net1` addresses. It does this with a readiness gate
+(so Kubernetes stops using the `eth0` address) plus a "shadow" EndpointSlice listing the
+`net1` address. When Calico works again, it moves traffic back.
 
-Ensure you have the following installed on your machine (Linux / WSL2 on Windows / macOS):
+## 2. Requirements
 
-* **Docker**: 24.0+ (Daemon running)
-* **minikube**: v1.32+
-* **kubectl**: v1.28+
-* **Go**: 1.22+ (to run the operator)
-* **Node.js & npm**: Node 18+ (to run the visualizer)
+Docker, minikube, kubectl, Go (version in `operator/go.mod`), Node.js 18+.
 
----
+## 3. Cluster setup (once)
 
-## 2. Phase 1: Cluster Provisioning
-
-Start a clean, multi-node Minikube cluster using Docker and Calico as the primary CNI:
+All commands start from the repository root.
 
 ```bash
-minikube start --nodes 2 --driver=docker --cni=calico --cpus=2 --memory=4096 -p k8s-experiments
+cd ~/path/to/CS331-T003-Kubernetes
+minikube start --nodes 3 --driver=docker --cni=calico -p k8s-experiments
+kubectl get nodes        # all 3 Ready
 ```
 
-### Verification
-Verify that both nodes are `Ready` and Calico pods are active:
+### 3.1 Move Calico to 172.16.0.0/16
+
+minikube's Calico uses `10.244.0.0/16`, but Flannel can only use the node podCIDRs
+(`10.244.x.0/24`). So Calico moves. Follow the steps in the header of
+`operator/deploy/calico-primary-pool.yaml`:
+
 ```bash
-# 1. Check node readiness
-kubectl get nodes -o wide
-
-# 2. Check Calico primary CNI agents
-kubectl get pods -n kube-system -l k8s-app=calico-node -o wide
+kubectl apply -f operator/deploy/calico-primary-pool.yaml
+kubectl patch ippools.crd.projectcalico.org default-ipv4-ippool --type=merge -p '{"spec":{"disabled":true}}'
+# delete every pod that has a 10.244 IP, so it restarts with a 172.16 IP:
+kubectl get pods -A -o jsonpath='{range .items[*]}{.metadata.namespace} {.metadata.name} {.status.podIP}{"\n"}{end}' | awk '$3 ~ /^10\.244\./ {print "-n", $1, $2}' | xargs -L1 -r kubectl delete pod
+kubectl delete ippools.crd.projectcalico.org default-ipv4-ippool
+kubectl get ipamblocks.crd.projectcalico.org,blockaffinities.crd.projectcalico.org -o name | grep 10-244 | xargs -r kubectl delete
 ```
-*Expected Output*: Both nodes (`k8s-experiments` and `k8s-experiments-m02`) show status `Ready`, and one `calico-node` pod is running on each node.
 
----
+Check: `kubectl get pods -A -o wide` shows no pod IP starting with `10.244` (host-network
+pods show node IPs `192.168.58.x`, which is fine).
 
-## 3. Phase 2: Dual-CNI (Multus + Flannel) & CRD Installation
+### 3.2 Multus and Flannel
 
-### Step 2.1: Install Multus Meta-CNI
-Multus attaches secondary interfaces (`net1`) to pods:
 ```bash
 kubectl apply -f https://raw.githubusercontent.com/k8snetworkplumbingwg/multus-cni/master/deployments/multus-daemonset.yml
-```
-
-Verify Multus pods are running on all nodes:
-```bash
-kubectl rollout status daemonset kube-multus-ds -n kube-system
-```
-
-### Step 2.2: Configure Flannel as Secondary Network
-Apply the Multus `NetworkAttachmentDefinition` for the backup Flannel network:
-```bash
+kubectl -n kube-system rollout status ds/kube-multus-ds
+kubectl apply -f operator/deploy/flannel-backup.yaml
+kubectl -n kube-flannel rollout status ds/kube-flannel-ds
 kubectl apply -f operator/deploy/multus-nad.yaml
 ```
 
-Verify the network attachment definition:
+`flannel-backup.yaml` is the official Flannel file with one part removed (its header says
+which and why): Flannel must not become a node's main network. Check on a node:
+
 ```bash
-kubectl get network-attachment-definitions -n kube-system
-# Output should show: flannel-backup
+docker exec k8s-experiments-m02 sh -c 'cat /run/flannel/subnet.env; ls /etc/cni/net.d'
 ```
 
-### Step 2.3: Install CNIResilience Custom Resource Definition (CRD)
-Register the `cniresiliences.remediation.cn-operator.yuvraj-rathod-1202.github.io` CRD into the cluster:
+You want `FLANNEL_SUBNET=10.244.1.1/24` (one /24 per node) and **no** `10-flannel.conflist`.
+
+### 3.3 Operator CRDs, settings, health agent, workload
+
 ```bash
-kubectl apply -f operator/config/crd/bases/remediation.cn-operator.yuvraj-rathod-1202.github.io_cniresiliences.yaml
-```
-
-### Step 2.4: Deploy the CNIResilience Configuration
-Apply the cluster-wide resilience monitoring resource:
-```bash
-kubectl apply -f operator/config/samples/cniresilience_sample.yaml
-```
-
-Check the CR:
-```bash
-kubectl get cniresilience default-resilience
-```
-
----
-
-## 4. Phase 3: Deploy Dual-Homed Workload & Traffic Client
-
-Deploy an application service configured with Multus so that every pod receives two interfaces:
-* `eth0`: Primary Calico address (`10.244.x.x`)
-* `net1`: Backup Flannel address (`192.168.x.x`)
-
-### Step 3.1: Apply Deployment & Service Manifest
-Create and apply `resilience-workload.yaml`:
-```bash
+cd operator
+make install                                   # all CRDs, incl. NodeBlock (the manager stops after 2 min without it)
+kubectl apply -f config/samples/cniresilience_sample.yaml
+CGO_ENABLED=0 go build -o bin/healthagent ./cmd/healthagent
+docker build -f Dockerfile.healthagent -t cni-health-agent:dev bin
+minikube -p k8s-experiments image load cni-health-agent:dev
+kubectl apply -f deploy/healthagent-daemonset.yaml
+cd ..
 kubectl apply -f experiments/manifests/resilience-workload.yaml
 ```
 
-### Step 3.2: Verify Dual-IP Assignment on Pods
+The workload is `resilience-target` (2 replicas, one on each worker, both with `net1` and the
+readiness gate), `resilience-service`, the `traffic-client` pod on the control-plane node
+(one request per second, its log is the real traffic measurement), and one `path-probe`
+pod per node (the page uses them to show each node's real data path).
+
+Check `net1`:
+
 ```bash
-kubectl get pods -l app=resilience-target -o custom-columns=NAME:.metadata.name,NODE:.spec.nodeName,PRIMARY_IP:.status.podIP,STATUS:.metadata.annotations."k8s\.v1\.cni\.cncf\.io/network-status"
+kubectl get pods -l app=resilience-target -o custom-columns='NAME:.metadata.name,NODE:.spec.nodeName,ETH0:.status.podIP,STATUS:.metadata.annotations.k8s\.v1\.cni\.cncf\.io/network-status'
 ```
-*Expected Output*: Look at the `STATUS` column; each pod has both an `eth0` IP (`10.244.x.x`) and a `net1` IP (`192.168.x.x`).
 
----
+Each pod shows an `eth0` address in `172.16.x.x` and a `net1` address in `10.244.<node>.x`.
 
-## 5. Phase 4: Launch Operator & Visualizer Dashboard
+## 4. Run it
 
-Open **4 separate terminal windows** to run the complete environment:
+Two terminals.
 
-### Terminal 1: Kubernetes API Proxy
-Exposes the local Kubernetes API for the dashboard:
 ```bash
-kubectl proxy
-```
-*(Leave running)*
-
-### Terminal 2: Run the Kubernetes Operator
-Runs the controller reconcile loop and health monitoring agent:
-```bash
-cd operator
+# Terminal 1: the operator. Gated pods are only Ready while it runs.
+cd ~/path/to/CS331-T003-Kubernetes/operator
 make run
 ```
-*(Leave running — logs will stream here)*
 
-### Terminal 3: Run the Visualizer Web Dashboard
-Runs the frontend web application:
 ```bash
-cd k8s-visualizer
+# Terminal 2: the page
+cd ~/path/to/CS331-T003-Kubernetes/k8s-visualizer
 npm run dev
-```
-Open your browser and navigate to:
-```
-http://localhost:5173/project2
+# open http://localhost:5173/project2
 ```
 
-### Terminal 4: Continuous Service Traffic Stream
-Start a live client generating continuous HTTP requests against the service:
+`kubectl proxy` is only needed for the other pages of the visualizer, not `/project2`.
+
+Healthy start: Operator `Running`, Phase `Healthy`, every node card shows Data path working,
+Operator says Primary `Healthy`, Backup `Healthy`, Active path `primary`, and the traffic bars
+are all green.
+
+## 5. Experiments
+
+Pick the target node on the page, then press the button. Measured results:
+
+| # | What you do | What happens (measured) |
+|---|---|---|
+| 1 | Target **m02 or m03**, **Block pod traffic** | About half the requests fail until the operator blames the node (10–31 s in our runs). Then Phase `FailedOver`, the node's Active path `backup`, a shadow slice appears with the pod's `10.244` address, the node gets the `recovering` taint, and its calico-node pod is restarted **once**. Traffic is back to all `200`. The pod's nginx log shows requests arriving from `10.244.0.0` (the Flannel tunnel). |
+| 2 | **Reset the lab** after 1 | Rule removed. The operator itself moves traffic back within ~10 s: Phase `Healthy`, shadow gone, taint gone, no failed request during the switch. |
+| 3 | Same as 1, but turn **auto failover off** first | Node blamed, tainted, one calico restart, but no shadow: about half the requests keep failing. Message says `autoFailover disabled`. Turning it on again fails over within 5 s. |
+| 4 | Block **both workers** | Phase `Unknown`, nothing done, traffic 0 %. With 3 nodes every probe then touches a broken node, so "both workers broken" cannot be told apart from "control-plane broken and the worker link broken". A node is blamed only if some probe between two other nodes works, so on N nodes at most N−2 broken nodes can be located. |
+| 5 | Block **k8s-experiments** (the control-plane node) | Traffic 0 %: the `traffic-client` itself is on that node and has no backup. Phase `Degraded`; message says there is nothing to move (no app pod there). |
+| 6 | **Delete calico-node pod** | The pod is replaced in about 30 s, no request fails, the operator does nothing (killing Calico does not break existing routes). |
+
+Faults you inject by hand (all tagged `cniresilience-drop`, so **Reset the lab** removes them):
+
 ```bash
-kubectl run traffic-client --rm -i --tty --image=curlimages/curl -- sh -c '
-  while true; do
-    curl -s --connect-timeout 1 http://resilience-service.default.svc.cluster.local -I | head -n 1
-    sleep 1
-  done
-'
-```
-*(You will see steady `HTTP/1.1 200 OK` messages)*
-
----
-
-## 6. Phase 5: Execute Chaos Experiments & Observe Recovery
-
-### Experiment 5.1: Calico Overlay Datapath Failure (VXLAN Drop)
-
-**Goal**: Simulate a sudden partition in the primary CNI datapath on the worker node (`k8s-experiments-m02`) and observe sub-second failover via Shadow EndpointSlices followed by autonomous recovery.
-
-#### Method 1: Via the Visualizer Dashboard
-1. Go to `http://localhost:5173/project2`.
-2. Under **Quadrant 3: Interactive Chaos Deck**, ensure Target Node is set to `k8s-experiments-m02` (or `minikube-m02`).
-3. Click **`[ Sever Primary CNI (VXLAN Drop) ]`**.
-
-#### Method 2: Via Terminal Command
-Run inside the worker node container:
-```bash
-docker exec -it k8s-experiments-m02 iptables -I INPUT -p udp --dport 4789 -j DROP -m comment --comment "cniresilience-drop"
-docker exec -it k8s-experiments-m02 iptables -I FORWARD -s 10.244.0.0/16 -j DROP -m comment --comment "cniresilience-drop"
+# Break m03's backup (Flannel VXLAN) as well as its primary:
+docker exec k8s-experiments-m03 iptables -I INPUT -p udp --dport 8472 -j DROP -m comment --comment cniresilience-drop
+# Break Calico's IPIP tunnel on m03 (a different primary fault from the page button):
+docker exec k8s-experiments-m03 iptables -t raw -I PREROUTING -p 4 -j DROP -m comment --comment cniresilience-drop
 ```
 
----
+| # | What you do | What happens (measured) |
+|---|---|---|
+| 7 | Block m03's primary **and** backup | Active path `none`: the operator takes m03's pod out of the Service (gate off, no shadow) because neither address works. Traffic all `200` through m02. Unblock only the backup and it fails over again. |
+| 8 | IPIP drop on m03 | Same as experiment 1 (failover in 11 s in our run). |
+| 9 | Stop the operator (Ctrl+C) during a failover | Traffic keeps working: the shadow and gates are in the cluster, not in the operator. The page marks operator data as stale. Start it again and it carries on. A Reset while it is stopped also removes taint and shadows. |
+| 10 | Freeze a whole worker: `docker pause k8s-experiments-m03` (undo: `docker unpause`) | The operator blames m03 and takes its pod out after ~26 s, but requests keep failing until Kubernetes marks the node unreachable at ~55 s. A pod's Ready is computed by the kubelet on its own node, and that kubelet is frozen, so the gate cannot take effect sooner. After unpause everything returns to Healthy by itself. |
 
-### Observations to Verify During Failover (Within 5–15 Seconds)
+## 6. Limits we know about
 
-1. **Terminal 2 (Operator Logs)**:
-   ```text
-   Health agent probe cycle detected primary down on k8s-experiments-m02
-   AutoFailover triggered: collected backup IPs [192.168.1.105]
-   Created shadow EndpointSlice for resilience-service with backup IPs
-   Original endpoint 10.244.1.42 marked Ready: false
-   ```
+- Detection takes 10–31 s (probe failures must repeat; each node probes one peer per round).
+- Only pods with the readiness gate and `net1` can fail over. Pods without a gate are never touched.
+- The gated pods are Ready only while the operator runs (it sets the gate). Start it before the workload, or the Service has no endpoints.
+- A frozen node is no faster than plain Kubernetes (experiment 10).
+- App pods see Service requests coming from the sending node's tunnel address (`172.16.148.128` on Calico, `10.244.0.0` on Flannel), not from the client pod's address. Traffic works. Not yet proven why; a likely part is that `kube-proxy` still has `clusterCIDR 10.244.0.0/16`, the old Calico range.
 
-2. **EndpointSlice Verification**:
-   Check EndpointSlices across the cluster:
-   ```bash
-   kubectl get endpointslices -l cniresilience.cn-operator/shadow=true
-   ```
-   *Observation*: A shadow slice appears with the `192.168.1.x` Flannel IP!
+## 7. Clean up
 
-3. **Terminal 4 (Traffic Continuity)**:
-   *Observation*: The continuous curl stream **does NOT drop**. After a brief sub-second blip, requests continue returning `HTTP/1.1 200 OK` over the backup path! Pods were **not restarted**.
-
-4. **Self-Healing Progression**:
-   * **Node Taint Applied**:
-     ```bash
-     kubectl describe node k8s-experiments-m02 | grep Taints
-     ```
-     Shows: `Taints: cniresilience.cn-operator/recovering:NoSchedule`.
-   * **CNI Pod Re-spun**: Operator restarts `calico-node` on the failed node.
-   * **Failback**: Once primary probes turn green:
-     - The operator untaints the node.
-     - Shadow EndpointSlice is deleted.
-     - Original EndpointSlice is restored to `Ready: true`.
-     - `kubectl get cniresilience default-resilience` transitions back to `Phase: Healthy`.
-
----
-
-### Experiment 5.2: Calico Agent Crash (Felix Kill)
-
-**Goal**: Test recovery when the node's CNI agent process dies completely.
-
-1. **Inject Failure**:
-   ```bash
-   kubectl delete pod -n kube-system -l k8s-app=calico-node --field-selector spec.nodeName=k8s-experiments-m02 --now
-   ```
-   *OR click `[ Kill Calico Felix Agent Pod ]` in the `/project2` dashboard.*
-
-2. **Verify Detection & Recovery**:
-   * Health agent local check detects `http://localhost:9099/liveness` refused.
-   * DaemonSet controller recreates the `calico-node` pod.
-   * Operator validates route re-injection and clears recovery status.
-
----
-
-### Experiment 5.3: Silent MTU Blackhole (Large Packet Drops)
-
-**Goal**: Demonstrate that standard pings (56 bytes) pass while large packets drop, and show our large-packet probe catches it.
-
-1. **Inject MTU Drop Rule**:
-   ```bash
-   docker exec -it k8s-experiments-m02 iptables -I FORWARD -m length --length 1400:65535 -j DROP -m comment --comment "mtu-drop"
-   ```
-
-2. **Observe**:
-   * Standard ICMP ping still passes.
-   * The operator's **Large-Packet / MTU probe (1450 bytes, DF bit set)** detects packet drops immediately and flags `Phase: Degraded`.
-
-3. **Restore**:
-   ```bash
-   docker exec -it k8s-experiments-m02 iptables -D FORWARD -m length --length 1400:65535 -j DROP -m comment --comment "mtu-drop"
-   ```
-
----
-
-## 7. Phase 6: Post-Experiment Reset & Cleanup
-
-### Reset Network Rules
-If any manual iptables rules were inserted, clear them:
 ```bash
-docker exec -it k8s-experiments-m02 iptables -D INPUT -p udp --dport 4789 -j DROP -m comment --comment "cniresilience-drop" 2>/dev/null || true
-docker exec -it k8s-experiments-m02 iptables -D FORWARD -s 10.244.0.0/16 -j DROP -m comment --comment "cniresilience-drop" 2>/dev/null || true
-```
-*(Or click `[ Reset & Restore All Paths ]` on the `/project2` dashboard).*
-
-### Clean Up Workload & Test Resources
-```bash
-kubectl delete deployment resilience-target
-kubectl delete service resilience-service
-kubectl delete cniresilience default-resilience
-```
-
-### Stop the Minikube Cluster
-When finished with the demo:
-```bash
+kubectl delete -f experiments/manifests/resilience-workload.yaml
 minikube stop -p k8s-experiments
-# Or completely delete:
-# minikube delete -p k8s-experiments
 ```
-
----
-
-## 8. Summary Checklist for Live Demo / Presentation
-
-| Step | Action | Expected Visual in Dashboard (`/project2`) |
-| :---: | :--- | :--- |
-| **1** | Open `http://localhost:5173/project2` | Topology shows Calico & Flannel green; traffic at 100% |
-| **2** | Start continuous curl client | Green heartbeat bars streaming in Quadrant 2 |
-| **3** | Click `[ Sever Primary CNI ]` | Calico card turns RED; traffic hops to Flannel (`net1`) |
-| **4** | Point to Quadrant 4 (EndpointSlices) | Amber `SHADOW SLICE (ACTIVE)` appears with `192.168.x.x` |
-| **5** | Point to Quadrant 1 (Node Card) | Node shows `TAINTED: NoSchedule` during self-healing |
-| **6** | Wait ~15 seconds | Calico restarts, green routes re-verified, state returns to `HEALTHY` |

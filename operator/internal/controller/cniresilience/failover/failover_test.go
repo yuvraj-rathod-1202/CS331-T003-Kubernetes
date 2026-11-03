@@ -171,3 +171,63 @@ func TestNoBackupIsAnError(t *testing.T) {
 		t.Fatal("expected an error")
 	}
 }
+
+// The lab showed a failed-over node whose backup then died too: its shadow kept
+// sending half the traffic to a dead backup address. Isolating must take the node's
+// gated pods out (gate off, no shadow), leave other nodes and ungated pods alone,
+// and failback must bring the pods back.
+func TestIsolateWhenNoPathWorks(t *testing.T) {
+	m, c := setup(t)
+	ctx := context.Background()
+	if _, err := m.FailoverNode(ctx, "a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.FailoverNode(ctx, "b"); err != nil {
+		t.Fatal(err)
+	}
+	n, err := m.IsolateNode(ctx, "a")
+	if err != nil || n != 1 {
+		t.Fatalf("isolated=%d err=%v, want 1 pod", n, err)
+	}
+	shadows := shadowIPs(t, c)
+	if _, ok := shadows["a"]; ok || len(shadows["b"]) != 1 {
+		t.Fatalf("shadows=%v, want only b's", shadows)
+	}
+	if gate(t, c, "app-a") != corev1.ConditionFalse || gate(t, c, "coredns") != "" {
+		t.Fatalf("app-a=%q coredns=%q", gate(t, c, "app-a"), gate(t, c, "coredns"))
+	}
+	failedOver, err := m.FailedOverNodes(ctx)
+	if err != nil || failedOver["a"] || !failedOver["b"] {
+		t.Fatalf("failedOver=%v err=%v", failedOver, err)
+	}
+	if err := m.FailbackNode(ctx, "a"); err != nil {
+		t.Fatal(err)
+	}
+	if gate(t, c, "app-a") != corev1.ConditionTrue {
+		t.Fatalf("after failback app-a=%q", gate(t, c, "app-a"))
+	}
+}
+
+// The lab showed the failover count rising every round on a node whose pods are in
+// no Service: nothing moved, yet each round counted a failover. Such a node must get
+// no shadow and no gate change, and report zero.
+func TestNothingToMoveIsNotAFailover(t *testing.T) {
+	m, c := setup(t)
+	ctx := context.Background()
+	if err := c.Create(ctx, testPod("lonely", "c", "10.0.0.3", "10.9.0.3", true)); err != nil {
+		t.Fatal(err)
+	}
+	written, err := m.FailoverNode(ctx, "c")
+	if err != nil || written != 0 {
+		t.Fatalf("written=%d err=%v, want 0 and no error", written, err)
+	}
+	if got := gate(t, c, "lonely"); got != "" {
+		t.Fatalf("lonely gate=%q, want untouched", got)
+	}
+	if got := shadowIPs(t, c); len(got) != 0 {
+		t.Fatalf("shadows=%v, want none", got)
+	}
+	if written, err := m.FailoverNode(ctx, "a"); err != nil || written != 1 {
+		t.Fatalf("node a: written=%d err=%v, want 1", written, err)
+	}
+}

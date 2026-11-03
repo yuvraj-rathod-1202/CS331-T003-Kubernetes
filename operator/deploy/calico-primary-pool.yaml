@@ -1,0 +1,25 @@
+# Calico pod range for the primary path (eth0), moved out of 10.244.0.0/16.
+#
+# Flannel can only use the node podCIDRs (10.244.x.0/24), so the backup path needs
+# 10.244.0.0/16 and Calico moves here. Calico ignores podCIDR, so this is safe.
+# 172.16.0.0/16 does not overlap the node IPs (192.168.58.x) or Services (10.96.0.0/12).
+#
+# Move existing pods after applying this:
+#   kubectl patch ippools.crd.projectcalico.org default-ipv4-ippool --type=merge -p '{"spec":{"disabled":true}}'
+#   delete every pod that has a 10.244 IP, so it restarts with a 172.16 IP
+#   kubectl delete ippools.crd.projectcalico.org default-ipv4-ippool
+#   Calico keeps the old pool's empty address blocks, and each node keeps a 10.244
+#   route for them that would clash with Flannel. Delete them (only once no pod has
+#   a 10.244 address from Calico):
+#   kubectl get ipamblocks.crd.projectcalico.org,blockaffinities.crd.projectcalico.org -o name | grep 10-244 | xargs -r kubectl delete
+apiVersion: crd.projectcalico.org/v1
+kind: IPPool
+metadata:
+  name: primary-ipv4-ippool
+spec:
+  cidr: 172.16.0.0/16
+  blockSize: 26
+  ipipMode: Always
+  vxlanMode: Never
+  natOutgoing: true
+  nodeSelector: all()
