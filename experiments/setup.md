@@ -11,10 +11,12 @@ Install these tools on your Linux/WSL machine:
 
 ## Start the Cluster
 
-Start a 2-node minikube cluster with Calico CNI using the docker driver:
+Start a 3-node minikube cluster (one control-plane, two workers) with Calico CNI using
+the docker driver. The CNI resilience experiment needs two workers: `resilience-target`
+runs one replica per worker, so a fault on one node cannot take out every replica at once.
 
 ```bash
-minikube start --nodes 2 --driver=docker --cni=calico --cpus=2 --memory=4096 -p k8s-experiments
+minikube start --nodes 3 --driver=docker --cni=calico --cpus=2 --memory=4096 -p k8s-experiments
 ```
 
 Wait for all nodes to become Ready:
@@ -23,12 +25,13 @@ Wait for all nodes to become Ready:
 kubectl get nodes -o wide
 ```
 
-Expected output - both nodes `Ready`:
+Expected output - all three nodes `Ready`:
 
 ```
-NAME              STATUS   ROLES           AGE   VERSION
+NAME                  STATUS   ROLES           AGE   VERSION
 k8s-experiments       Ready    control-plane   1m    v1.x.x
 k8s-experiments-m02   Ready    <none>          30s   v1.x.x
+k8s-experiments-m03   Ready    <none>          30s   v1.x.x
 ```
 
 Verify Calico pods are running:
@@ -37,7 +40,7 @@ Verify Calico pods are running:
 kubectl get pods -n kube-system -l k8s-app=calico-node
 ```
 
-Both `calico-node` pods should be `Running` (one per node).
+All three `calico-node` pods should be `Running` (one per node).
 
 ## Deploy Test Pods
 
@@ -55,7 +58,7 @@ Wait for all pods to be Running:
 kubectl get pods -o wide
 ```
 
-You should see 6 pods (2 replicas each of backend-api, frontend-probe, dns-checker) spread across both nodes.
+You should see 6 pods (2 replicas each of backend-api, frontend-probe, dns-checker) spread across the worker nodes.
 
 ## Deploy Prometheus and Grafana
 

@@ -10,6 +10,7 @@ import {
   ShieldAlert,
   Shuffle,
   Terminal as TerminalIcon,
+  Unplug,
   XCircle,
 } from 'lucide-react';
 import type { NodePath } from '../../path-verdict';
@@ -273,7 +274,7 @@ export function Project2Demo() {
       <header className="p2-header">
         <div>
           <h1>Dual-CNI Resilience</h1>
-          <p className="p2-muted">Live cluster state · refreshes every {POLL_MS / 1000}s</p>
+          {/* <p className="p2-muted">Live cluster state · refreshes every {POLL_MS / 1000}s</p> */}
         </div>
         <div className="p2-pills">
           <Pill label="Operator" value={operator.label} tone={operator.running ? 'good' : 'bad'} />
@@ -296,7 +297,7 @@ export function Project2Demo() {
 
       <main className="p2-grid">
         <section className="p2-panel p2-q-traffic">
-          <h2>Service traffic <span className="p2-muted">measured by the traffic-client pod</span></h2>
+          {/* <h2>Service traffic <span className="p2-muted">measured by the traffic-client pod</span></h2> */}
           <div className="p2-stats">
             <Stat
               label="Now"
@@ -325,7 +326,7 @@ export function Project2Demo() {
         </section>
 
         <section className="p2-panel p2-q-nodes">
-          <h2>Nodes <span className="p2-muted">click one to choose the target</span></h2>
+          {/* <h2>Nodes <span className="p2-muted">click one to choose the target</span></h2> */}
           <div className="p2-nodes">
             {nodes.map(node => {
               const name = node.metadata.name;
@@ -354,7 +355,7 @@ export function Project2Demo() {
                   <dl className="p2-facts">
                     <Fact label="Kubernetes node" value={isConditionTrue(node, 'Ready') ? 'Ready' : 'NotReady'} good={isConditionTrue(node, 'Ready')} />
                     <Fact label="calico-node pod" value={calico ? (isConditionTrue(calico, 'Ready') ? 'Ready' : 'NotReady') : 'Missing'} good={!!calico && isConditionTrue(calico, 'Ready')} />
-                    <Fact label="Injected fault" value={faults === null || faults === undefined ? 'Unknown' : faults > 0 ? `Active (${faults} rule${faults > 1 ? 's' : ''})` : path.state === 'broken' ? 'None from this page' : 'None'} good={faults === 0 && path.state !== 'broken'} />
+                    {/* <Fact label="Injected fault" value={faults === null || faults === undefined ? 'Unknown' : faults > 0 ? `Active (${faults} rule${faults > 1 ? 's' : ''})` : path.state === 'broken' ? 'None from this page' : 'None'} good={faults === 0 && path.state !== 'broken'} /> */}
                     <Fact label="Taints" value={taints.length ? taints.map((t: any) => t.key.split('/').pop()).join(', ') : 'None'} good={taints.length === 0} />
                     <Fact label="Data path" value={path.label} good={path.state === 'working'} />
                   </dl>
@@ -367,7 +368,7 @@ export function Project2Demo() {
                       <dl className="p2-facts">
                         <Fact label="Primary" value={opStatus.primaryHealthy ? 'Healthy' : 'Down'} good={opStatus.primaryHealthy} />
                         <Fact label="Backup" value={opStatus.backupHealthy ? 'Healthy' : 'Down'} good={opStatus.backupHealthy} />
-                        <Fact label="Active path" value={opStatus.activePath} good={opStatus.activePath === 'primary'} />
+                        <Fact label="Active path" value={opStatus.activePath} good={true} />
                       </dl>
                       {opStatus.message && <p className="p2-muted p2-small">{opStatus.message}</p>}
                     </>
@@ -398,7 +399,7 @@ export function Project2Demo() {
             <ActionButton
               icon={<Flame size={16} />}
               title="Block pod traffic"
-              detail="Adds an iptables FORWARD DROP for Calico pod traffic (172.16.0.0/16) on the node"
+              // detail="Adds an iptables FORWARD DROP for Calico pod traffic (172.16.0.0/16) on the node"
               tone="danger"
               disabled={!!busy || !targetNode || !!targetFaultRules}
               onClick={() => runAction('Block pod traffic', '/api/fault/cniresilience/break', { nodeName: targetNode, method: 'pod-traffic' })}
@@ -406,15 +407,23 @@ export function Project2Demo() {
             <ActionButton
               icon={<ShieldAlert size={16} />}
               title="Delete calico-node pod"
-              detail="Existing routes stay in the kernel; the DaemonSet replaces the pod"
+              // detail="Existing routes stay in the kernel; the DaemonSet replaces the pod"
               tone="warn"
               disabled={!!busy || !targetNode}
               onClick={() => runAction('Delete calico-node pod', '/api/fault/cniresilience/break', { nodeName: targetNode, method: 'calico-agent' })}
             />
             <ActionButton
+              icon={<Unplug size={16} />}
+              title="Drop IPIP tunnel"
+              // detail="Takes tunl0 down. The operator fails over, restarts calico-node to rebuild the tunnel, and fails back by itself - no Reset needed"
+              tone="danger"
+              disabled={!!busy || !targetNode}
+              onClick={() => runAction('Drop IPIP tunnel', '/api/fault/cniresilience/break', { nodeName: targetNode, method: 'ipip-tunnel' })}
+            />
+            <ActionButton
               icon={<RotateCcw size={16} />}
               title="Reset the lab"
-              detail="Removes demo rules on all nodes. If the operator is stopped, also its recovery taint and shadow slices"
+              // detail="Removes demo rules on all nodes. If the operator is stopped, also its recovery taint and shadow slices"
               tone="good"
               disabled={!!busy}
               onClick={() => runAction('Reset the lab', '/api/fault/cniresilience/restore', {})}

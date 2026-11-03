@@ -591,6 +591,32 @@ export function faultInjectorPlugin(_options: FaultApiOptions = {}): Plugin {
               }
             }
 
+            if (method === 'ipip-tunnel') {
+              // Only the interface goes down. Deliberately NO iptables rule: calico-node
+              // reprograms tunl0 when it starts, so restarting the agent -- which is the
+              // operator's own repair action -- really does fix this fault. Adding a rule
+              // here (as the ControlPanel tunnel toggle does) would survive the restart
+              // and turn a full self-heal into a half-fix.
+              const command = 'ip link set tunl0 down';
+              const down = await execOnNode(nodeName, command);
+              if (down.code !== 0) {
+                return sendJson(res, 500, { success: false, command, error: down.stderr || 'Could not take tunl0 down' });
+              }
+              // Do NOT fail when tunl0 is already back up. calico-node supervises
+              // allocate-tunnel-addrs alongside felix, and that re-ups the interface
+              // within about a second, often before the probe threshold is crossed.
+              // The command succeeded either way; report what the interface did.
+              const state = await execOnNode(nodeName, "ip -br link show tunl0");
+              const backUp = / UP[ ,]|,UP[,>]/.test(state.stdout);
+              return sendJson(res, 200, {
+                success: true,
+                command,
+                message: backUp
+                  ? `tunl0 was taken down on ${nodeName}; Calico had already restored it when checked. If the outage was shorter than 3 probes, the operator will not react.`
+                  : `tunl0 is down on ${nodeName}. Watch for failover, then Calico restoring the interface.`,
+              });
+            }
+
             if (method === 'pod-traffic') {
               const command = `iptables -I ${POD_DROP_RULE}`;
               const injected = await execOnNode(nodeName, `iptables -C ${POD_DROP_RULE} 2>/dev/null || ${command}`);
@@ -628,6 +654,9 @@ export function faultInjectorPlugin(_options: FaultApiOptions = {}): Plugin {
 
             const remaining = await Promise.all(nodeNames.map(async name => {
               await execOnNode(name, REMOVE_TAGGED_RULES);
+              // Bring tunl0 back up in case the IPIP fault was injected and the operator
+              // was not running to repair it. A no-op when the tunnel is already up.
+              await execOnNode(name, 'ip link set tunl0 up 2>/dev/null || true');
               if (!operatorRunning) await runShell(`kubectl taint nodes ${name} ${RECOVERY_TAINT}-`);
               return countFaultRules(name);
             }));

@@ -78,8 +78,10 @@ func main() {
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
-	flag.StringVar(&controllersFlag, "controllers", "all",
-		"Comma-separated controllers to run: networkremediation, ipam, cniresilience, or all.")
+	flag.StringVar(&controllersFlag, "controllers", "ipam,cniresilience",
+		"Comma-separated controllers to run: networkremediation, ipam, cniresilience, or all. "+
+			"networkremediation (Project 1) is off by default: its PodConnectivity module "+
+			"cordons and taints a node on a fault and never reverses it.")
 	flag.BoolVar(&ipamConfigureKubeProxy, "ipam-configure-kube-proxy", false,
 		"IPAM: set kube-proxy's local-traffic detection for multi-pool pods and restart kube-proxy.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")

@@ -63,6 +63,11 @@ spec:
         args:
           - --leader-elect
           - --health-probe-bind-address=:8081
+          # Project 1 (networkremediation: CNI, CoreDNS, NetworkPolicy and
+          # PodConnectivity modules) is off. Its PodConnectivity module cordons and
+          # taints a node on a fault and has no un-isolate path, so a node it
+          # isolated stays unschedulable after the fault clears.
+          - --controllers=ipam,cniresilience
         image: controller:latest
         name: manager
         ports:

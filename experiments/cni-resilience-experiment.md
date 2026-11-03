@@ -66,6 +66,44 @@ docker exec k8s-experiments-m02 sh -c 'cat /run/flannel/subnet.env; ls /etc/cni/
 
 You want `FLANNEL_SUBNET=10.244.1.1/24` (one /24 per node) and **no** `10-flannel.conflist`.
 
+### 3.2.1 Adding a worker node later
+
+If you add a node to a running cluster (`minikube node add -p k8s-experiments`), two
+things do not happen by themselves.
+
+**Multus can latch onto the wrong default network.** Multus writes `00-multus.conf` by
+copying whichever CNI config it finds first in `/etc/cni/net.d`. On a brand-new node it
+usually wins the race against Calico and captures `200-loopback.conf`, which has no
+`name` field. Every pod on that node then hangs in `ContainerCreating` with:
+
+```
+plugin type="multus" name="multus-cni-network" failed (add):
+  error adding container to network "": missing network name
+```
+
+Check the delegate, and if it says `loopback`, restart Multus on that node so it
+regenerates against Calico:
+
+```bash
+docker exec k8s-experiments-m03 sh -c 'cat /etc/cni/net.d/00-multus.conf'   # want name "k8s-pod-network"
+kubectl -n kube-system delete pod -l app=multus --field-selector spec.nodeName=k8s-experiments-m03
+```
+
+**The health-agent image is not on the new node.** `cni-health-agent:dev` is a local tag
+with `imagePullPolicy: IfNotPresent`, and `minikube image load` only reaches the nodes
+that existed when it ran, so the new node's pod goes `ImagePullBackOff`. Load it again:
+
+```bash
+minikube -p k8s-experiments image load cni-health-agent:dev
+```
+
+Then recreate the replicas so the spread constraint takes effect — `topologySpreadConstraints`
+are applied at scheduling time, so pods already running stay where they are:
+
+```bash
+kubectl rollout restart deployment/resilience-target
+```
+
 ### 3.3 Operator CRDs, settings, health agent, workload
 
 ```bash
