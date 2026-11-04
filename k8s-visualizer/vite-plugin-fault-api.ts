@@ -707,22 +707,37 @@ export function faultInjectorPlugin(_options: FaultApiOptions = {}): Plugin {
           if (url.startsWith('/api/fault/ipam/status') && req.method === 'GET') {
             // Everything the Problem 1 page shows, read with kubectl (like the Problem 2 status),
             // so the page needs no kubectl proxy; only the same KUBECONFIG as the buttons.
-            const [nodes, blocks, pools, pods, events, agent] = await Promise.all([
+            const [nodes, blocks, pools, pods, poolEvents, sandboxEvents, agent, agentPods, agentLog] = await Promise.all([
               kubectlJson(['get', 'nodes', '-o', 'json']),
               kubectlJson(['get', 'nodeblocks', '-o', 'json']),
               kubectlJson(['get', 'ippools', '-o', 'json']),
               kubectlJson(['get', 'pods', '-A', '-o', 'json']),
-              kubectlJson(['get', 'events', '-A', '-o', 'json']),
+              // Only the two kinds of event the page shows; all events would be thousands with 150 pods.
+              kubectlJson(['get', 'events', '-A', '--field-selector', 'involvedObject.kind=IPPool', '-o', 'json']),
+              kubectlJson(['get', 'events', '-A', '--field-selector', 'reason=FailedCreatePodSandBox', '-o', 'json']),
               kubectlJson(['get', 'daemonset', 'ipam-agent', '-n', 'kube-system', '-o', 'json']),
+              kubectlJson(['get', 'pods', '-n', 'kube-system', '-l', 'app=ipam-agent', '-o', 'json']),
+              runShell('kubectl logs -n kube-system -l app=ipam-agent --since=30s --prefix --tail=60 --max-log-requests=20'),
             ]);
             if (!nodes.ok) return sendJson(res, 200, { success: false, error: nodes.error });
             const absent = /NotFound|doesn't have a resource type|the server could not find/;
-            const eventRows = events.ok ? (events.data.items as any[]).filter(e =>
-              e.involvedObject?.kind === 'IPPool' ||
-              (e.reason === 'FailedCreatePodSandBox' && String(e.message).includes('no IP addresses available'))) : [];
+            const eventRows = [
+              ...(poolEvents.ok ? poolEvents.data.items as any[] : []),
+              ...(sandboxEvents.ok ? (sandboxEvents.data.items as any[]).filter(e => String(e.message).includes('no IP addresses available')) : []),
+            ];
             const podRows = pods.ok ? (pods.data.items as any[])
               .filter(p => !p.spec?.hostNetwork && p.status?.podIP)
-              .map(p => ({ name: p.metadata.name, ns: p.metadata.namespace, node: p.spec.nodeName ?? '', ip: p.status.podIP, phase: p.status.phase })) : [];
+              .map(p => ({
+                name: p.metadata.name, ns: p.metadata.namespace, node: p.spec.nodeName ?? '', ip: p.status.podIP, phase: p.status.phase,
+                app: p.metadata.labels?.app ?? '', terminating: !!p.metadata.deletionTimestamp,
+              })) : [];
+            // The agents' own log lines, tagged with the node each pod runs on.
+            const agentNode: Record<string, string> = {};
+            if (agentPods.ok) for (const p of agentPods.data.items as any[]) agentNode[p.metadata.name] = p.spec.nodeName;
+            const agentLines = (agentLog.stdout || '').split('\n').flatMap(line => {
+              const m = line.match(/^\[pod\/([^/]+)\/[^\]]+\] (.*)$/);
+              return m ? [{ node: agentNode[m[1]] ?? m[1], line: m[2] }] : [];
+            });
             const ds = agent.ok ? agent.data.status : null;
             return sendJson(res, 200, {
               success: true,
@@ -732,32 +747,34 @@ export function faultInjectorPlugin(_options: FaultApiOptions = {}): Plugin {
               crdMissing: (!pools.ok && absent.test(pools.error)) || (!blocks.ok && absent.test(blocks.error)),
               pods: podRows,
               events: eventRows,
+              agentLog: agentLines,
               agents: ds ? { desired: ds.desiredNumberScheduled ?? 0, ready: ds.numberReady ?? 0 } : null,
-              sourceErrors: [pools, blocks, pods, events].flatMap(r => (!r.ok && !absent.test(r.error) ? [r.error] : [])),
+              sourceErrors: [pools, blocks, pods, poolEvents].flatMap(r => (!r.ok && !absent.test(r.error) ? [r.error] : [])),
             });
           }
 
-          if (url === '/api/fault/ipam/load' && req.method === 'POST') {
-            // Run N real pause pods on a node (a Deployment pinned to it). 0 removes it.
-            const { nodeName, pods } = await parseJsonBody(req);
-            if (!isNodeName(nodeName)) return sendJson(res, 400, { error: 'valid nodeName is required' });
-            const n = Number(pods);
-            if (!Number.isInteger(n) || n < 0 || n > 300) return sendJson(res, 400, { error: 'pods must be an integer 0..300' });
-            const name = `ipam-load-${nodeName.toLowerCase().replace(/[^a-z0-9-]/g, '-')}`.slice(0, 60);
-            if (n === 0) {
-              const r = await runShell(`kubectl delete deployment ${name} --ignore-not-found`);
-              return sendJson(res, 200, { success: r.code === 0, command: `kubectl delete deployment ${name}`, output: r.stdout || r.stderr });
-            }
+          if (url === '/api/fault/ipam/scale' && req.method === 'POST') {
+            // The demo workload: a Deployment of real pods (pause containers). Scaling it up makes the
+            // scheduler place real pods on the nodes; each one takes a real address from its node's block.
+            const { replicas, nodeName } = await parseJsonBody(req);
+            const n = Number(replicas);
+            if (!Number.isInteger(n) || n < 0 || n > 300) return sendJson(res, 400, { error: 'replicas must be an integer 0..300' });
+            if (nodeName !== undefined && !isNodeName(nodeName)) return sendJson(res, 400, { error: 'invalid nodeName' });
+            const name = nodeName ? `web-${String(nodeName).toLowerCase().replace(/[^a-z0-9-]/g, '-')}`.slice(0, 60) : 'web';
             const manifest = {
               apiVersion: 'apps/v1', kind: 'Deployment',
-              metadata: { name, namespace: 'default', labels: { app: 'ipam-load' } },
+              metadata: { name, namespace: 'default', labels: { app: 'ipam-demo' } },
               spec: {
                 replicas: n,
-                selector: { matchLabels: { app: 'ipam-load', node: name } },
+                selector: { matchLabels: { app: 'ipam-demo', workload: name } },
                 template: {
-                  metadata: { labels: { app: 'ipam-load', node: name } },
+                  metadata: { labels: { app: 'ipam-demo', workload: name } },
                   spec: {
-                    nodeSelector: { 'kubernetes.io/hostname': nodeName },
+                    ...(nodeName ? { nodeSelector: { 'kubernetes.io/hostname': nodeName } } : {}),
+                    topologySpreadConstraints: nodeName ? undefined : [{
+                      maxSkew: 1, topologyKey: 'kubernetes.io/hostname', whenUnsatisfiable: 'ScheduleAnyway',
+                      labelSelector: { matchLabels: { app: 'ipam-demo', workload: name } },
+                    }],
                     terminationGracePeriodSeconds: 0,
                     containers: [{ name: 'pause', image: 'registry.k8s.io/pause:3.10', resources: { requests: { cpu: '1m', memory: '1Mi' } } }],
                   },
@@ -766,53 +783,18 @@ export function faultInjectorPlugin(_options: FaultApiOptions = {}): Plugin {
             };
             const p = execFileAsync('kubectl', ['apply', '-f', '-']);
             p.child.stdin?.end(JSON.stringify(manifest));
+            const cmd = `kubectl apply -f - (Deployment ${name}, replicas=${n}${nodeName ? `, only on ${nodeName}` : ', spread across all nodes'})`;
             try {
               const { stdout } = await p;
-              return sendJson(res, 200, { success: true, command: `kubectl apply deployment ${name} (replicas=${n}, node=${nodeName})`, output: stdout.trim() });
+              return sendJson(res, 200, { success: true, command: cmd, output: stdout.trim() });
             } catch (e: any) {
-              return sendJson(res, 500, { success: false, error: e.stderr?.trim() || e.message });
+              return sendJson(res, 500, { success: false, command: cmd, error: e.stderr?.trim() || e.message });
             }
           }
 
           if (url === '/api/fault/ipam/clear-load' && req.method === 'POST') {
-            const r = await runShell('kubectl delete deployment -l app=ipam-load --ignore-not-found');
-            return sendJson(res, 200, { success: r.code === 0, command: 'kubectl delete deployment -l app=ipam-load', output: r.stdout || r.stderr });
-          }
-
-          if (url === '/api/fault/ipam/leases' && req.method === 'POST') {
-            // Synthetic usage: add N lease files inside the node's own blocks, which is
-            // what the agent counts. minikube cannot run hundreds of pods per node; this
-            // lets the controller see that demand. The agent reclaims them as leaks
-            // after its minimum age (2 min by default).
-            const { nodeName, count } = await parseJsonBody(req);
-            if (!isNodeName(nodeName)) return sendJson(res, 400, { error: 'valid nodeName is required' });
-            const n = Number(count);
-            if (!Number.isInteger(n) || n < 1 || n > 600) return sendJson(res, 400, { error: 'count must be an integer 1..600' });
-            const got = await runShell('kubectl get nodeblocks -o json');
-            if (got.code !== 0) return sendJson(res, 500, { error: got.stderr || 'cannot list nodeblocks' });
-            const items = JSON.parse(got.stdout).items as any[];
-            const mine = items.filter(b => b.spec?.nodeName === nodeName && b.status?.phase === 'Active' && !b.spec?.drain);
-            const ips: string[] = [];
-            for (const b of mine) {
-              const [ip, bits] = String(b.spec.cidr).split('/');
-              const o = ip.split('.').map(Number);
-              const base = ((o[0] << 24) | (o[1] << 16) | (o[2] << 8) | o[3]) >>> 0;
-              const size = 2 ** (32 - Number(bits));
-              for (let i = 2; i < size - 1 && ips.length < n + 1000; i++) {
-                const v = (base + i) >>> 0;
-                ips.push(`${v >>> 24}.${(v >>> 16) & 255}.${(v >>> 8) & 255}.${v & 255}`);
-              }
-            }
-            if (!ips.length) return sendJson(res, 409, { error: `${nodeName} has no Active block yet` });
-            const r = await execOnNode(
-              nodeName,
-              `mkdir -p /var/lib/cni/networks/buddy; c=0; for ip in ${ips.join(' ')}; do [ $c -ge ${n} ] && break; [ -e /var/lib/cni/networks/buddy/$ip ] || { echo synthetic > /var/lib/cni/networks/buddy/$ip && c=$((c+1)); }; done; echo created $c`
-            );
-            return sendJson(res, r.code === 0 ? 200 : 500, {
-              success: r.code === 0,
-              command: `create ${n} lease files in /var/lib/cni/networks/buddy on ${nodeName}`,
-              output: r.stdout || r.stderr,
-            });
+            const r = await runShell('kubectl delete deployment -l app=ipam-demo --ignore-not-found');
+            return sendJson(res, 200, { success: r.code === 0, command: 'kubectl delete deployment -l app=ipam-demo', output: r.stdout || r.stderr });
           }
 
           return sendJson(res, 404, { error: 'Unknown fault API endpoint' });

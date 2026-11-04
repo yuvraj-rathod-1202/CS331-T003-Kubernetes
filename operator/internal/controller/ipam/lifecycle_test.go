@@ -370,3 +370,20 @@ func TestStatusHeartbeat(t *testing.T) {
 		t.Fatal("a missing timestamp is always due")
 	}
 }
+
+func TestNoShrinkRightAfterTheNodeGrew(t *testing.T) {
+	// A full old block and a new empty one: the node just grew, so nothing drains,
+	// even though the old block is past its own cooldown.
+	blocks := []remediationv1alpha1.NodeBlock{
+		nblock("n1", b0, "Active", 29, t0.Add(-time.Hour)),
+		nblock("n1", b1, "Active", 0, t0.Add(-30*time.Second)),
+		nblock("n1", "10.244.0.64/26", "Active", 0, t0.Add(-30*time.Second)),
+	}
+	if p := plan(remediationv1alpha1.IPPoolSpec{}, nodes1(), blocks, t0); len(p.Drain) != 0 {
+		t.Fatalf("drained %v right after the node grew", p.Drain)
+	}
+	// Once the node has been stable for the cooldown, the emptiest block goes.
+	if p := plan(remediationv1alpha1.IPPoolSpec{}, nodes1(), blocks, t0.Add(10*time.Minute)); len(p.Drain) == 0 {
+		t.Fatal("a stable node with spare blocks should shrink")
+	}
+}

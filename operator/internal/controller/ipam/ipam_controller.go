@@ -36,12 +36,15 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
+	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -476,10 +479,37 @@ func (r *IPAMController) event(obj client.Object, typ, reason, msg string) {
 	}
 }
 
+// newEventRecorder returns a recorder whose rate limits fit this controller. The
+// default recorder lets an object emit a burst of 25 events and then about one
+// every five minutes, and merges similar events into one "(combined from similar
+// events)" object. A pool that fills up makes dozens of block decisions in a
+// minute, so with the defaults most of them never reach the API, and they are
+// what people read to see what the controller did.
+func newEventRecorder(mgr ctrl.Manager) (record.EventRecorder, error) {
+	cs, err := kubernetes.NewForConfig(mgr.GetConfig())
+	if err != nil {
+		return nil, err
+	}
+	b := record.NewBroadcasterWithCorrelatorOptions(record.CorrelatorOptions{BurstSize: 1000, QPS: 10, MaxEvents: 1000})
+	b.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: cs.CoreV1().Events("")})
+	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+		<-ctx.Done()
+		b.Shutdown()
+		return nil
+	})); err != nil {
+		return nil, err
+	}
+	return b.NewRecorder(mgr.GetScheme(), corev1.EventSource{Component: "ipam-controller"}), nil
+}
+
 // SetupWithManager sets up the controller with the Manager. Node and NodeBlock
 // changes both trigger a reconcile of the pool they belong to.
 func (r *IPAMController) SetupWithManager(mgr ctrl.Manager) error {
-	r.Recorder = mgr.GetEventRecorderFor("ipam-controller") //nolint:staticcheck
+	rec, err := newEventRecorder(mgr)
+	if err != nil {
+		return err
+	}
+	r.Recorder = rec
 	r.APIReader = mgr.GetAPIReader()
 
 	allPools := handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, _ client.Object) []reconcile.Request {

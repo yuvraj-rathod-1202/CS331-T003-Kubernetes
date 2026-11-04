@@ -298,7 +298,10 @@ func planPool(spec *remediationv1alpha1.IPPoolSpec, nodes []corev1.Node, blocks 
 		// Shrink: drain as many blocks as the node can spare. The pods still in
 		// draining blocks will be replaced inside the remaining ones, so they
 		// count towards the node's demand.
-		if !spec.DisableShrink {
+		// A node that changed recently is left alone until it has been stable for
+		// the cooldown. Otherwise, right after a grow, the only block old enough to
+		// drain is a full one, and draining it does nothing while its pods run.
+		if !spec.DisableShrink && in.Now.Sub(latestChange(owned)) >= time.Duration(spec.ShrinkCooldownSeconds)*time.Second {
 			demand := used
 			for _, d := range draining {
 				demand += d.Status.UsedAddresses
@@ -358,6 +361,17 @@ func (plan *poolPlan) growNode(spec *remediationv1alpha1.IPPoolSpec, p *buddy.Po
 		plan.New = append(plan.New, plannedBlock{NodeName: node, CIDR: b.CIDR, Reason: reasonGrow})
 	}
 	plan.Pending = true
+}
+
+// latestChange is the most recent phase change of any of the node's blocks.
+func latestChange(owned []remediationv1alpha1.NodeBlock) time.Time {
+	var t time.Time
+	for i := range owned {
+		if tt := transitionTime(&owned[i]); tt.After(t) {
+			t = tt
+		}
+	}
+	return t
 }
 
 // starved reports whether a failure at time t is newer than every change to the

@@ -140,40 +140,44 @@ To make the demo clear, visual, and easy to follow during a presentation, the we
 
 ## Problem 1: Buddy-style dynamic IPAM demo (`/project1`)
 
-`/project1` is a **live** view of the operator, like the other pages: it reads the cluster's
-`IPPool`, `NodeBlock`, nodes, pods and events through the API proxy, and its buttons create real
-pods and real lease files. `/project1/sim` is an offline simulation of the planner for when no
-cluster is available.
+`/project1` shows the live cluster: every block, address count and log line comes from the cluster
+(read with kubectl by the dashboard's dev server). The demo uses a real workload: a Deployment of
+real pods, so each pod takes a real address from its node's block. `/project1/sim` is an offline
+simulation of the planner, for when no cluster is available.
 
 ### Setup
 ```bash
-export KUBECONFIG=<kubeconfig of the cluster the operator manages>
+export KUBECONFIG=$HOME/buddy.kubeconfig                    # every terminal, including the dashboard's
 kubectl apply -f operator/config/crd/bases/ && kubectl apply -f operator/config/samples/ipam_sample.yaml
 kubectl apply -f operator/deploy/ipam-agent.yaml            # node agents
-(cd operator && go run ./cmd --controllers=ipam)             # controller
-(cd k8s-visualizer && npm run dev)                           # same KUBECONFIG: the page and its buttons use kubectl
+(cd operator && go run ./cmd --controllers=ipam --health-probe-bind-address=:18081 --metrics-bind-address=0)
+(cd k8s-visualizer && npm run dev)                           # then open http://localhost:5173/project1
 ```
-No `kubectl proxy` is needed for `/project1` or `/project2` (only the older cluster view at `/` uses it).
-Open `/project1`. The header shows API, agents, controller, pool phase and block count. The controller
-refreshes the pool status at least every 30 s, so "Controller: stopped" means it is not running.
+The header must show Cluster connected, Controller running, Node agents 3/3 and Pool Ready.
 
-To demo both problems on one cluster, run the controllers together:
-`go run ./cmd --controllers=ipam,cniresilience` (or omit the flag to run all). With only `ipam` running,
-`/project2` still opens and shows what is missing (no CNIResilience CR, operator not running), and the two
-pages link to each other.
+Demo settings used on the `buddy-ipam` cluster, so a full cycle fits in about a minute:
+- IPPool: `initialBlockPercent: 5` (each node starts with a /27, so about 25 real pods fill it),
+  `shrinkCooldownSeconds: 20`, `quarantineSeconds: 10`.
+- Agent DaemonSet args: `--interval=5s --promote-timeout=15s --leak-min-age=20s --drain-settle=3s`.
+The defaults in `config/samples` and `deploy/ipam-agent.yaml` are the safer production values.
 
-### Demo flow
-1. **Pool map and node cards**: each square is a slice of the pool, coloured by owning node; the card
-   chips show each block's phase and used/usable addresses. Hover a chip to highlight its block.
-2. **Run N real pods** on a node: real pods take addresses from that node's block.
-3. **+N leases** (synthetic usage): minikube cannot run hundreds of pods, so this writes lease files inside
-   the node's own blocks, which is what the agent counts. Watch the controller allocate a block
-   (Pending, then Active once every node has the route; "Controller events" shows `BlockAllocated`).
-   The agent removes these leases as leaks after about 2 minutes, which also shows leak reclaim.
-4. **Remove all load pods**, then wait: idle blocks drain, are quarantined and released
-   (`BlockDraining`, `BlockReleased` events).
-5. **Evaluation tab**: results of `operator/cmd/ipam-sim` against fixed /24, fixed /25 and Calico-style
-   blocks (a model), plus the checks done by hand on a 3-node minikube cluster.
+### Demo flow (about 1 minute)
+1. Press **Fill the IP pool**. A Deployment scales to 150 real pods across the nodes.
+2. Watch the **Cluster** view: one square per address, filled squares are pods. A node's block fills up,
+   a new block appears (Pending while routes are installed on the other nodes, then Active), and
+   neighbouring blocks merge into one range.
+3. Watch **What the operator is doing**, in order: your request and the kubectl command, the kubelet's
+   "pods could not start, no IP addresses available" (the node is full), the controller's
+   `BlockAllocated` decisions, the node agents' own log lines (routes installed, CNI config written,
+   block Active), and the pod count reaching 150.
+4. With **Release automatically afterwards** ticked, the workload scales back to 0 a few seconds later.
+   The controller drains the idle blocks (they leave the CNI config and wait for their last pods),
+   quarantines them and returns them to the pool (`BlockDraining`, `BlockReleased`).
+5. The step boxes at the top tick off as each stage is seen in the cluster, with the time it took.
+
+**Crowd one node** does the same with 70 pods pinned to one node, to show that the other nodes are
+left alone. Wait about a minute between runs so the previous run's blocks are released.
+**How it compares (simulator)** at the bottom holds the simulator results (a model, not this cluster).
 
 ## Problem 2: Dual-CNI resilience demo (`/project2`)
 
