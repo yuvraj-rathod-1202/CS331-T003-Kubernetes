@@ -151,10 +151,16 @@ export KUBECONFIG=<kubeconfig of the cluster the operator manages>
 kubectl apply -f operator/config/crd/bases/ && kubectl apply -f operator/config/samples/ipam_sample.yaml
 kubectl apply -f operator/deploy/ipam-agent.yaml            # node agents
 (cd operator && go run ./cmd --controllers=ipam)             # controller
-kubectl proxy --port 8001 &                                  # the dashboard reads the API here
-(cd k8s-visualizer && npm run dev)                           # same KUBECONFIG, so the buttons hit the same cluster
+(cd k8s-visualizer && npm run dev)                           # same KUBECONFIG: the page and its buttons use kubectl
 ```
-Open `/project1`. The header shows API, agents, pool phase and block count.
+No `kubectl proxy` is needed for `/project1` or `/project2` (only the older cluster view at `/` uses it).
+Open `/project1`. The header shows API, agents, controller, pool phase and block count. The controller
+refreshes the pool status at least every 30 s, so "Controller: stopped" means it is not running.
+
+To demo both problems on one cluster, run the controllers together:
+`go run ./cmd --controllers=ipam,cniresilience` (or omit the flag to run all). With only `ipam` running,
+`/project2` still opens and shows what is missing (no CNIResilience CR, operator not running), and the two
+pages link to each other.
 
 ### Demo flow
 1. **Pool map and node cards**: each square is a slice of the pool, coloured by owning node; the card

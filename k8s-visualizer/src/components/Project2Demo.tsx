@@ -274,6 +274,7 @@ export function Project2Demo() {
       <header className="p2-header">
         <div>
           <h1>Dual-CNI Resilience</h1>
+          <a className="p2-nav-link" href="/project1">Problem 1: IPAM</a>
           {/* <p className="p2-muted">Live cluster state · refreshes every {POLL_MS / 1000}s</p> */}
         </div>
         <div className="p2-pills">

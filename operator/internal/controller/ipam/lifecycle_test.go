@@ -345,3 +345,28 @@ func TestShrinkDrainsSeveralBlocksButKeepsTheFloor(t *testing.T) {
 		t.Fatalf("the busiest block should be the one that stays: %v", p.Drain)
 	}
 }
+
+func TestStatusHeartbeat(t *testing.T) {
+	r, c := fakeReconciler(t, pool(poolName, "10.244.0.0/22"), node("n1", 110, "192.168.58.2"))
+	runReconcile(t, r, poolName)
+	get := func() *metav1.Time {
+		var p remediationv1alpha1.IPPool
+		_ = c.Get(context.Background(), types.NamespacedName{Name: poolName}, &p)
+		return p.Status.LastReconcileTime
+	}
+	first := get()
+	if first == nil {
+		t.Fatal("status has no timestamp")
+	}
+	// Nothing changed and the timestamp is fresh: no write.
+	runReconcile(t, r, poolName)
+	if got := get(); !got.Equal(first) {
+		t.Fatalf("timestamp rewritten without need: %v -> %v", first, got)
+	}
+	if heartbeatDue(first, first.Add(10*time.Second)) || !heartbeatDue(first, first.Add(31*time.Second)) {
+		t.Fatal("heartbeat should be due after 30s and not before")
+	}
+	if !heartbeatDue(nil, time.Now()) {
+		t.Fatal("a missing timestamp is always due")
+	}
+}

@@ -406,11 +406,21 @@ func (r *IPAMController) updateStatus(ctx context.Context, pool *remediationv1al
 		st.NodeAllocations = summarise(blocks)
 		st.CIDRs = plan.CIDRs
 	}
-	if equalStatus(pool.Status, st) {
+	// An unchanged status is not rewritten, except for a heartbeat: the timestamp
+	// is refreshed every heartbeatEvery so a dashboard can tell a running
+	// controller from a stopped one.
+	if equalStatus(pool.Status, st) && !heartbeatDue(pool.Status.LastReconcileTime, now.Time) {
 		return nil
 	}
 	pool.Status = st
 	return r.Status().Update(ctx, pool)
+}
+
+// heartbeatEvery is how often an otherwise unchanged pool status is rewritten.
+const heartbeatEvery = 30 * time.Second
+
+func heartbeatDue(last *metav1.Time, now time.Time) bool {
+	return last == nil || now.Sub(last.Time) >= heartbeatEvery
 }
 
 // equalStatus ignores the timestamp so an idle pool does not write every pass.

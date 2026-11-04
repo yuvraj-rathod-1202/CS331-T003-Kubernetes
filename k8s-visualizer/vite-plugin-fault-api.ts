@@ -704,6 +704,39 @@ export function faultInjectorPlugin(_options: FaultApiOptions = {}): Plugin {
           // 9. IPAM (Problem 1) workload helpers: POST /api/fault/ipam/*
           //    These create real load on the cluster the IPAM operator manages.
           // -------------------------------------------------------------
+          if (url.startsWith('/api/fault/ipam/status') && req.method === 'GET') {
+            // Everything the Problem 1 page shows, read with kubectl (like the Problem 2 status),
+            // so the page needs no kubectl proxy; only the same KUBECONFIG as the buttons.
+            const [nodes, blocks, pools, pods, events, agent] = await Promise.all([
+              kubectlJson(['get', 'nodes', '-o', 'json']),
+              kubectlJson(['get', 'nodeblocks', '-o', 'json']),
+              kubectlJson(['get', 'ippools', '-o', 'json']),
+              kubectlJson(['get', 'pods', '-A', '-o', 'json']),
+              kubectlJson(['get', 'events', '-A', '-o', 'json']),
+              kubectlJson(['get', 'daemonset', 'ipam-agent', '-n', 'kube-system', '-o', 'json']),
+            ]);
+            if (!nodes.ok) return sendJson(res, 200, { success: false, error: nodes.error });
+            const absent = /NotFound|doesn't have a resource type|the server could not find/;
+            const eventRows = events.ok ? (events.data.items as any[]).filter(e =>
+              e.involvedObject?.kind === 'IPPool' ||
+              (e.reason === 'FailedCreatePodSandBox' && String(e.message).includes('no IP addresses available'))) : [];
+            const podRows = pods.ok ? (pods.data.items as any[])
+              .filter(p => !p.spec?.hostNetwork && p.status?.podIP)
+              .map(p => ({ name: p.metadata.name, ns: p.metadata.namespace, node: p.spec.nodeName ?? '', ip: p.status.podIP, phase: p.status.phase })) : [];
+            const ds = agent.ok ? agent.data.status : null;
+            return sendJson(res, 200, {
+              success: true,
+              nodes: nodes.data.items,
+              blocks: blocks.ok ? blocks.data.items : [],
+              pools: pools.ok ? pools.data.items : [],
+              crdMissing: (!pools.ok && absent.test(pools.error)) || (!blocks.ok && absent.test(blocks.error)),
+              pods: podRows,
+              events: eventRows,
+              agents: ds ? { desired: ds.desiredNumberScheduled ?? 0, ready: ds.numberReady ?? 0 } : null,
+              sourceErrors: [pools, blocks, pods, events].flatMap(r => (!r.ok && !absent.test(r.error) ? [r.error] : [])),
+            });
+          }
+
           if (url === '/api/fault/ipam/load' && req.method === 'POST') {
             // Run N real pause pods on a node (a Deployment pinned to it). 0 removes it.
             const { nodeName, pods } = await parseJsonBody(req);

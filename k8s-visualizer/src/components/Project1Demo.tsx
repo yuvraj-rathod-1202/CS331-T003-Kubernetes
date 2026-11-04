@@ -5,11 +5,11 @@ import { policies, scenarios, sweep, liveChecks } from '../ipam/evalData';
 import './Project1Demo.css';
 
 // Live view of the buddy IPAM operator. Everything on the left and in the node cards is read from
-// the Kubernetes API (via `kubectl proxy`, like the other pages); the buttons create real pods or
+// the cluster with kubectl (the dev server's /api/fault/ipam/status, like the Problem 2 page); the buttons create real pods or
 // real lease files on the cluster. Nothing here is simulated. The offline simulator is at /project1/sim.
 
-const GROUP = '/apis/remediation.cn-operator.yuvraj-rathod-1202.github.io/v1alpha1';
 const NODE_COLORS = ['#3b82f6', '#f97316', '#10b981', '#e879a9', '#8b5cf6', '#eab308', '#14b8a6', '#ef4444'];
+const CONTROLLER_STALE_SECONDS = 75;
 const POLICY_COLORS = ['#3b82f6', '#f97316', '#10b981', '#e879a9'];
 
 interface Blk { name: string; node: string; cidr: string; phase: string; drain: boolean; used: number; acked: string[]; reclaimed: number; base: number; size: number }
@@ -45,26 +45,21 @@ export function Project1Demo() {
   const [podsWanted, setPodsWanted] = useState<Record<string, number>>({});
   const [leases, setLeases] = useState(150);
   const [now, setNow] = useState(Date.now());
+  const [crdMissing, setCrdMissing] = useState(false);
   const alive = useRef(true);
 
   const refresh = useCallback(async () => {
     try {
-      const [nd, bl, pl, pd, ev, ag] = await Promise.all([
-        getJson('/api/v1/nodes'),
-        getJson(`${GROUP}/nodeblocks`),
-        getJson(`${GROUP}/ippools`),
-        getJson('/api/v1/pods'),
-        getJson('/api/v1/events').catch(() => ({ items: [] })),
-        getJson('/api/v1/namespaces/kube-system/pods?labelSelector=app%3Dipam-agent').catch(() => ({ items: [] })),
-      ]);
+      const st = await getJson('/api/fault/ipam/status');
       if (!alive.current) return;
-      setNodes(nd.items.map((n: any) => ({
+      if (!st.success) throw new Error(st.error ?? 'status failed');
+      setNodes(st.nodes.map((n: any) => ({
         name: n.metadata.name,
         ready: n.status.conditions?.find((c: any) => c.type === 'Ready')?.status === 'True',
         ip: n.status.addresses?.find((a: any) => a.type === 'InternalIP')?.address ?? '',
         maxPods: Number(n.status.allocatable?.pods ?? 110),
       })).sort((a: NodeInfo, b: NodeInfo) => a.name.localeCompare(b.name)));
-      setBlocks(bl.items.map((b: any) => {
+      setBlocks(st.blocks.map((b: any) => {
         const c = parseCidr(b.spec.cidr);
         return {
           name: b.metadata.name, node: b.spec.nodeName, cidr: b.spec.cidr, phase: b.status?.phase || 'Pending',
@@ -72,20 +67,18 @@ export function Project1Demo() {
           reclaimed: b.status?.reclaimedLeases ?? 0, base: c.base, size: c.size,
         } as Blk;
       }));
-      const pools = [...pl.items].sort((a: any, b: any) => String(a.metadata.creationTimestamp).localeCompare(String(b.metadata.creationTimestamp)));
+      const pools = [...st.pools].sort((a: any, b: any) => String(a.metadata.creationTimestamp).localeCompare(String(b.metadata.creationTimestamp)));
       setPool(pools[0] ? { name: pools[0].metadata.name, spec: pools[0].spec, status: pools[0].status ?? {} } : null);
-      setPods(pd.items.filter((p: any) => !p.spec.hostNetwork && p.status?.podIP).map((p: any) => ({
-        name: p.metadata.name, ns: p.metadata.namespace, node: p.spec.nodeName ?? '', ip: p.status.podIP, phase: p.status.phase,
-      })));
+      setCrdMissing(!!st.crdMissing);
+      setPods(st.pods);
       const rows: EventRow[] = [];
-      for (const e of ev.items) {
+      for (const e of st.events) {
         const t = Date.parse(e.lastTimestamp || e.eventTime || e.metadata.creationTimestamp);
         if (e.involvedObject?.kind === 'IPPool') rows.push({ time: t, kind: 'controller', reason: e.reason, message: e.message });
-        else if (e.reason === 'FailedCreatePodSandBox' && String(e.message).includes('no IP addresses available'))
-          rows.push({ time: t, kind: 'kubelet', reason: e.reason, message: `${e.source?.host ?? ''}: no IP addresses available in range set` });
+        else rows.push({ time: t, kind: 'kubelet', reason: e.reason, message: `${e.source?.host ?? ''}: no IP addresses available in range set` });
       }
       setEvents(rows.sort((a, b) => a.time - b.time).slice(-60));
-      setAgents({ total: ag.items.length, ready: ag.items.filter((p: any) => p.status?.containerStatuses?.every((c: any) => c.ready)).length });
+      setAgents(st.agents ? { total: st.agents.desired, ready: st.agents.ready } : { total: 0, ready: 0 });
       setConn('ok');
       setNow(Date.now());
     } catch (e: any) {
@@ -121,7 +114,17 @@ export function Project1Demo() {
   const stats = pool?.status ?? {};
   const totalBlocks = blocks.length;
   const pending = blocks.filter(b => b.phase === 'Pending').length;
+  // The controller refreshes the status timestamp at least every 30 s, so a stale one means it is stopped.
   const lastRec = stats.lastReconcileTime ? Math.max(0, Math.round((now - Date.parse(stats.lastReconcileTime)) / 1000)) : null;
+  const controllerRunning = lastRec !== null && lastRec <= CONTROLLER_STALE_SECONDS;
+  const notices: string[] = [];
+  if (conn === 'ok') {
+    if (crdMissing) notices.push('The IPAM CRDs are not installed. Run: kubectl apply -f operator/config/crd/bases/');
+    else if (!pool) notices.push('No IPPool found. Apply operator/config/samples/ipam_sample.yaml (set cidrs and reservedCIDRs for this cluster).');
+    else if (!controllerRunning) notices.push('The IPAM controller is not running (no status update for over a minute). Start it: cd operator && go run ./cmd --controllers=ipam');
+    if (agents.total === 0) notices.push('The ipam-agent DaemonSet is not deployed: kubectl apply -f operator/deploy/ipam-agent.yaml');
+    else if (agents.ready < agents.total) notices.push(`Only ${agents.ready} of ${agents.total} IPAM agents are ready; blocks stay Pending until every node has its routes.`);
+  }
 
   return (
     <div className="p1-container">
@@ -131,7 +134,7 @@ export function Project1Demo() {
           <div>
             <div className="p1-title"><Boxes size={18} /> Buddy-style dynamic pod IPAM <span className="p1-live"><i /> LIVE</span></div>
             <div className="p1-subtitle">
-              Reads the cluster's <code>IPPool</code>, <code>NodeBlock</code>, nodes and pods through the API proxy. Buttons create real pods
+              Reads the cluster's <code>IPPool</code>, <code>NodeBlock</code>, nodes, pods and events with kubectl. Buttons create real pods
               and real lease files; the controller and agents respond.
             </div>
           </div>
@@ -139,24 +142,22 @@ export function Project1Demo() {
         <div className="p1-metrics">
           <div className="p1-pill"><span className="label">API</span><span className={`val ${conn === 'ok' ? 'good' : 'warn'}`}>{conn === 'ok' ? 'connected' : conn}</span></div>
           <div className="p1-pill"><span className="label">Agents</span><span className={`val ${agents.total && agents.ready === agents.total ? 'good' : 'warn'}`}>{agents.ready}/{agents.total}</span></div>
+          <div className="p1-pill"><span className="label">Controller</span><span className={`val ${controllerRunning ? 'good' : 'warn'}`}>{controllerRunning ? 'running' : lastRec === null ? 'no status' : `stopped (${lastRec}s)`}</span></div>
           <div className="p1-pill"><span className="label">Pool</span><span className={`val ${stats.phase === 'Ready' ? 'good' : 'warn'}`}>{stats.phase ?? '—'}</span></div>
           <div className="p1-pill"><span className="label">Blocks</span><span className="val">{totalBlocks}{pending ? ` (${pending} pending)` : ''}</span></div>
-          <div className="p1-pill" title="The controller updates status only when something changes"><span className="label">Last pool change</span><span className="val">{lastRec === null ? '—' : `${lastRec}s ago`}</span></div>
           <a className="p1-link" href="/project1/sim">Offline simulator</a>
           <a className="p1-link" href="/">Cluster view</a>
-          <a className="p1-link" href="/project2">Problem 2</a>
+          <a className="p1-link" href="/project2">Problem 2: CNI resilience</a>
         </div>
       </header>
 
       {conn === 'error' && (
         <div className="p1-banner">
-          Cannot reach the Kubernetes API ({err}). Start the proxy for the cluster the operator manages, for example{' '}
-          <code>KUBECONFIG=… kubectl proxy --port 8001</code>, and run the dashboard with the same <code>KUBECONFIG</code> so the buttons act on it.
+          Cannot read the cluster ({err}). Start the dashboard with the KUBECONFIG of the cluster the operator manages, for example{' '}
+          <code>KUBECONFIG=~/buddy.kubeconfig npm run dev</code>.
         </div>
       )}
-      {conn === 'ok' && !pool && (
-        <div className="p1-banner">No <code>IPPool</code> found. Apply <code>operator/config/samples/ipam_sample.yaml</code> and run <code>go run ./cmd --controllers=ipam</code>.</div>
-      )}
+      {notices.map(n => <div key={n} className="p1-banner">{n}</div>)}
 
       <div className="p1-toolbar">
         <button onClick={refresh}><RefreshCw size={14} />Refresh</button>

@@ -96,7 +96,7 @@ export function Project1Sim() {
           <div className="p1-pill"><span className="label">Sim time</span><span className="val">{Math.floor(s.t / 60)}m{String(s.t % 60).padStart(2, '0')}s</span></div>
           <a className="p1-link" href="/project1">Live view</a>
           <a className="p1-link" href="/">Cluster view</a>
-          <a className="p1-link" href="/project2">Problem 2</a>
+          <a className="p1-link" href="/project2">Problem 2: CNI resilience</a>
         </div>
       </header>
 
