@@ -270,12 +270,19 @@ func (r *IPAMController) applyLifecycle(ctx context.Context, pool *remediationv1
 	}
 
 	for _, n := range plan.Delete {
-		nb := &remediationv1alpha1.NodeBlock{ObjectMeta: metav1.ObjectMeta{Name: n}}
-		if err := r.Delete(ctx, nb); client.IgnoreNotFound(err) != nil {
+		// Read the block first so the log and event name its CIDR, not its object name.
+		var nb remediationv1alpha1.NodeBlock
+		if err := r.Get(ctx, types.NamespacedName{Name: n}, &nb); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
 			return changed, err
 		}
-		logger.Info("Released block", "block", n)
-		r.event(pool, corev1.EventTypeNormal, "BlockReleased", fmt.Sprintf("block %s returned to the pool", n))
+		if err := r.Delete(ctx, &nb); client.IgnoreNotFound(err) != nil {
+			return changed, err
+		}
+		logger.Info("Released block", "block", nb.Spec.CIDR, "node", nb.Spec.NodeName)
+		r.event(pool, corev1.EventTypeNormal, "BlockReleased", fmt.Sprintf("block %s of node %s returned to the pool", nb.Spec.CIDR, nb.Spec.NodeName))
 		changed = true
 	}
 	return changed, nil

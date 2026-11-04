@@ -32,6 +32,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	remediationv1alpha1 "CS331-CN-Project-1/operator/api/v1alpha1"
+	"CS331-CN-Project-1/operator/internal/controller/ipam/buddy"
 )
 
 // Agent keeps one node's routes, CNI config and NodeBlock status in line with
@@ -286,7 +287,8 @@ func (a *Agent) syncOwn(ctx context.Context, nodes []corev1.Node, blocks []remed
 			return fmt.Errorf("write CNI config: %w", err)
 		}
 		if changed {
-			logger.Info("CNI config written", "blocks", cidrs)
+			ranges, _ := buddy.Aggregate(cidrs)
+			logger.Info("CNI config written", "blocks", cidrs, "ranges", ranges)
 		}
 		configOK = true
 	}
