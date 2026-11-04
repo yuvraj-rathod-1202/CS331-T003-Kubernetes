@@ -5,6 +5,7 @@ import { ControlPanel } from './components/ControlPanel';
 import { LogTerminal } from './components/LogTerminal';
 import { PodLogsModal } from './components/PodLogsModal';
 import { Project1Demo } from './components/Project1Demo';
+import { Project1Sim } from './components/Project1Sim';
 import { Project2Demo } from './components/Project2Demo';
 import type { LogEntry } from './components/LogTerminal';
 import './index.css';
@@ -19,6 +20,9 @@ function App() {
   }, []);
 
   // Dedicated Route: /project1
+  if (currentPath.startsWith('/project1/sim')) {
+    return <Project1Sim />;
+  }
   if (currentPath.startsWith('/project1')) {
     return <Project1Demo />;
   }

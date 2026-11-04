@@ -1,80 +1,127 @@
-import { useEffect, useRef, useState } from 'react';
-import { Boxes, Play, Pause, RotateCcw, Plus, Trash2, Zap, Moon, Flame, ScrollText, BarChart3, BookOpen } from 'lucide-react';
-import { IpamSim, CELL, cidrOf, capacityOf, usable, defaultParams } from '../ipam/engine';
-import type { Block } from '../ipam/engine';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Boxes, RefreshCw, Trash2, ScrollText, BarChart3, BookOpen, Rocket, FlaskConical } from 'lucide-react';
+import { aggregate, usable } from '../ipam/engine';
 import { policies, scenarios, sweep, liveChecks } from '../ipam/evalData';
 import './Project1Demo.css';
 
+// Live view of the buddy IPAM operator. Everything on the left and in the node cards is read from
+// the Kubernetes API (via `kubectl proxy`, like the other pages); the buttons create real pods or
+// real lease files on the cluster. Nothing here is simulated. The offline simulator is at /project1/sim.
+
+const GROUP = '/apis/remediation.cn-operator.yuvraj-rathod-1202.github.io/v1alpha1';
 const NODE_COLORS = ['#3b82f6', '#f97316', '#10b981', '#e879a9', '#8b5cf6', '#eab308', '#14b8a6', '#ef4444'];
 const POLICY_COLORS = ['#3b82f6', '#f97316', '#10b981', '#e879a9'];
 
-function makeSim(nodes = 3) {
-  const s = new IpamSim(defaultParams);
-  for (let i = 0; i < nodes; i++) s.addNode();
-  for (let i = 0; i < 12; i++) s.tick();
-  // /project1?preset=burst starts mid-burst, for screenshots and quick demos.
-  if (new URLSearchParams(window.location.search).get('preset') === 'burst') {
-    s.nodes.forEach(n => s.setDemand(n.name, 200));
-    for (let i = 0; i < 90; i++) s.tick();
-  }
-  s.log.length = 0;
-  s.say('info', 'Started with 3 nodes, 4096-address pool (10.244.0.0/20), blocks of 16+ addresses');
-  return s;
+interface Blk { name: string; node: string; cidr: string; phase: string; drain: boolean; used: number; acked: string[]; reclaimed: number; base: number; size: number }
+interface NodeInfo { name: string; ready: boolean; ip: string; maxPods: number }
+interface PodInfo { name: string; ns: string; node: string; ip: string; phase: string }
+interface Pool { name: string; spec: any; status: any }
+interface EventRow { time: number; kind: 'controller' | 'kubelet'; reason: string; message: string }
+interface ActionResult { ok: boolean; command: string; output: string; at: number }
+
+const ipToNum = (ip: string) => ip.split('.').reduce((a, o) => ((a << 8) | Number(o)) >>> 0, 0) >>> 0;
+const numToIp = (n: number) => [n >>> 24, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join('.');
+const parseCidr = (c: string) => { const [ip, bits] = c.split('/'); return { base: ipToNum(ip), size: 2 ** (32 - Number(bits)) }; };
+
+async function getJson(path: string) {
+  const r = await fetch(path);
+  if (!r.ok) throw new Error(`${path}: ${r.status}`);
+  return r.json();
 }
 
 export function Project1Demo() {
-  const sim = useRef<IpamSim>(makeSim());
-  const [, setFrame] = useState(0);
-  const [running, setRunning] = useState(true);
-  const [speed, setSpeed] = useState(4);
-  const [tab, setTab] = useState<'log' | 'eval' | 'how'>(() => {
-    const t = new URLSearchParams(window.location.search).get('tab');
-    return t === 'eval' || t === 'how' ? t : 'log';
-  });
+  const [conn, setConn] = useState<'connecting' | 'ok' | 'error'>('connecting');
+  const [err, setErr] = useState('');
+  const [nodes, setNodes] = useState<NodeInfo[]>([]);
+  const [blocks, setBlocks] = useState<Blk[]>([]);
+  const [pods, setPods] = useState<PodInfo[]>([]);
+  const [pool, setPool] = useState<Pool | null>(null);
+  const [events, setEvents] = useState<EventRow[]>([]);
+  const [agents, setAgents] = useState({ ready: 0, total: 0 });
+  const [tab, setTab] = useState<'log' | 'eval' | 'how'>('log');
   const [hover, setHover] = useState<string | null>(null);
-  const [shrinkOn, setShrinkOn] = useState(true);
-  const [emergencyOn, setEmergencyOn] = useState(true);
+  const [last, setLast] = useState<ActionResult | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [podsWanted, setPodsWanted] = useState<Record<string, number>>({});
+  const [leases, setLeases] = useState(150);
+  const [now, setNow] = useState(Date.now());
+  const alive = useRef(true);
+
+  const refresh = useCallback(async () => {
+    try {
+      const [nd, bl, pl, pd, ev, ag] = await Promise.all([
+        getJson('/api/v1/nodes'),
+        getJson(`${GROUP}/nodeblocks`),
+        getJson(`${GROUP}/ippools`),
+        getJson('/api/v1/pods'),
+        getJson('/api/v1/events').catch(() => ({ items: [] })),
+        getJson('/api/v1/namespaces/kube-system/pods?labelSelector=app%3Dipam-agent').catch(() => ({ items: [] })),
+      ]);
+      if (!alive.current) return;
+      setNodes(nd.items.map((n: any) => ({
+        name: n.metadata.name,
+        ready: n.status.conditions?.find((c: any) => c.type === 'Ready')?.status === 'True',
+        ip: n.status.addresses?.find((a: any) => a.type === 'InternalIP')?.address ?? '',
+        maxPods: Number(n.status.allocatable?.pods ?? 110),
+      })).sort((a: NodeInfo, b: NodeInfo) => a.name.localeCompare(b.name)));
+      setBlocks(bl.items.map((b: any) => {
+        const c = parseCidr(b.spec.cidr);
+        return {
+          name: b.metadata.name, node: b.spec.nodeName, cidr: b.spec.cidr, phase: b.status?.phase || 'Pending',
+          drain: !!b.spec.drain, used: b.status?.usedAddresses ?? 0, acked: b.status?.routesAckedBy ?? [],
+          reclaimed: b.status?.reclaimedLeases ?? 0, base: c.base, size: c.size,
+        } as Blk;
+      }));
+      const pools = [...pl.items].sort((a: any, b: any) => String(a.metadata.creationTimestamp).localeCompare(String(b.metadata.creationTimestamp)));
+      setPool(pools[0] ? { name: pools[0].metadata.name, spec: pools[0].spec, status: pools[0].status ?? {} } : null);
+      setPods(pd.items.filter((p: any) => !p.spec.hostNetwork && p.status?.podIP).map((p: any) => ({
+        name: p.metadata.name, ns: p.metadata.namespace, node: p.spec.nodeName ?? '', ip: p.status.podIP, phase: p.status.phase,
+      })));
+      const rows: EventRow[] = [];
+      for (const e of ev.items) {
+        const t = Date.parse(e.lastTimestamp || e.eventTime || e.metadata.creationTimestamp);
+        if (e.involvedObject?.kind === 'IPPool') rows.push({ time: t, kind: 'controller', reason: e.reason, message: e.message });
+        else if (e.reason === 'FailedCreatePodSandBox' && String(e.message).includes('no IP addresses available'))
+          rows.push({ time: t, kind: 'kubelet', reason: e.reason, message: `${e.source?.host ?? ''}: no IP addresses available in range set` });
+      }
+      setEvents(rows.sort((a, b) => a.time - b.time).slice(-60));
+      setAgents({ total: ag.items.length, ready: ag.items.filter((p: any) => p.status?.containerStatuses?.every((c: any) => c.ready)).length });
+      setConn('ok');
+      setNow(Date.now());
+    } catch (e: any) {
+      if (!alive.current) return;
+      setConn('error');
+      setErr(e.message);
+    }
+  }, []);
 
   useEffect(() => {
-    if (!running) return;
-    const id = setInterval(() => {
-      for (let i = 0; i < speed; i++) sim.current.tick();
-      setFrame(f => f + 1);
-    }, 250);
-    return () => clearInterval(id);
-  }, [running, speed]);
-
-  const s = sim.current;
-  const stats = s.stats();
-  const refresh = () => setFrame(f => f + 1);
-
-  const colorOf = new Map<string, string>();
-  s.nodes.forEach((n, i) => colorOf.set(n.name, NODE_COLORS[i % NODE_COLORS.length]));
-
-  // Cheap (256 cells), so recomputed every frame.
-  const cells: (Block | null)[] = new Array(s.p.poolSize / CELL).fill(null);
-  s.blocks.forEach(b => {
-    for (let c = b.base / CELL; c < (b.base + b.size) / CELL; c++) cells[c] = b;
-  });
-
-  const reset = () => {
-    sim.current = makeSim();
-    sim.current.shrinkOn = shrinkOn;
-    sim.current.emergencyOn = emergencyOn;
+    alive.current = true;
     refresh();
-  };
-  const all = (pods: number, msg: string) => {
-    s.nodes.forEach(n => s.setDemand(n.name, pods));
-    s.say('info', msg);
-    refresh();
-  };
-  const skew = () => {
-    s.nodes.forEach((n, i) => s.setDemand(n.name, i === 0 ? 220 : 25));
-    s.say('info', `Skew: ${s.nodes[0]?.name} → 220 pods, the others → 25`);
+    const id = setInterval(refresh, 2000);
+    return () => { alive.current = false; clearInterval(id); };
+  }, [refresh]);
+
+  const act = async (path: string, body: object) => {
+    setBusy(true);
+    try {
+      const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const j = await r.json();
+      setLast({ ok: r.ok && j.success !== false, command: j.command ?? path, output: j.output ?? j.error ?? '', at: Date.now() });
+    } catch (e: any) {
+      setLast({ ok: false, command: path, output: e.message, at: Date.now() });
+    }
+    setBusy(false);
     refresh();
   };
 
-  const served = stats.wanted ? Math.min(100, (100 * stats.pods) / stats.wanted) : 100;
+  const colorOf = (node: string) => NODE_COLORS[Math.max(0, nodes.findIndex(n => n.name === node)) % NODE_COLORS.length];
+  const podsOn = (node: string) => pods.filter(p => p.node === node && p.phase === 'Running').length;
+  const cidrs: string[] = pool?.spec?.cidrs ?? [];
+  const stats = pool?.status ?? {};
+  const totalBlocks = blocks.length;
+  const pending = blocks.filter(b => b.phase === 'Pending').length;
+  const lastRec = stats.lastReconcileTime ? Math.max(0, Math.round((now - Date.parse(stats.lastReconcileTime)) / 1000)) : null;
 
   return (
     <div className="p1-container">
@@ -82,104 +129,102 @@ export function Project1Demo() {
         <div className="p1-title-group">
           <span className="p1-badge">P1</span>
           <div>
-            <div className="p1-title"><Boxes size={18} /> Buddy-style dynamic pod IPAM</div>
+            <div className="p1-title"><Boxes size={18} /> Buddy-style dynamic pod IPAM <span className="p1-live"><i /> LIVE</span></div>
             <div className="p1-subtitle">
-              Nodes get address blocks from a pool, grow when they run low, give space back when idle.
-              <b> Simulation</b> of the operator's planner (same rules and defaults), not a live cluster.
+              Reads the cluster's <code>IPPool</code>, <code>NodeBlock</code>, nodes and pods through the API proxy. Buttons create real pods
+              and real lease files; the controller and agents respond.
             </div>
           </div>
         </div>
         <div className="p1-metrics">
-          <div className="p1-pill"><span className="label">Pods served</span><span className={`val ${served < 99 ? 'warn' : 'good'}`}>{stats.pods}/{stats.wanted}</span></div>
-          <div className="p1-pill"><span className="label">Pool used</span><span className="val">{stats.poolPct.toFixed(1)}%</span></div>
-          <div className="p1-pill"><span className="label">Block changes</span><span className="val">{stats.ops}</span></div>
-          <div className="p1-pill"><span className="label">Sim time</span><span className="val">{Math.floor(s.t / 60)}m{String(s.t % 60).padStart(2, '0')}s</span></div>
+          <div className="p1-pill"><span className="label">API</span><span className={`val ${conn === 'ok' ? 'good' : 'warn'}`}>{conn === 'ok' ? 'connected' : conn}</span></div>
+          <div className="p1-pill"><span className="label">Agents</span><span className={`val ${agents.total && agents.ready === agents.total ? 'good' : 'warn'}`}>{agents.ready}/{agents.total}</span></div>
+          <div className="p1-pill"><span className="label">Pool</span><span className={`val ${stats.phase === 'Ready' ? 'good' : 'warn'}`}>{stats.phase ?? '—'}</span></div>
+          <div className="p1-pill"><span className="label">Blocks</span><span className="val">{totalBlocks}{pending ? ` (${pending} pending)` : ''}</span></div>
+          <div className="p1-pill" title="The controller updates status only when something changes"><span className="label">Last pool change</span><span className="val">{lastRec === null ? '—' : `${lastRec}s ago`}</span></div>
+          <a className="p1-link" href="/project1/sim">Offline simulator</a>
           <a className="p1-link" href="/">Cluster view</a>
           <a className="p1-link" href="/project2">Problem 2</a>
         </div>
       </header>
 
+      {conn === 'error' && (
+        <div className="p1-banner">
+          Cannot reach the Kubernetes API ({err}). Start the proxy for the cluster the operator manages, for example{' '}
+          <code>KUBECONFIG=… kubectl proxy --port 8001</code>, and run the dashboard with the same <code>KUBECONFIG</code> so the buttons act on it.
+        </div>
+      )}
+      {conn === 'ok' && !pool && (
+        <div className="p1-banner">No <code>IPPool</code> found. Apply <code>operator/config/samples/ipam_sample.yaml</code> and run <code>go run ./cmd --controllers=ipam</code>.</div>
+      )}
+
       <div className="p1-toolbar">
-        <button onClick={() => setRunning(r => !r)}>{running ? <Pause size={14} /> : <Play size={14} />}{running ? 'Pause' : 'Play'}</button>
-        <select value={speed} onChange={e => setSpeed(Number(e.target.value))} aria-label="speed">
-          <option value={1}>4× real time</option>
-          <option value={4}>16× real time</option>
-          <option value={16}>64× real time</option>
-        </select>
+        <button onClick={refresh}><RefreshCw size={14} />Refresh</button>
         <span className="sep" />
-        <button onClick={() => all(200, 'Burst: every node → 200 pods')}><Flame size={14} />Burst</button>
-        <button onClick={() => all(15, 'Calm: every node → 15 pods')}><Moon size={14} />Calm</button>
-        <button onClick={skew}><Zap size={14} />Skew</button>
-        <button onClick={() => { s.addNode(); refresh(); }}><Plus size={14} />Add node</button>
+        <FlaskConical size={14} color="#94a3b8" />
+        <span className="muted-label">Synthetic usage</span>
+        <input type="number" min={1} max={600} value={leases} onChange={e => setLeases(Number(e.target.value))} className="p1-num" aria-label="lease count" />
+        <span className="muted-label">leases per click (counted as usage; reclaimed as leaks after ~2 min)</span>
         <span className="sep" />
-        <label className="toggle"><input type="checkbox" checked={shrinkOn} onChange={e => { setShrinkOn(e.target.checked); s.shrinkOn = e.target.checked; s.say('info', `Shrink ${e.target.checked ? 'on' : 'off'}`); }} />Shrink (drain idle blocks)</label>
-        <label className="toggle"><input type="checkbox" checked={emergencyOn} onChange={e => { setEmergencyOn(e.target.checked); s.emergencyOn = e.target.checked; s.say('info', `Emergency grow ${e.target.checked ? 'on' : 'off'}`); }} />Emergency grow</label>
-        <span className="sep" />
-        <button onClick={reset}><RotateCcw size={14} />Reset</button>
+        <button disabled={busy} onClick={() => act('/api/fault/ipam/clear-load', {})}><Trash2 size={14} />Remove all load pods</button>
+        {last && (
+          <span className={`p1-last ${last.ok ? 'ok' : 'bad'}`} title={last.output}>
+            {last.ok ? '✓' : '✗'} {last.command}{last.output ? ` — ${last.output.slice(0, 80)}` : ''}
+          </span>
+        )}
       </div>
 
       <div className="p1-main">
         <section className="p1-panel">
-          <div className="p1-panel-title">Address pool 10.244.0.0/20 <span>one square = {CELL} addresses; colour = owning node</span></div>
-          <div className="p1-grid" role="img" aria-label="Pool address map">
-            {cells.map((b, i) => {
-              const color = b ? colorOf.get(b.node) ?? '#64748b' : undefined;
-              const cls = b ? `p1-cell ph-${b.phase}${b.drain ? ' drain' : ''}${hover === b.id ? ' hl' : ''}` : 'p1-cell free';
-              return (
-                <div
-                  key={i}
-                  className={cls}
-                  style={b ? { ['--c' as string]: color } : undefined}
-                  title={b ? `${cidrOf(b.base, b.size)} → ${b.node} (${b.phase}${b.drain ? ', draining' : ''}, ${b.used} used)` : `free: ${cidrOf(i * CELL, CELL)}`}
-                  onMouseEnter={() => b && setHover(b.id)}
-                  onMouseLeave={() => setHover(null)}
-                />
-              );
-            })}
-          </div>
+          <div className="p1-panel-title">Address pool <span>read from IPPool/NodeBlock; colour = owning node</span></div>
+          {cidrs.map(c => <PoolGrid key={c} cidr={c} blocks={blocks} colorOf={colorOf} hover={hover} setHover={setHover} />)}
           <div className="p1-legend">
             <span><i className="p1-cell free" /> free</span>
             <span><i className="p1-cell ph-Active" style={{ ['--c' as string]: '#94a3b8' }} /> Active</span>
-            <span><i className="p1-cell ph-Pending" style={{ ['--c' as string]: '#94a3b8' }} /> Pending (routing)</span>
+            <span><i className="p1-cell ph-Pending" style={{ ['--c' as string]: '#94a3b8' }} /> Pending</span>
             <span><i className="p1-cell ph-Draining drain" style={{ ['--c' as string]: '#94a3b8' }} /> Draining</span>
             <span><i className="p1-cell ph-Quarantined" style={{ ['--c' as string]: '#94a3b8' }} /> Quarantined</span>
           </div>
+          {stats.message && <p className="p1-hint">Controller: {stats.message}</p>}
           <p className="p1-hint">
-            Each node's first block leaves its buddy free, so the node can double in place. Two buddy blocks are served as
-            one range, which pays the 3 reserved addresses once (a /26 holds 61 pods, two /27s 58).
+            Parameters: grow at {pool?.spec?.expandThresholdPercent ?? 80}% / floor {pool?.spec?.triggerFloor ?? 8}, shrink ≤ {pool?.spec?.shrinkThresholdPercent ?? 50}%
+            after {pool?.spec?.shrinkCooldownSeconds ?? 300}s, quarantine {pool?.spec?.quarantineSeconds ?? 60}s.
           </p>
         </section>
 
         <section className="p1-panel p1-nodes">
-          <div className="p1-panel-title">Nodes <span>drag a slider to change how many pods a node should run</span></div>
-          {s.nodes.map(n => {
-            const blks = s.blocksOf(n.name).sort((a, b) => a.base - b.base);
+          <div className="p1-panel-title">Nodes <span>real pods run on the node; the agent counts leases per block</span></div>
+          {nodes.map(n => {
+            const blks = blocks.filter(b => b.node === n.name).sort((a, b) => a.base - b.base);
             const active = blks.filter(b => b.phase === 'Active' && !b.drain);
-            const cap = capacityOf(active);
+            const cap = aggregate(active).reduce((t, r) => t + usable(r.size), 0);
             const used = blks.reduce((t, b) => t + b.used, 0);
-            const ranges = new Set(active.map(b => b.size)).size;
+            const want = podsWanted[n.name] ?? 20;
             return (
-              <div key={n.name} className="p1-node" style={{ ['--c' as string]: colorOf.get(n.name) }}>
+              <div key={n.name} className="p1-node" style={{ ['--c' as string]: colorOf(n.name) }}>
                 <div className="p1-node-head">
                   <b>{n.name}</b>
-                  <span className="muted">max-pods {n.maxPods}</span>
-                  <span className={`p1-unmet ${n.unmet ? 'on' : ''}`}>{n.unmet ? `${n.unmet} pods waiting for an address` : 'all pods placed'}</span>
-                  <button className="icon" title="Delete node" onClick={() => { s.removeNode(n.name); refresh(); }}><Trash2 size={13} /></button>
+                  <span className="muted">{n.ip} · max-pods {n.maxPods}</span>
+                  <span className={`p1-unmet ${n.ready ? '' : 'on'}`}>{n.ready ? `${podsOn(n.name)} pods running` : 'NotReady'}</span>
                 </div>
                 <div className="p1-slider">
-                  <input type="range" min={0} max={n.maxPods * 2} value={n.demand} onChange={e => { s.setDemand(n.name, Number(e.target.value)); refresh(); }} />
-                  <span>{n.demand} pods wanted</span>
+                  <input type="range" min={0} max={150} value={want} onChange={e => setPodsWanted({ ...podsWanted, [n.name]: Number(e.target.value) })} />
+                  <span>{want} real pods</span>
+                  <button className="p1-act" disabled={busy} onClick={() => act('/api/fault/ipam/load', { nodeName: n.name, pods: want })}><Rocket size={12} />Run</button>
+                  <button className="p1-act" disabled={busy} onClick={() => act('/api/fault/ipam/leases', { nodeName: n.name, count: leases })}><FlaskConical size={12} />+{leases}</button>
                 </div>
-                <div className="p1-bar" title={`${used} used of ${cap} usable`}>
+                <div className="p1-bar" title={`${used} leases counted of ${cap} usable`}>
                   <div className="fill" style={{ width: `${cap ? Math.min(100, (100 * used) / cap) : 0}%` }} />
-                  <span>{used} used / {cap} usable{ranges ? '' : ''}</span>
+                  <span>{used} used / {cap} usable{aggregate(active).length < active.length ? ' · buddies merged into one range' : ''}</span>
                 </div>
                 <div className="p1-chips">
                   {blks.map(b => (
-                    <span key={b.id} className={`chip ph-${b.phase}${b.drain ? ' drain' : ''}`} onMouseEnter={() => setHover(b.id)} onMouseLeave={() => setHover(null)}>
-                      {cidrOf(b.base, b.size)} · {b.drain && b.phase !== 'Quarantined' ? 'Draining' : b.phase} · {b.used}/{usable(b.size)}
+                    <span key={b.name} className={`chip ph-${b.phase}${b.drain ? ' drain' : ''}`} onMouseEnter={() => setHover(b.name)} onMouseLeave={() => setHover(null)}
+                      title={`routes acked by: ${b.acked.join(', ') || 'nobody yet'}${b.reclaimed ? ` · ${b.reclaimed} leaked leases reclaimed` : ''}`}>
+                      {b.cidr} · {b.drain && b.phase === 'Active' ? 'Draining' : b.phase} · {b.used}/{usable(b.size)}
                     </span>
                   ))}
+                  {!blks.length && <span className="muted">no block yet — waiting for the controller</span>}
                 </div>
               </div>
             );
@@ -193,7 +238,7 @@ export function Project1Demo() {
           <button className={tab === 'eval' ? 'on' : ''} onClick={() => setTab('eval')}><BarChart3 size={14} />Evaluation</button>
           <button className={tab === 'how' ? 'on' : ''} onClick={() => setTab('how')}><BookOpen size={14} />How it works</button>
         </div>
-        {tab === 'log' && <LogView lines={s.log} />}
+        {tab === 'log' && <EventView rows={events} />}
         {tab === 'eval' && <EvalView />}
         {tab === 'how' && <HowView />}
       </section>
@@ -201,14 +246,48 @@ export function Project1Demo() {
   );
 }
 
-function LogView({ lines }: { lines: IpamSim['log'] }) {
+function PoolGrid({ cidr, blocks, colorOf, hover, setHover }: {
+  cidr: string; blocks: Blk[]; colorOf: (n: string) => string; hover: string | null; setHover: (s: string | null) => void;
+}) {
+  const { base, size } = parseCidr(cidr);
+  const cell = Math.max(16, size / 256);
+  const n = size / cell;
+  const cells: (Blk | null)[] = new Array(n).fill(null);
+  blocks.forEach(b => {
+    if (b.base < base || b.base >= base + size) return;
+    for (let a = b.base; a < b.base + b.size; a += cell) cells[(a - base) / cell] = cells[(a - base) / cell] ?? b;
+    if (b.size < cell) cells[(b.base - base) / cell] = b;
+  });
+  const free = cells.filter(c => !c).length;
+  return (
+    <div className="p1-poolgrid">
+      <div className="p1-grid-title">{cidr} <span>1 square = {cell} addresses · {(100 * (n - free) / n).toFixed(1)}% allocated</span></div>
+      <div className="p1-grid" role="img" aria-label={`Address map of ${cidr}`}>
+        {cells.map((b, i) => (
+          <div
+            key={i}
+            className={b ? `p1-cell ph-${b.phase}${b.drain ? ' drain' : ''}${hover === b.name ? ' hl' : ''}` : 'p1-cell free'}
+            style={b ? { ['--c' as string]: colorOf(b.node) } : undefined}
+            title={b ? `${b.cidr} → ${b.node} (${b.phase}${b.drain ? ', draining' : ''}, ${b.used} used)` : `free: ${numToIp(base + i * cell)}/${32 - Math.log2(cell)}`}
+            onMouseEnter={() => b && setHover(b.name)}
+            onMouseLeave={() => setHover(null)}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function EventView({ rows }: { rows: EventRow[] }) {
   const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => { if (ref.current) ref.current.scrollTop = ref.current.scrollHeight; }, [lines.length]);
+  useEffect(() => { if (ref.current) ref.current.scrollTop = ref.current.scrollHeight; }, [rows.length]);
   return (
     <div className="p1-log" ref={ref}>
-      {lines.map((l, i) => (
-        <div key={i} className={`line ${l.kind}`}>
-          <span className="t">{Math.floor(l.t / 60)}:{String(l.t % 60).padStart(2, '0')}</span>{l.text}
+      {!rows.length && <div className="line">No IPPool events yet. They appear when the controller allocates, drains or releases a block (Kubernetes keeps events for about an hour).</div>}
+      {rows.map((r, i) => (
+        <div key={i} className={`line ${r.kind === 'kubelet' ? 'warn' : r.reason === 'BlockAllocated' ? 'grow' : r.reason === 'BlockReleased' || r.reason === 'BlockDraining' ? 'shrink' : ''}`}>
+          <span className="t">{new Date(r.time).toLocaleTimeString('en-GB')}</span>
+          [{r.kind === 'kubelet' ? 'kubelet' : 'controller'} · {r.reason}] {r.message}
         </div>
       ))}
     </div>
@@ -239,7 +318,7 @@ function EvalView() {
     <div className="p1-eval">
       <div className="p1-eval-legend">
         {policies.map((p, i) => <span key={p}><i style={{ background: POLICY_COLORS[i] }} />{p}</span>)}
-        <em>fixed /24 and /25 per node, Calico-style 64-address blocks, and this project (buddy)</em>
+        <em>measured by operator/cmd/ipam-sim, which runs the operator's real Go planner against these baselines (a model of the workload, not a cluster)</em>
       </div>
       <div className="p1-eval-cols">
         <Bars title="Pods that got an address" unit="%" values={scenarios.map(s => s.served)} max={100} />
@@ -255,11 +334,11 @@ function EvalView() {
             </tbody>
           </table>
           <p className="p1-hint">
-            Honest reading: buddy serves every pod the pool can hold and wastes far less than a fixed /24, but Calico-style
-            blocks pack as well or better when load changes (wave 52% vs 41%, burst 38% vs 35%). Buddy's case is allocation
-            in the background, off the pod-start path. Shrink is as slow as pod turnover. This is a model, not a cluster measurement.
+            Buddy serves every pod the pool can hold and wastes far less than a fixed /24, but Calico-style blocks pack as well or
+            better when load changes (wave 52% vs 41%, burst 38% vs 35%). Buddy's case is allocation in the background, off the
+            pod-start path. Shrink is as slow as pod turnover.
           </p>
-          <div className="p1-bars-title" style={{ marginTop: 14 }}>Verified on a 3-node minikube cluster</div>
+          <div className="p1-bars-title" style={{ marginTop: 14 }}>Checked by hand on the 3-node minikube cluster</div>
           <ul className="p1-checks">
             {liveChecks.map(c => <li key={c.title}><b>{c.title}.</b> {c.result}</li>)}
           </ul>
@@ -290,12 +369,12 @@ function HowView() {
         </ul>
       </div>
       <div>
-        <h4>Things to try</h4>
+        <h4>Things to try on this page</h4>
         <ul>
-          <li><b>Burst</b>, then watch blocks go Pending → Active and merge.</li>
-          <li><b>Calm</b>, then watch blocks drain, quarantine and return to the pool.</li>
-          <li><b>Skew</b>: one hot node grows without taking space from the others.</li>
-          <li>Turn off <b>Emergency grow</b> and push demand past capacity.</li>
+          <li><b>Run</b> N real pods on a node: they take addresses from that node's block.</li>
+          <li><b>+N leases</b>: synthetic usage inside the node's blocks (minikube cannot run hundreds of pods). Watch a block go Pending → Active.</li>
+          <li>Remove the load and wait: idle blocks drain, quarantine and are released.</li>
+          <li>Synthetic leases are not pods, so the agent removes them as leaks after about 2 minutes.</li>
         </ul>
       </div>
     </div>

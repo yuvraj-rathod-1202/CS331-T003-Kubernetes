@@ -140,23 +140,34 @@ To make the demo clear, visual, and easy to follow during a presentation, the we
 
 ## Problem 1: Buddy-style dynamic IPAM demo (`/project1`)
 
-Run the dashboard (`cd k8s-visualizer && npm run dev`) and open `/project1`.
-The page is an in-browser simulation of the operator's IPAM planner (same rules
-and default parameters, time scaled up); it does not need a cluster.
+`/project1` is a **live** view of the operator, like the other pages: it reads the cluster's
+`IPPool`, `NodeBlock`, nodes, pods and events through the API proxy, and its buttons create real
+pods and real lease files. `/project1/sim` is an offline simulation of the planner for when no
+cluster is available.
 
-1. **Pool map**: each square is 16 addresses, coloured by the node that owns it.
-   Striped = Pending (routes being installed), dashed = Draining, grey = Quarantined.
-2. **Burst**: every node goes to 200 pods. Watch blocks go Pending → Active, nodes double
-   in place (two buddy blocks are served as one range), and stop at the capacity cap.
-3. **Calm**: demand drops to 15. Idle blocks drain, are quarantined, and return to the pool.
-4. **Skew**: one node goes hot while the others stay light; only that node grows.
-5. **Emergency grow / Shrink toggles**: turn them off and push demand past capacity to see
-   what each mechanism contributes.
-6. **Evaluation tab**: results of `operator/cmd/ipam-sim` against fixed /24, fixed /25 and
-   Calico-style blocks, plus the checks run on a real 3-node minikube cluster
-   (`operator/docs/ipam-evaluation.md`).
+### Setup
+```bash
+export KUBECONFIG=<kubeconfig of the cluster the operator manages>
+kubectl apply -f operator/config/crd/bases/ && kubectl apply -f operator/config/samples/ipam_sample.yaml
+kubectl apply -f operator/deploy/ipam-agent.yaml            # node agents
+(cd operator && go run ./cmd --controllers=ipam)             # controller
+kubectl proxy --port 8001 &                                  # the dashboard reads the API here
+(cd k8s-visualizer && npm run dev)                           # same KUBECONFIG, so the buttons hit the same cluster
+```
+Open `/project1`. The header shows API, agents, pool phase and block count.
 
-`/project1?preset=burst` starts mid-burst; `?tab=eval` or `?tab=how` opens a tab.
+### Demo flow
+1. **Pool map and node cards**: each square is a slice of the pool, coloured by owning node; the card
+   chips show each block's phase and used/usable addresses. Hover a chip to highlight its block.
+2. **Run N real pods** on a node: real pods take addresses from that node's block.
+3. **+N leases** (synthetic usage): minikube cannot run hundreds of pods, so this writes lease files inside
+   the node's own blocks, which is what the agent counts. Watch the controller allocate a block
+   (Pending, then Active once every node has the route; "Controller events" shows `BlockAllocated`).
+   The agent removes these leases as leaks after about 2 minutes, which also shows leak reclaim.
+4. **Remove all load pods**, then wait: idle blocks drain, are quarantined and released
+   (`BlockDraining`, `BlockReleased` events).
+5. **Evaluation tab**: results of `operator/cmd/ipam-sim` against fixed /24, fixed /25 and Calico-style
+   blocks (a model), plus the checks done by hand on a 3-node minikube cluster.
 
 ## Problem 2: Dual-CNI resilience demo (`/project2`)
 
