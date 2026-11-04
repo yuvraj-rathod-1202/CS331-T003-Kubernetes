@@ -108,6 +108,10 @@ async function resolvePodCaliInterface(nodeName: string, podName: string, namesp
   return '';
 }
 
+function isNodeName(v: unknown): v is string {
+  return typeof v === 'string' && /^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$/.test(v);
+}
+
 function parseJsonBody<T = any>(req: IncomingMessage): Promise<T> {
   return new Promise((resolve, reject) => {
     let body = '';
@@ -561,6 +565,88 @@ export function faultInjectorPlugin(_options: FaultApiOptions = {}): Plugin {
               latencyMs: latency,
               status: ok ? '200 OK' : 'Probe Failed',
               output: probeRes.stdout || probeRes.stderr,
+            });
+          }
+
+          // -------------------------------------------------------------
+          // 9. IPAM (Problem 1) workload helpers: POST /api/fault/ipam/*
+          //    These create real load on the cluster the IPAM operator manages.
+          // -------------------------------------------------------------
+          if (url === '/api/fault/ipam/load' && req.method === 'POST') {
+            // Run N real pause pods on a node (a Deployment pinned to it). 0 removes it.
+            const { nodeName, pods } = await parseJsonBody(req);
+            if (!isNodeName(nodeName)) return sendJson(res, 400, { error: 'valid nodeName is required' });
+            const n = Number(pods);
+            if (!Number.isInteger(n) || n < 0 || n > 300) return sendJson(res, 400, { error: 'pods must be an integer 0..300' });
+            const name = `ipam-load-${nodeName.toLowerCase().replace(/[^a-z0-9-]/g, '-')}`.slice(0, 60);
+            if (n === 0) {
+              const r = await runShell(`kubectl delete deployment ${name} --ignore-not-found`);
+              return sendJson(res, 200, { success: r.code === 0, command: `kubectl delete deployment ${name}`, output: r.stdout || r.stderr });
+            }
+            const manifest = {
+              apiVersion: 'apps/v1', kind: 'Deployment',
+              metadata: { name, namespace: 'default', labels: { app: 'ipam-load' } },
+              spec: {
+                replicas: n,
+                selector: { matchLabels: { app: 'ipam-load', node: name } },
+                template: {
+                  metadata: { labels: { app: 'ipam-load', node: name } },
+                  spec: {
+                    nodeSelector: { 'kubernetes.io/hostname': nodeName },
+                    terminationGracePeriodSeconds: 0,
+                    containers: [{ name: 'pause', image: 'registry.k8s.io/pause:3.10', resources: { requests: { cpu: '1m', memory: '1Mi' } } }],
+                  },
+                },
+              },
+            };
+            const p = execFileAsync('kubectl', ['apply', '-f', '-']);
+            p.child.stdin?.end(JSON.stringify(manifest));
+            try {
+              const { stdout } = await p;
+              return sendJson(res, 200, { success: true, command: `kubectl apply deployment ${name} (replicas=${n}, node=${nodeName})`, output: stdout.trim() });
+            } catch (e: any) {
+              return sendJson(res, 500, { success: false, error: e.stderr?.trim() || e.message });
+            }
+          }
+
+          if (url === '/api/fault/ipam/clear-load' && req.method === 'POST') {
+            const r = await runShell('kubectl delete deployment -l app=ipam-load --ignore-not-found');
+            return sendJson(res, 200, { success: r.code === 0, command: 'kubectl delete deployment -l app=ipam-load', output: r.stdout || r.stderr });
+          }
+
+          if (url === '/api/fault/ipam/leases' && req.method === 'POST') {
+            // Synthetic usage: add N lease files inside the node's own blocks, which is
+            // what the agent counts. minikube cannot run hundreds of pods per node; this
+            // lets the controller see that demand. The agent reclaims them as leaks
+            // after its minimum age (2 min by default).
+            const { nodeName, count } = await parseJsonBody(req);
+            if (!isNodeName(nodeName)) return sendJson(res, 400, { error: 'valid nodeName is required' });
+            const n = Number(count);
+            if (!Number.isInteger(n) || n < 1 || n > 600) return sendJson(res, 400, { error: 'count must be an integer 1..600' });
+            const got = await runShell('kubectl get nodeblocks -o json');
+            if (got.code !== 0) return sendJson(res, 500, { error: got.stderr || 'cannot list nodeblocks' });
+            const items = JSON.parse(got.stdout).items as any[];
+            const mine = items.filter(b => b.spec?.nodeName === nodeName && b.status?.phase === 'Active' && !b.spec?.drain);
+            const ips: string[] = [];
+            for (const b of mine) {
+              const [ip, bits] = String(b.spec.cidr).split('/');
+              const o = ip.split('.').map(Number);
+              const base = ((o[0] << 24) | (o[1] << 16) | (o[2] << 8) | o[3]) >>> 0;
+              const size = 2 ** (32 - Number(bits));
+              for (let i = 2; i < size - 1 && ips.length < n + 1000; i++) {
+                const v = (base + i) >>> 0;
+                ips.push(`${v >>> 24}.${(v >>> 16) & 255}.${(v >>> 8) & 255}.${v & 255}`);
+              }
+            }
+            if (!ips.length) return sendJson(res, 409, { error: `${nodeName} has no Active block yet` });
+            const r = await execOnNode(
+              nodeName,
+              `mkdir -p /var/lib/cni/networks/buddy; c=0; for ip in ${ips.join(' ')}; do [ $c -ge ${n} ] && break; [ -e /var/lib/cni/networks/buddy/$ip ] || { echo synthetic > /var/lib/cni/networks/buddy/$ip && c=$((c+1)); }; done; echo created $c`
+            );
+            return sendJson(res, r.code === 0 ? 200 : 500, {
+              success: r.code === 0,
+              command: `create ${n} lease files in /var/lib/cni/networks/buddy on ${nodeName}`,
+              output: r.stdout || r.stderr,
             });
           }
 
