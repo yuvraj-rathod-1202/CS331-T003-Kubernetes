@@ -131,12 +131,17 @@ This is the "active/standby" option, like VRRP [7]. If the backup is also broken
 **Grow decision (pseudocode).**
 ```
 for each node n (sorted):
-    if n has no block:        allocate first block (≈25% of max pods, min /28)
+    if n has no block: 
+        allocate first block (≈25% of max pods, min /28)
     elif a block is Pending:  wait (one change in flight per node)
-    elif free(n) < max(8, 20% of capacity) or starved(n):
+   elif capacity(n) - demand(n) < threshold or starved(n):
         if n has a Draining block: restore it
-        else: size = growth% of capacity, rounded up to a power of two
+        elif n has a Releasing half:     unrelease it
+        else:
+           shortfall = requiredCapacity(demand) - capacity
+           allocate shortfall from buddy of merged range
     elif n can give a block back: mark emptiest block Draining
+  elif n has grown block with empty half: set spec.release to empty half
 ```
 
 **Blame rule (pseudocode).**
@@ -169,7 +174,9 @@ All experiments ran on a single laptop with an Intel Core i5 and 16 GB RAM, runn
 
 ## VIII. Evaluation
 
-
+We evaluate our solution through two experiments designed around the two core problems:
+1. **IPAM Efficiency Experiment:** Testing hundreds of nodes and thousands of pods exceeds a single laptop's resources. We therefore built a discrete-event simulatorthat runs our real controller planning code. We simulated clusters of 40 to 1,000 nodes under five traffic patterns and compared buddy allocation against Kubernetes' default static /24, a static /25, and Calico on-demand blocks.
+2. **CNI Resilience Experiment:** We set up a live 3-node minikube cluster where every application pod has two network interfaces: Calico as the primary path and Flannel as the backup. A client pod sends continuous HTTP requests (one per second) while we inject 10 realistic network faults (e.g., dropping pod traffic, breaking tunnel protocols, killing CNI agents, or pausing nodes) to measure detection speed, failover reliability, and zero-loss recovery.
 
 ## IX. Summary
 
@@ -177,7 +184,7 @@ Kubernetes gives nodes fixed address blocks that are wasted on quiet nodes and r
 
 ---
 
-## IX. Reproducibility
+## X. Reproducibility
 
 **GitHub:** <https://github.com/yuvraj-rathod-1202/CS331-CN-Project-1>
 
