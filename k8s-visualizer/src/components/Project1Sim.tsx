@@ -257,7 +257,8 @@ function EvalView() {
           </table>
           <p className="p1-hint">
             Honest reading: buddy serves every pod the pool can hold and wastes far less than a fixed /24, but Calico-style
-            blocks pack as well or better when load changes (wave 52% vs 41%, burst 38% vs 35%). Buddy's case is allocation
+            blocks still pack better when load changes (wave 52% vs 46%; in the burst they are level at 38%), and buddy needs
+            more routes (up to 11 per node in the burst). Buddy's case is allocation
             in the background, off the pod-start path. Shrink is as slow as pod turnover. This is a model, not a cluster measurement.
           </p>
           <div className="p1-bars-title" style={{ marginTop: 14 }}>Verified on a 3-node minikube cluster</div>

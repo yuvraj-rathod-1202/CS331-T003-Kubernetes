@@ -109,6 +109,39 @@ async function resolvePodCaliInterface(nodeName: string, podName: string, namesp
   return '';
 }
 
+// The Problem 1 demo workload: Deployments of real pods (pause containers),
+// "web" spread over all nodes or "web-<node>" pinned to one node.
+function demoName(nodeName?: string): string {
+  return nodeName ? `web-${String(nodeName).toLowerCase().replace(/[^a-z0-9-]/g, '-')}`.slice(0, 60) : 'web';
+}
+
+function demoDeployment(name: string, replicas: number, nodeName?: string) {
+  return {
+    apiVersion: 'apps/v1', kind: 'Deployment',
+    metadata: { name, namespace: 'default', labels: { app: 'ipam-demo' } },
+    spec: {
+      replicas,
+      selector: { matchLabels: { app: 'ipam-demo', workload: name } },
+      template: {
+        metadata: { labels: { app: 'ipam-demo', workload: name } },
+        spec: {
+          ...(nodeName ? { nodeSelector: { 'kubernetes.io/hostname': nodeName } } : {}),
+          topologySpreadConstraints: nodeName ? undefined : [{
+            maxSkew: 1, topologyKey: 'kubernetes.io/hostname', whenUnsatisfiable: 'ScheduleAnyway',
+            labelSelector: { matchLabels: { app: 'ipam-demo', workload: name } },
+          }],
+          terminationGracePeriodSeconds: 0,
+          containers: [{ name: 'pause', image: 'registry.k8s.io/pause:3.10', resources: { requests: { cpu: '1m', memory: '1Mi' } } }],
+        },
+      },
+    },
+  };
+}
+
+function isPodName(v: unknown): v is string {
+  return typeof v === 'string' && /^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$/.test(v);
+}
+
 function isNodeName(v: unknown): v is string {
   return typeof v === 'string' && /^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$/.test(v);
 }
@@ -729,7 +762,7 @@ export function faultInjectorPlugin(_options: FaultApiOptions = {}): Plugin {
               .filter(p => !p.spec?.hostNetwork && p.status?.podIP)
               .map(p => ({
                 name: p.metadata.name, ns: p.metadata.namespace, node: p.spec.nodeName ?? '', ip: p.status.podIP, phase: p.status.phase,
-                app: p.metadata.labels?.app ?? '', terminating: !!p.metadata.deletionTimestamp,
+                app: p.metadata.labels?.app ?? '', workload: p.metadata.labels?.workload ?? '', terminating: !!p.metadata.deletionTimestamp,
               })) : [];
             // The agents' own log lines, tagged with the node each pod runs on.
             const agentNode: Record<string, string> = {};
@@ -760,27 +793,8 @@ export function faultInjectorPlugin(_options: FaultApiOptions = {}): Plugin {
             const n = Number(replicas);
             if (!Number.isInteger(n) || n < 0 || n > 300) return sendJson(res, 400, { error: 'replicas must be an integer 0..300' });
             if (nodeName !== undefined && !isNodeName(nodeName)) return sendJson(res, 400, { error: 'invalid nodeName' });
-            const name = nodeName ? `web-${String(nodeName).toLowerCase().replace(/[^a-z0-9-]/g, '-')}`.slice(0, 60) : 'web';
-            const manifest = {
-              apiVersion: 'apps/v1', kind: 'Deployment',
-              metadata: { name, namespace: 'default', labels: { app: 'ipam-demo' } },
-              spec: {
-                replicas: n,
-                selector: { matchLabels: { app: 'ipam-demo', workload: name } },
-                template: {
-                  metadata: { labels: { app: 'ipam-demo', workload: name } },
-                  spec: {
-                    ...(nodeName ? { nodeSelector: { 'kubernetes.io/hostname': nodeName } } : {}),
-                    topologySpreadConstraints: nodeName ? undefined : [{
-                      maxSkew: 1, topologyKey: 'kubernetes.io/hostname', whenUnsatisfiable: 'ScheduleAnyway',
-                      labelSelector: { matchLabels: { app: 'ipam-demo', workload: name } },
-                    }],
-                    terminationGracePeriodSeconds: 0,
-                    containers: [{ name: 'pause', image: 'registry.k8s.io/pause:3.10', resources: { requests: { cpu: '1m', memory: '1Mi' } } }],
-                  },
-                },
-              },
-            };
+            const name = demoName(nodeName);
+            const manifest = demoDeployment(name, n, nodeName);
             const p = execFileAsync('kubectl', ['apply', '-f', '-']);
             p.child.stdin?.end(JSON.stringify(manifest));
             const cmd = `kubectl apply -f - (Deployment ${name}, replicas=${n}${nodeName ? `, only on ${nodeName}` : ', spread across all nodes'})`;
@@ -789,6 +803,47 @@ export function faultInjectorPlugin(_options: FaultApiOptions = {}): Plugin {
               return sendJson(res, 200, { success: true, command: cmd, output: stdout.trim() });
             } catch (e: any) {
               return sendJson(res, 500, { success: false, command: cmd, error: e.stderr?.trim() || e.message });
+            }
+          }
+
+          if (url === '/api/fault/ipam/pod/stop' && req.method === 'POST') {
+            // Stop one demo pod for good: mark it the cheapest to remove, then scale its Deployment
+            // down by one, so the ReplicaSet removes exactly this pod instead of replacing it.
+            const { name } = await parseJsonBody(req);
+            if (!isPodName(name)) return sendJson(res, 400, { error: 'invalid pod name' });
+            const pod = await kubectlJson(['get', 'pod', name, '-n', 'default', '-o', 'json']);
+            if (!pod.ok) return sendJson(res, 404, { success: false, error: pod.error });
+            const workload = pod.data.metadata?.labels?.workload;
+            if (pod.data.metadata?.labels?.app !== 'ipam-demo' || !isPodName(workload)) {
+              return sendJson(res, 400, { success: false, error: 'only demo pods can be stopped here' });
+            }
+            const dep = await kubectlJson(['get', 'deployment', workload, '-n', 'default', '-o', 'json']);
+            if (!dep.ok) return sendJson(res, 404, { success: false, error: dep.error });
+            const replicas = Math.max(0, Number(dep.data.spec?.replicas ?? 0) - 1);
+            const mark = await runShell(`kubectl annotate pod ${name} -n default --overwrite controller.kubernetes.io/pod-deletion-cost=-1000`);
+            if (mark.code !== 0) return sendJson(res, 500, { success: false, error: mark.stderr.trim() });
+            const scale = await runShell(`kubectl scale deployment ${workload} -n default --replicas=${replicas}`);
+            const command = `kubectl annotate pod ${name} pod-deletion-cost=-1000 && kubectl scale deployment ${workload} --replicas=${replicas}`;
+            return sendJson(res, scale.code === 0 ? 200 : 500, { success: scale.code === 0, command, output: (scale.stdout || scale.stderr).trim(), workload, replicas });
+          }
+
+          if (url === '/api/fault/ipam/pod/start' && req.method === 'POST') {
+            // Start one more demo pod on the given node (its pinned Deployment, created if needed).
+            // The node's host-local hands it the next free address.
+            const { nodeName } = await parseJsonBody(req);
+            if (!isNodeName(nodeName)) return sendJson(res, 400, { error: 'invalid nodeName' });
+            const name = demoName(nodeName);
+            const dep = await kubectlJson(['get', 'deployment', name, '-n', 'default', '-o', 'json']);
+            const replicas = (dep.ok ? Number(dep.data.spec?.replicas ?? 0) : 0) + 1;
+            if (replicas > 300) return sendJson(res, 400, { success: false, error: 'too many demo pods on this node' });
+            const p = execFileAsync('kubectl', ['apply', '-f', '-']);
+            p.child.stdin?.end(JSON.stringify(demoDeployment(name, replicas, nodeName)));
+            const command = `kubectl apply -f - (Deployment ${name}, replicas=${replicas}, only on ${nodeName})`;
+            try {
+              const { stdout } = await p;
+              return sendJson(res, 200, { success: true, command, output: stdout.trim(), workload: name, replicas });
+            } catch (e: any) {
+              return sendJson(res, 500, { success: false, command, error: e.stderr?.trim() || e.message });
             }
           }
 

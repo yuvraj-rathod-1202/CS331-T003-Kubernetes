@@ -155,29 +155,48 @@ kubectl apply -f operator/deploy/ipam-agent.yaml            # node agents
 ```
 The header must show Cluster connected, Controller running, Node agents 3/3 and Pool Ready.
 
-Demo settings used on the `buddy-ipam` cluster, so a full cycle fits in about a minute:
-- IPPool: `initialBlockPercent: 5` (each node starts with a /27, so about 25 real pods fill it),
-  `shrinkCooldownSeconds: 20`, `quarantineSeconds: 10`.
+Demo settings used on the `buddy-ipam` cluster (cluster only; the repo defaults are unchanged):
+- IPPool `cidrs: ["10.244.0.0/24"]`: a small pool of 256 addresses, so the demo can fill it. With the
+  usual `/16` the nodes' capacity cap (120% of max pods: 720 addresses per node here, where nodes allow 600 pods, so about 2,160 for 3 nodes) stops growth
+  long before the pool could run out.
+- IPPool `initialBlockPercent: 5`, `shrinkCooldownSeconds: 20`, `quarantineSeconds: 10`,
+  `shrinkThresholdPercent: 70` (a node gives space back while it stays at most 70% full; the default 50%
+  keeps more spare room, which looks like waste in a short demo).
 - Agent DaemonSet args: `--interval=5s --promote-timeout=15s --leak-min-age=20s --drain-settle=3s`.
 The defaults in `config/samples` and `deploy/ipam-agent.yaml` are the safer production values.
 
-### Demo flow (about 1 minute)
-1. Press **Fill the IP pool**. A Deployment scales to 150 real pods across the nodes.
-2. Watch the **Cluster** view: one square per address, filled squares are pods. A node's block fills up,
-   a new block appears (Pending while routes are installed on the other nodes, then Active), and
-   neighbouring blocks merge into one range.
-3. Watch **What the operator is doing**, in order: your request and the kubectl command, the kubelet's
-   "pods could not start, no IP addresses available" (the node is full), the controller's
-   `BlockAllocated` decisions, the node agents' own log lines (routes installed, CNI config written,
-   block Active), and the pod count reaching 150.
-4. With **Release automatically afterwards** ticked, the workload scales back to 0 a few seconds later.
-   The controller drains the idle blocks (they leave the CNI config and wait for their last pods),
-   quarantines them and returns them to the pool (`BlockDraining`, `BlockReleased`).
-5. The step boxes at the top tick off as each stage is seen in the cluster, with the time it took.
+Changing the pool CIDR on a running cluster (how the /24 was set, or to go back to the /16):
+```bash
+kubectl delete deployment -l app=ipam-demo                     # no demo pods may hold old addresses
+kubectl patch ippool buddy-pool --type merge -p '{"spec":{"cidrs":["10.244.0.0/24"]}}'
+kubectl delete nodeblocks --all                                # the controller gives every node a new first block
+# once the new blocks are Active, restart pods that still hold old addresses (CoreDNS):
+kubectl delete pod -n kube-system -l k8s-app=kube-dns
+```
 
-**Crowd one node** does the same with 70 pods pinned to one node, to show that the other nodes are
-left alone. Wait about a minute between runs so the previous run's blocks are released.
-**How it compares (simulator)** at the bottom holds the simulator results (a model, not this cluster).
+### The page
+One screen, three panels:
+- **Inject a fault** (left): **Fill the IP pool**, **Free the pool**, **Reset**, and steps that tick off
+  as each stage is seen in the cluster.
+- **IP addresses** (middle): the pool as one line, with each node's ranges in its colour, and every
+  node's blocks with one square per address. Each node has a pods box and **Set**, to run exactly that
+  many demo pods on it. Click a pod's square to stop that pod; click a free square to start a pod on
+  that node (it takes the node's next free address).
+- **What is happening** (right): every request and every change in the cluster, written as sentences.
+
+### Demo flow (1–2 minutes)
+1. **Fill the IP pool**: 150 real pods across the nodes. Nodes fill, the controller gives them more
+   blocks (the free space next to their own block first, so ranges merge), the agents add routes, the
+   blocks turn Active and all pods run.
+2. **Free the pool**: the pods are removed and the controller takes the extra blocks back (drain, a
+   short rest, back to the pool). Each node keeps its starting block.
+3. **One node by hand**: set a node to, say, 29 pods and watch it grow by just what it needs; set it
+   lower and watch it give back a whole block or the empty half of one.
+4. To show a full pool, set the nodes high enough together (the pool holds 256 addresses): the pool
+   turns **Full**, the extra pods wait for an address, and it recovers by itself when pods are removed.
+
+Wait until each node is back to one block between runs (about a minute). **Reset** deletes all demo
+pods.
 
 ## Problem 2: Dual-CNI resilience demo (`/project2`)
 

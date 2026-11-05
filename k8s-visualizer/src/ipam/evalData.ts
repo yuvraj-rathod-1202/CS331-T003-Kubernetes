@@ -6,10 +6,10 @@ export interface ScenarioRow { scenario: string; note: string; served: number[];
 
 // order of values follows `policies`
 export const scenarios: ScenarioRow[] = [
-  { scenario: 'steady', note: '50 nodes × 80 pods', served: [100, 100, 100, 100], util: [62.5, 31.2, 62.5, 62.5], addrs: [128, 256, 128, 128] },
-  { scenario: 'skewed', note: '10% of nodes at 220 pods, rest 30', served: [100, 100, 80.6, 100], util: [56.7, 19.1, 30.9, 58.9], addrs: [86, 256, 128, 83] },
-  { scenario: 'burst', note: 'all nodes 20 → 200 → 20 pods', served: [100, 100, 73.1, 100], util: [35.0, 32.0, 46.8, 38.2], addrs: [218, 256, 128, 217] },
-  { scenario: 'wave', note: 'per-node sine, random phase', served: [100, 100, 96.6, 100], util: [40.9, 27.8, 53.7, 52.4], addrs: [175, 256, 128, 137] },
+  { scenario: 'steady', note: '50 nodes × 80 pods', served: [100, 100, 100, 100], util: [71.4, 31.2, 62.5, 62.5], addrs: [112, 256, 128, 128] },
+  { scenario: 'skewed', note: '10% of nodes at 220 pods, rest 30', served: [100, 100, 80.6, 100], util: [55.7, 19.1, 30.9, 58.9], addrs: [88, 256, 128, 83] },
+  { scenario: 'burst', note: 'all nodes 20 → 200 → 20 pods', served: [100, 100, 73.1, 100], util: [37.7, 32.0, 46.8, 38.2], addrs: [188, 256, 128, 217] },
+  { scenario: 'wave', note: 'per-node sine, random phase', served: [100, 100, 96.6, 100], util: [46.5, 27.8, 53.7, 52.4], addrs: [154, 256, 128, 137] },
   { scenario: 'tight pool', note: '/20 shared by 40 nodes', served: [100, 57.1, 72.3, 100], util: [64.8, 31.2, 39.6, 67.3], addrs: [86, 102, 102, 83] },
 ];
 
