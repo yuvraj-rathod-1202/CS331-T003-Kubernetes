@@ -66,6 +66,21 @@ address that nobody can reach.
   kube-proxy. The count goes to `status.reclaimedLeases`. Needs `get` and
   `list` on pods.
 
+## Giving back half a block
+
+- A block with `spec.release` set is served only in its other half: the CNI
+  config lists the kept half. Other nodes keep the route for the whole block
+  until the split is done.
+- Every owned block reports its leases per half in `status.halfUsage`
+  ([lower, upper]); the controller picks an empty half from it.
+- Once the released half has been out of the config for `--drain-settle` and
+  holds no lease, the agent sets `status.releaseReady` to it. The time it left
+  the config is kept in memory; after a restart the settle time is waited again.
+- A block created with `spec.drain` (the released half after a split) never
+  joins the config; if it is still Pending, the agent quarantines it once empty.
+- Routes are installed before stale ones are removed, so when a block shrinks
+  to its kept half the other nodes never drop traffic to it.
+
 ## Recovery
 
 Nothing is remembered between passes, so recovery is just running again:
