@@ -17,22 +17,22 @@ text{font:12px system-ui,sans-serif;fill:var(--ink2)} .t{font-size:14px;font-wei
 <text x="400" y="372" text-anchor="middle"></text>
 <text transform="translate(14 198) rotate(-90)" text-anchor="middle">utilisation %</text>
 <text x="128.0" y="356" text-anchor="middle">steady</text>
-<rect x="69.0" y="162.5" width="28.0" height="177.5" rx="3" fill="var(--c0)"><title>buddy, steady: 62.5</title></rect>
+<rect x="69.0" y="137.1" width="28.0" height="202.9" rx="3" fill="var(--c0)"><title>buddy, steady: 71.4</title></rect>
 <rect x="99.0" y="251.2" width="28.0" height="88.8" rx="3" fill="var(--c1)"><title>static-/24, steady: 31.2</title></rect>
 <rect x="129.0" y="162.5" width="28.0" height="177.5" rx="3" fill="var(--c2)"><title>static-/25, steady: 62.5</title></rect>
 <rect x="159.0" y="162.5" width="28.0" height="177.5" rx="3" fill="var(--c3)"><title>calico-64, steady: 62.5</title></rect>
 <text x="264.0" y="356" text-anchor="middle">skewed</text>
-<rect x="205.0" y="178.9" width="28.0" height="161.1" rx="3" fill="var(--c0)"><title>buddy, skewed: 56.7</title></rect>
+<rect x="205.0" y="181.9" width="28.0" height="158.1" rx="3" fill="var(--c0)"><title>buddy, skewed: 55.7</title></rect>
 <rect x="235.0" y="285.6" width="28.0" height="54.4" rx="3" fill="var(--c1)"><title>static-/24, skewed: 19.1</title></rect>
 <rect x="265.0" y="252.4" width="28.0" height="87.6" rx="3" fill="var(--c2)"><title>static-/25, skewed: 30.9</title></rect>
 <rect x="295.0" y="172.7" width="28.0" height="167.3" rx="3" fill="var(--c3)"><title>calico-64, skewed: 58.9</title></rect>
 <text x="400.0" y="356" text-anchor="middle">burst</text>
-<rect x="341.0" y="240.5" width="28.0" height="99.5" rx="3" fill="var(--c0)"><title>buddy, burst: 35.0</title></rect>
+<rect x="341.0" y="233.0" width="28.0" height="107.0" rx="3" fill="var(--c0)"><title>buddy, burst: 37.7</title></rect>
 <rect x="371.0" y="249.1" width="28.0" height="90.9" rx="3" fill="var(--c1)"><title>static-/24, burst: 32.0</title></rect>
 <rect x="401.0" y="207.1" width="28.0" height="132.9" rx="3" fill="var(--c2)"><title>static-/25, burst: 46.8</title></rect>
 <rect x="431.0" y="231.6" width="28.0" height="108.4" rx="3" fill="var(--c3)"><title>calico-64, burst: 38.2</title></rect>
 <text x="536.0" y="356" text-anchor="middle">wave</text>
-<rect x="477.0" y="223.7" width="28.0" height="116.3" rx="3" fill="var(--c0)"><title>buddy, wave: 40.9</title></rect>
+<rect x="477.0" y="207.9" width="28.0" height="132.1" rx="3" fill="var(--c0)"><title>buddy, wave: 46.5</title></rect>
 <rect x="507.0" y="261.0" width="28.0" height="79.0" rx="3" fill="var(--c1)"><title>static-/24, wave: 27.8</title></rect>
 <rect x="537.0" y="187.4" width="28.0" height="152.6" rx="3" fill="var(--c2)"><title>static-/25, wave: 53.7</title></rect>
 <rect x="567.0" y="191.3" width="28.0" height="148.7" rx="3" fill="var(--c3)"><title>calico-64, wave: 52.4</title></rect>

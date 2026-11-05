@@ -75,13 +75,13 @@ func (s *static) Churn(p float64) {
 		s.pods[n] -= binomial(s.rng, s.pods[n], p)
 	}
 }
-func (s *static) Starved(int)    {}
-func (s *static) Tick(float64)   {}
-func (s *static) Pods(n int) int { return s.pods[n] }
-func (s *static) Allocated() int { return s.admitted * s.perNode }
-func (s *static) Routes() int    { return s.admitted }
-func (s *static) Ops() int       { return 0 }
-func (s *static) Admitted() int  { return s.admitted }
+func (s *static) Starved(int, int) {}
+func (s *static) Tick(float64)     {}
+func (s *static) Pods(n int) int   { return s.pods[n] }
+func (s *static) Allocated() int   { return s.admitted * s.perNode }
+func (s *static) Routes() int      { return s.admitted }
+func (s *static) Ops() int         { return 0 }
+func (s *static) Admitted() int    { return s.admitted }
 
 // calico models block-affinity IPAM: a node takes a 64-address block when it
 // has no free address and the pool still has a block; a block goes back to the
@@ -158,8 +158,8 @@ func (c *calico) Churn(p float64) {
 	}
 }
 
-func (c *calico) Starved(int)  {}
-func (c *calico) Tick(float64) {}
+func (c *calico) Starved(int, int) {}
+func (c *calico) Tick(float64)     {}
 func (c *calico) Pods(n int) int {
 	t := 0
 	for _, u := range c.blocks[n] {
