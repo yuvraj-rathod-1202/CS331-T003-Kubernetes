@@ -158,11 +158,17 @@ export function Project2Demo() {
     setEvents(prev => [...prev.slice(-(MAX_EVENTS - 1)), { time, text, kind }]);
   }, []);
 
+  // The poll loop and the refresh after a button press can overlap. Only the newest
+  // request may update the page: an older answer would show stale state and, diffed
+  // against newer data, log changes that never happened.
+  const requestSeq = useRef(0);
   const refresh = useCallback(async () => {
+    const mine = ++requestSeq.current;
     const [statusRes, trafficRes] = await Promise.allSettled([
       fetch('/api/fault/cniresilience/status').then(r => r.json()),
       fetch('/api/fault/cniresilience/traffic').then(r => r.json()),
     ]);
+    if (mine !== requestSeq.current) return;
 
     const nextCluster: ClusterState = statusRes.status === 'fulfilled'
       ? statusRes.value
@@ -535,7 +541,7 @@ function Fact({ label, value, good }: { label: string; value: string; good: bool
 function ActionButton({ icon, title, detail, tone, disabled, onClick }: {
   icon: React.ReactNode;
   title: string;
-  detail: string;
+  detail?: string;
   tone: 'danger' | 'warn' | 'good';
   disabled: boolean;
   onClick: () => void;
@@ -545,7 +551,7 @@ function ActionButton({ icon, title, detail, tone, disabled, onClick }: {
       {icon}
       <span>
         <strong>{title}</strong>
-        <span className="p2-muted p2-small">{detail}</span>
+        {detail && <span className="p2-muted p2-small">{detail}</span>}
       </span>
     </button>
   );

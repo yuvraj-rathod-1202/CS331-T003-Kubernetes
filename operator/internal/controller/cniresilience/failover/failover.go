@@ -32,6 +32,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"slices"
 
 	corev1 "k8s.io/api/core/v1"
@@ -64,6 +65,20 @@ const (
 // Manager handles traffic failover between primary and backup CNI paths.
 type Manager struct {
 	client client.Client
+	// backupNet is the backup CNI's address space. The network-status annotation
+	// can be written by anyone who can edit a pod, so a backup IP outside this range
+	// is ignored rather than put into a Service. Nil means unknown: no check.
+	backupNet *net.IPNet
+}
+
+// SetBackupNetwork sets the backup CNI's address space from the CR. An empty or
+// unparseable value turns the check off.
+func (m *Manager) SetBackupNetwork(cidr string) {
+	_, network, err := net.ParseCIDR(cidr)
+	if err != nil {
+		network = nil
+	}
+	m.backupNet = network
 }
 
 // NewManager creates a new failover manager.
@@ -85,7 +100,9 @@ func (m *Manager) FailedOverNodes(ctx context.Context) (map[string]bool, error) 
 }
 
 // EnsureGates turns the gate on for pods that have it but no condition yet. Without
-// this a gated pod could never become Ready. Nodes in failover are left alone.
+// this a gated pod could never become Ready. On nodes in failover, a pod with a
+// backup IP is left for FailoverNode; one without has nowhere else to go, so it
+// keeps its primary place like the pods FailoverNode does not touch.
 func (m *Manager) EnsureGates(ctx context.Context, failedOver map[string]bool) error {
 	var pods corev1.PodList
 	if err := m.client.List(ctx, &pods); err != nil {
@@ -93,10 +110,14 @@ func (m *Manager) EnsureGates(ctx context.Context, failedOver map[string]bool) e
 	}
 	for i := range pods.Items {
 		pod := &pods.Items[i]
-		if !hasGate(pod) || failedOver[pod.Spec.NodeName] || gateCondition(pod) != nil {
+		if !hasGate(pod) || gateCondition(pod) != nil {
 			continue
 		}
-		if err := m.setGate(ctx, pod, corev1.ConditionTrue); err != nil {
+		if failedOver[pod.Spec.NodeName] && m.backupIP(pod) != "" {
+			continue
+		}
+		// A pod deleted since the list must not stop the round for every other pod.
+		if err := m.setGate(ctx, pod, corev1.ConditionTrue); err != nil && !apierrors.IsNotFound(err) {
 			return err
 		}
 	}
@@ -116,7 +137,7 @@ func (m *Manager) FailoverNode(ctx context.Context, nodeName string) (int, error
 	}
 	backupIPs := make(map[string]string)
 	for i := range pods {
-		if ip := backupIP(&pods[i]); ip != "" && pods[i].Status.PodIP != "" {
+		if ip := m.backupIP(&pods[i]); ip != "" && pods[i].Status.PodIP != "" {
 			backupIPs[pods[i].Status.PodIP] = ip
 		}
 	}
@@ -319,6 +340,18 @@ func gateCondition(pod *corev1.Pod) *corev1.PodCondition {
 		}
 	}
 	return nil
+}
+
+// backupIP is the pod's net1 address, if it lies in the backup address space.
+func (m *Manager) backupIP(pod *corev1.Pod) string {
+	ip := backupIP(pod)
+	if ip == "" || m.backupNet == nil {
+		return ip
+	}
+	if parsed := net.ParseIP(ip); parsed == nil || !m.backupNet.Contains(parsed) {
+		return ""
+	}
+	return ip
 }
 
 func backupIP(pod *corev1.Pod) string {

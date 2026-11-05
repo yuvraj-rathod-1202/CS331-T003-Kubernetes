@@ -35,6 +35,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const (
@@ -160,6 +161,10 @@ type NodeHealthStatus struct {
 	// BackupMeasured is true if any agent has a backup result involving this node.
 	BackupMeasured bool
 
+	// BackupAmbiguous is true if the backup path's failures have more than one
+	// explanation, so the backup cannot be trusted to carry this node's traffic.
+	BackupAmbiguous bool
+
 	// Measured is true if this node took part in at least one primary probe.
 	Measured bool
 
@@ -186,7 +191,11 @@ func ReadNodeHealth(ctx context.Context, c client.Client, now time.Time) (map[st
 		}
 		var report Report
 		if err := json.Unmarshal([]byte(raw), &report); err != nil {
-			return nil, fmt.Errorf("parse report on node %s: %w", node.Name, err)
+			// One unreadable report must not stop failover and failback for every
+			// node: the node is treated as silent, like one with no report.
+			logf.FromContext(ctx).Info("Ignoring unreadable path report", "node", node.Name, "error", err.Error())
+			silent[node.Name] = true
+			continue
 		}
 		if now.Unix()-report.Time > SilentAfterSeconds {
 			silent[node.Name] = true
@@ -200,6 +209,12 @@ func ReadNodeHealth(ctx context.Context, c client.Client, now time.Time) (map[st
 		}
 	}
 
+	// Agents may still report on a node that has since been deleted. An edge to a
+	// node that no longer exists can never be seen working, so it would make every
+	// verdict ambiguous and block failback for good. Such edges are dropped.
+	primary = slices.DeleteFunc(primary, func(e Edge) bool { return !slices.Contains(names, e.To) })
+	backup = slices.DeleteFunc(backup, func(e Edge) bool { return !slices.Contains(names, e.To) })
+
 	primaryVerdict := Classify(names, primary, silent)
 	backupVerdict := Classify(names, backup, silent)
 
@@ -209,11 +224,12 @@ func ReadNodeHealth(ctx context.Context, c client.Client, now time.Time) (map[st
 	result := make(map[string]*NodeHealthStatus, len(names))
 	for _, name := range names {
 		status := &NodeHealthStatus{
-			PrimaryHealthy: !slices.Contains(primaryVerdict.BrokenNodes, name),
-			BackupHealthy:  !slices.Contains(backupVerdict.BrokenNodes, name),
-			BackupMeasured: takesPart(backup, name),
-			Measured:       takesPart(primary, name),
-			Ambiguous:      primaryVerdict.Ambiguous,
+			PrimaryHealthy:  !slices.Contains(primaryVerdict.BrokenNodes, name),
+			BackupHealthy:   !slices.Contains(backupVerdict.BrokenNodes, name),
+			BackupMeasured:  takesPart(backup, name),
+			Measured:        takesPart(primary, name),
+			Ambiguous:       primaryVerdict.Ambiguous,
+			BackupAmbiguous: backupVerdict.Ambiguous,
 		}
 		status.Working = status.Measured && !primaryVerdict.Ambiguous &&
 			!slices.ContainsFunc(primary, func(e Edge) bool {

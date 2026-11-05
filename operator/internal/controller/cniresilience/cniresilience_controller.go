@@ -31,11 +31,13 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -68,6 +70,10 @@ const (
 	// once per fault episode; this also limits a node that keeps flapping between
 	// working and broken, since each flap starts a new episode.
 	recoveryBackoff = 2 * time.Minute
+
+	// finalizerName lets the controller undo its changes to the cluster (shadow
+	// slices, readiness gates, recovery taints) before the CR goes away.
+	finalizerName = "cniresilience.cn-operator/cleanup"
 )
 
 // CNIResilienceController reconciles the CNIResilience CR.
@@ -87,6 +93,9 @@ type CNIResilienceController struct {
 
 	// recoveryPending marks nodes restarted but not yet proven working again.
 	recoveryPending map[string]bool
+	// restartDue marks nodes whose fault episode began inside recoveryBackoff, so
+	// the CNI agent restart was postponed instead of done; it is retried later.
+	restartDue map[string]bool
 }
 
 // NewCNIResilienceController creates the controller and wires sub-components.
@@ -98,11 +107,13 @@ func NewCNIResilienceController(c client.Client, scheme *runtime.Scheme) *CNIRes
 		failoverManager:     failover.NewManager(c),
 		lastRecoveryAttempt: make(map[string]time.Time),
 		recoveryPending:     make(map[string]bool),
+		restartDue:          make(map[string]bool),
 	}
 }
 
 // +kubebuilder:rbac:groups=remediation.cn-operator.yuvraj-rathod-1202.github.io,resources=cniresiliences,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=remediation.cn-operator.yuvraj-rathod-1202.github.io,resources=cniresiliences/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=remediation.cn-operator.yuvraj-rathod-1202.github.io,resources=cniresiliences/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;delete
 // +kubebuilder:rbac:groups="",resources=pods/status,verbs=get;patch
@@ -117,7 +128,16 @@ func (r *CNIResilienceController) Reconcile(ctx context.Context, req ctrl.Reques
 	if err := r.Get(ctx, req.NamespacedName, &cr); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+	if !cr.DeletionTimestamp.IsZero() {
+		return ctrl.Result{}, r.cleanup(ctx, &cr)
+	}
+	if controllerutil.AddFinalizer(&cr, finalizerName) {
+		if err := r.Update(ctx, &cr); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	original := cr.DeepCopy()
+	r.failoverManager.SetBackupNetwork(cr.Spec.BackupCNI.AddressSpace)
 
 	failedOver, err := r.failoverManager.FailedOverNodes(ctx)
 	if err != nil {
@@ -189,6 +209,19 @@ func (r *CNIResilienceController) Reconcile(ctx context.Context, req ctrl.Reques
 		statuses = append(statuses, status)
 	}
 
+	// Shadows of a node that no longer exists would keep the cluster "FailedOver"
+	// forever and send traffic to dead addresses.
+	for nodeName := range failedOver {
+		if _, exists := healthByNode[nodeName]; exists {
+			continue
+		}
+		if err := r.failoverManager.FailbackNode(ctx, nodeName); err != nil {
+			logger.Error(err, "Failed to remove shadows of a deleted node", "node", nodeName)
+			continue
+		}
+		delete(failedOver, nodeName)
+	}
+
 	cr.Status.NodeStatuses = statuses
 	cr.Status.FailoverActive = len(failedOver) > 0
 	cr.Status.Phase = computePhase(cr.Status.FailoverActive, healthByNode)
@@ -205,12 +238,20 @@ func (r *CNIResilienceController) handlePrimaryDown(
 	status *remediationv1alpha1.NodeCNIStatus,
 ) {
 	logger := logf.FromContext(ctx).WithName("cniresilience-controller")
-	backupWorks := health.BackupMeasured && health.BackupHealthy
+	// "Not proven broken" is not enough to send traffic to the backup: when its
+	// failures are ambiguous, it is not trusted.
+	backupWorks := health.BackupMeasured && health.BackupHealthy && !health.BackupAmbiguous
 
 	switch {
 	case failedOver[nodeName] && backupWorks:
 		status.ActivePath = activePathBackup
 		status.Message = "Primary path down; traffic on backup path"
+		// Re-applied every round (it is idempotent): it retries a failover that
+		// failed half-way and covers pods created or changed since.
+		if _, err := r.failoverManager.FailoverNode(ctx, nodeName); err != nil {
+			logger.Error(err, "Refreshing failover failed", "node", nodeName)
+			status.Message += fmt.Sprintf("; refreshing it failed: %v", err)
+		}
 	case !cr.Spec.AutoFailover:
 		if failedOver[nodeName] {
 			status.ActivePath = activePathBackup
@@ -270,22 +311,28 @@ func (r *CNIResilienceController) handlePrimaryDown(
 		logger.Error(err, "Failed to taint node", "node", nodeName)
 		return
 	}
-	if !added {
+	if !added && !r.isRestartDue(nodeName) {
 		if status.Message != "" {
 			status.Message += "; CNI agent already restarted once for this fault"
 		}
 		return
 	}
-	if r.claimRecovery(nodeName) {
-		// Runs on its own so the loop is not blocked while the CNI pod restarts.
-		go func(spec remediationv1alpha1.CNIResilienceSpec) {
-			recCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-			defer cancel()
-			if _, err := r.recoveryManager.RecoverNode(recCtx, nodeName, spec.PrimaryCNI.Namespace, spec.PrimaryCNI.DaemonSetName); err != nil {
-				logger.Error(err, "CNI recovery failed", "node", nodeName)
-			}
-		}(cr.Spec)
+	if !r.claimRecovery(nodeName) {
+		// The episode began within recoveryBackoff of the last restart. Postpone
+		// the restart instead of skipping it for the whole episode.
+		r.setRestartDue(nodeName, true)
+		status.Message += "; CNI agent restart postponed: it was restarted less than " + recoveryBackoff.String() + " ago"
+		return
 	}
+	r.setRestartDue(nodeName, false)
+	// Runs on its own so the loop is not blocked while the CNI pod restarts.
+	go func(spec remediationv1alpha1.CNIResilienceSpec) {
+		recCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+		if _, err := r.recoveryManager.RecoverNode(recCtx, nodeName, spec.PrimaryCNI.Namespace, spec.PrimaryCNI.DaemonSetName); err != nil {
+			logger.Error(err, "CNI recovery failed", "node", nodeName)
+		}
+	}(cr.Spec)
 }
 
 // claimRecovery returns true if a recovery attempt on this node may start now.
@@ -306,7 +353,59 @@ func (r *CNIResilienceController) finishRecovery(nodeName string) bool {
 	defer r.mu.Unlock()
 	pending := r.recoveryPending[nodeName]
 	delete(r.recoveryPending, nodeName)
+	delete(r.restartDue, nodeName)
 	return pending
+}
+
+func (r *CNIResilienceController) isRestartDue(nodeName string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.restartDue[nodeName]
+}
+
+func (r *CNIResilienceController) setRestartDue(nodeName string, due bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if due {
+		r.restartDue[nodeName] = true
+	} else {
+		delete(r.restartDue, nodeName)
+	}
+}
+
+// cleanup runs when the CR is deleted. It fails every node back (gates on, shadow
+// slices removed) and removes the recovery taints, so no pod is left NotReady and
+// no node unschedulable once the controller stops managing them. The finalizer is
+// removed only when all of that worked, so a failure is retried.
+func (r *CNIResilienceController) cleanup(ctx context.Context, cr *remediationv1alpha1.CNIResilience) error {
+	if !controllerutil.ContainsFinalizer(cr, finalizerName) {
+		return nil
+	}
+	nodes := map[string]bool{}
+	var nodeList corev1.NodeList
+	if err := r.List(ctx, &nodeList); err != nil {
+		return err
+	}
+	for i := range nodeList.Items {
+		nodes[nodeList.Items[i].Name] = true
+	}
+	failedOver, err := r.failoverManager.FailedOverNodes(ctx)
+	if err != nil {
+		return err
+	}
+	for name := range failedOver {
+		nodes[name] = true
+	}
+	for name := range nodes {
+		if err := r.failoverManager.FailbackNode(ctx, name); err != nil {
+			return fmt.Errorf("fail back node %s: %w", name, err)
+		}
+		if err := r.recoveryManager.UntaintNode(ctx, name); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("untaint node %s: %w", name, err)
+		}
+	}
+	controllerutil.RemoveFinalizer(cr, finalizerName)
+	return r.Update(ctx, cr)
 }
 
 // SetupWithManager sets up the controller with the Manager. It reconciles on spec

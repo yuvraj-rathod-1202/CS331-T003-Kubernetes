@@ -136,6 +136,7 @@ spec:
               probeTimeoutSeconds:
                 default: 2
                 description: ProbeTimeoutSeconds is the timeout for a single probe.
+                minimum: 1
                 type: integer
             required:
             - backupCNI

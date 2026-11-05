@@ -46,6 +46,11 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            # Peers are looked up only in this namespace (see Daemon.Namespace).
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -71,10 +76,9 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: cni-health-agent
+# Node patch cannot be limited to the agent's own Node with RBAC alone;
+# deploy/healthagent-policy.yaml adds an admission policy that does that.
 rules:
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["get", "list"]
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["patch"]
@@ -92,5 +96,31 @@ subjects:
     namespace: kube-system
 roleRef:
   kind: ClusterRole
+  name: cni-health-agent
+  apiGroup: rbac.authorization.k8s.io
+---
+# Agents only need their peers, which run in kube-system, so pods are readable
+# there only instead of cluster-wide.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cni-health-agent
+  namespace: kube-system
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cni-health-agent
+  namespace: kube-system
+subjects:
+  - kind: ServiceAccount
+    name: cni-health-agent
+    namespace: kube-system
+roleRef:
+  kind: Role
   name: cni-health-agent
   apiGroup: rbac.authorization.k8s.io

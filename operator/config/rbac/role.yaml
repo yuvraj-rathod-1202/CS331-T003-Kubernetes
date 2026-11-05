@@ -141,6 +141,13 @@ rules:
 - apiGroups:
   - remediation.cn-operator.yuvraj-rathod-1202.github.io
   resources:
+  - cniresiliences/finalizers
+  - networkremediations/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - remediation.cn-operator.yuvraj-rathod-1202.github.io
+  resources:
   - cniresiliences/status
   - ippools/status
   - networkremediations/status
@@ -149,10 +156,4 @@ rules:
   verbs:
   - get
   - patch
-  - update
-- apiGroups:
-  - remediation.cn-operator.yuvraj-rathod-1202.github.io
-  resources:
-  - networkremediations/finalizers
-  verbs:
   - update

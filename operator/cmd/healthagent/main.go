@@ -52,6 +52,6 @@ func main() {
 			os.Exit(1)
 		}
 	}()
-	daemon := &healthagent.Daemon{Client: c, NodeName: os.Getenv("NODE_NAME")}
+	daemon := &healthagent.Daemon{Client: c, NodeName: os.Getenv("NODE_NAME"), Namespace: os.Getenv("POD_NAMESPACE")}
 	daemon.Run(ctx)
 }

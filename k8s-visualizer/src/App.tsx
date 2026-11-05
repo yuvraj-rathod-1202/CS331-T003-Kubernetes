@@ -10,6 +10,8 @@ import { Project2Demo } from './components/Project2Demo';
 import type { LogEntry } from './components/LogTerminal';
 import './index.css';
 
+// The routes are chosen before any route-specific hook runs: each page is its own
+// component, so the number of hooks never changes between renders (rules of hooks).
 function App() {
   const [currentPath, setCurrentPath] = useState(window.location.pathname);
 
@@ -32,6 +34,10 @@ function App() {
     return <Project2Demo />;
   }
 
+  return <ClusterView />;
+}
+
+function ClusterView() {
   const k8sApi = useKubernetes();
   const { nodes, pods, error, operatorStatus } = k8sApi;
   const [selectedPod, setSelectedPod] = useState<string | null>(null);

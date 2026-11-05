@@ -1,0 +1,56 @@
+# Admission policy for the CNI health agent (needs Kubernetes 1.30+).
+#
+# RBAC lets the agent patch every Node, and the operator trusts the path-report
+# annotation it writes. Without this policy one compromised agent could mark any
+# healthy node broken (triggering a taint, a CNI restart and failover) or change
+# other nodes' taints and labels. With it, an agent may only change the
+# path-report annotation on the Node its own pod runs on.
+#
+# The node name comes from the service account token, which carries the pod's
+# node in request.userInfo.extra (ServiceAccountTokenPodNodeInfo, on by default
+# since 1.30).
+#
+#   kubectl apply -f deploy/healthagent-policy.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: cni-health-agent-own-node
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["UPDATE"]
+        resources: ["nodes"]
+  matchConditions:
+    - name: is-health-agent
+      expression: "request.userInfo.username == 'system:serviceaccount:kube-system:cni-health-agent'"
+  validations:
+    - expression: >-
+        'authentication.kubernetes.io/node-name' in request.userInfo.extra &&
+        object.metadata.name == request.userInfo.extra['authentication.kubernetes.io/node-name'][0]
+      message: "the health agent may only write to the Node its pod runs on"
+    - expression: "object.spec == oldObject.spec"
+      message: "the health agent may not change a Node's spec (taints, unschedulable, podCIDR)"
+    - expression: >-
+        (has(object.metadata.labels) ? object.metadata.labels : {}) ==
+        (has(oldObject.metadata.labels) ? oldObject.metadata.labels : {})
+      message: "the health agent may not change a Node's labels"
+    - expression: >-
+        (has(object.metadata.annotations) ? object.metadata.annotations : {})
+          .filter(k, k != 'cniresilience.cn-operator/path-report')
+          .all(k, has(oldObject.metadata.annotations) && k in oldObject.metadata.annotations &&
+                  oldObject.metadata.annotations[k] == object.metadata.annotations[k]) &&
+        (has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {})
+          .filter(k, k != 'cniresilience.cn-operator/path-report')
+          .all(k, has(object.metadata.annotations) && k in object.metadata.annotations)
+      message: "the health agent may only change the cniresilience.cn-operator/path-report annotation"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: cni-health-agent-own-node
+spec:
+  policyName: cni-health-agent-own-node
+  validationActions: ["Deny"]

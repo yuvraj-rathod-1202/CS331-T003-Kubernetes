@@ -47,6 +47,7 @@ type CNIResilienceSpec struct {
 
 	// ProbeTimeoutSeconds is the timeout for a single probe.
 	// +kubebuilder:default=2
+	// +kubebuilder:validation:Minimum=1
 	ProbeTimeoutSeconds int `json:"probeTimeoutSeconds,omitempty"`
 
 	// FailureThreshold is how many consecutive probe failures mark a path as down.

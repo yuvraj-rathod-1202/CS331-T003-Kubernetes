@@ -30,6 +30,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -94,16 +95,37 @@ func (s *streak) observe(ok bool, threshold int) {
 	}
 }
 
+// forgetPeerAfter is how long a peer may be missing (node deleted, agent gone)
+// before its probe state is dropped from this agent's report.
+const forgetPeerAfter = 5 * time.Minute
+
 // Daemon is the agent that runs on each node.
 type Daemon struct {
 	Client   client.Client
 	NodeName string
+	// Namespace is where the agent pods run. Peers are looked up only there, so a
+	// pod elsewhere that copies the agent label cannot pose as a node's agent.
+	Namespace string
 
 	mu       sync.Mutex
 	primary  map[string]*streak
 	backup   map[string]*streak
-	lastSent string
-	lastTime time.Time
+	lastSeen map[string]time.Time
+	// backupNet is the backup CNI's address space; backup IPs outside it are ignored.
+	backupNet *net.IPNet
+	lastSent  string
+	lastTime  time.Time
+}
+
+// probeSettings turns the CR's probe fields into safe values. The CRD has minimums,
+// but a zero interval would divide by zero and a zero timeout would mean "wait
+// forever" while the probe holds the agent's lock.
+func probeSettings(spec remediationv1alpha1.CNIResilienceSpec) (interval, timeout time.Duration, threshold int) {
+	interval = time.Duration(max(spec.ProbeIntervalSeconds, 1)) * time.Second
+	timeout = time.Duration(max(spec.ProbeTimeoutSeconds, 1)) * time.Second
+	timeout = min(timeout, interval)
+	threshold = max(spec.FailureThreshold, 1)
+	return interval, timeout, threshold
 }
 
 // Serve answers peers' probes.
@@ -128,15 +150,21 @@ func (d *Daemon) Run(ctx context.Context) {
 	logger := logf.FromContext(ctx).WithName("health-agent")
 	d.primary = make(map[string]*streak)
 	d.backup = make(map[string]*streak)
+	d.lastSeen = make(map[string]time.Time)
 
 	interval, timeout, threshold := 2*time.Second, time.Second, 3
 	for {
 		var list remediationv1alpha1.CNIResilienceList
 		if err := d.Client.List(ctx, &list); err == nil && len(list.Items) > 0 {
 			spec := list.Items[0].Spec
-			interval = time.Duration(spec.ProbeIntervalSeconds) * time.Second
-			timeout = time.Duration(spec.ProbeTimeoutSeconds) * time.Second
-			threshold = spec.FailureThreshold
+			interval, timeout, threshold = probeSettings(spec)
+			_, network, err := net.ParseCIDR(spec.BackupCNI.AddressSpace)
+			if err != nil {
+				network = nil
+			}
+			d.mu.Lock()
+			d.backupNet = network
+			d.mu.Unlock()
 		}
 
 		if err := d.round(ctx, interval, timeout, threshold); err != nil {
@@ -154,18 +182,27 @@ func (d *Daemon) Run(ctx context.Context) {
 
 func (d *Daemon) round(ctx context.Context, interval, timeout time.Duration, threshold int) error {
 	var pods corev1.PodList
-	if err := d.Client.List(ctx, &pods, client.MatchingLabels{"app": agentLabel}); err != nil {
+	opts := []client.ListOption{client.MatchingLabels{"app": agentLabel}}
+	if d.Namespace != "" {
+		opts = append(opts, client.InNamespace(d.Namespace))
+	}
+	if err := d.Client.List(ctx, &pods, opts...); err != nil {
 		return d.publish(ctx)
 	}
+
+	d.mu.Lock()
+	backupNet := d.backupNet
+	d.mu.Unlock()
 
 	type peer struct{ primaryIP, backupIP string }
 	peers := make(map[string]peer)
 	for i := range pods.Items {
 		pod := &pods.Items[i]
-		if pod.Status.PodIP != "" && pod.Status.Phase == corev1.PodRunning {
-			peers[pod.Spec.NodeName] = peer{pod.Status.PodIP, backupIP(pod)}
+		if pod.Status.PodIP != "" && pod.Status.Phase == corev1.PodRunning && ownedByDaemonSet(pod) {
+			peers[pod.Spec.NodeName] = peer{pod.Status.PodIP, backupIP(pod, backupNet)}
 		}
 	}
+	d.forgetMissingPeers(slices.Collect(maps.Keys(peers)), time.Now())
 
 	names := slices.Sorted(maps.Keys(peers))
 	target := RingTarget(names, d.NodeName, time.Now().UnixNano()/int64(interval))
@@ -253,7 +290,34 @@ func probe(ctx context.Context, ip string, timeout time.Duration) bool {
 	return true
 }
 
-func backupIP(pod *corev1.Pod) string {
+// forgetMissingPeers drops the probe state of peers that have been missing for
+// forgetPeerAfter. Without this a deleted node's last (failing) result was reported
+// forever. A short absence, such as an agent restart, keeps the state.
+func (d *Daemon) forgetMissingPeers(present []string, now time.Time) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, name := range present {
+		d.lastSeen[name] = now
+	}
+	for name := range d.primary {
+		if seen, ok := d.lastSeen[name]; !ok || now.Sub(seen) > forgetPeerAfter {
+			delete(d.primary, name)
+			delete(d.backup, name)
+			delete(d.lastSeen, name)
+		}
+	}
+}
+
+func ownedByDaemonSet(pod *corev1.Pod) bool {
+	return slices.ContainsFunc(pod.OwnerReferences, func(o metav1.OwnerReference) bool {
+		return o.Kind == "DaemonSet" && o.Controller != nil && *o.Controller
+	})
+}
+
+// backupIP returns the pod's net1 address from Multus' network-status annotation.
+// The annotation can be written by anyone who can edit the pod, so when the backup
+// address space is known an address outside it is ignored.
+func backupIP(pod *corev1.Pod, backupNet *net.IPNet) string {
 	var entries []struct {
 		Interface string   `json:"interface"`
 		IPs       []string `json:"ips"`
@@ -263,6 +327,10 @@ func backupIP(pod *corev1.Pod) string {
 	}
 	for _, entry := range entries {
 		if entry.Interface == "net1" && len(entry.IPs) > 0 {
+			ip := net.ParseIP(entry.IPs[0])
+			if ip == nil || (backupNet != nil && !backupNet.Contains(ip)) {
+				return ""
+			}
 			return entry.IPs[0]
 		}
 	}

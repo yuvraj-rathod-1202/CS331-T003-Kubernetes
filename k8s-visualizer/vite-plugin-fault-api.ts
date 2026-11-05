@@ -24,43 +24,42 @@ async function runShell(cmd: string): Promise<{ stdout: string; stderr: string; 
   }
 }
 
-async function resolveContainerName(nodeName: string): Promise<string> {
+// The docker container that runs this node (kind, or minikube's docker driver), or
+// null if none does. Exact name first; otherwise the one container whose name
+// contains the node name, never a guess among several.
+async function resolveContainerName(nodeName: string): Promise<string | null> {
   try {
     const { stdout } = await execFileAsync('docker', ['ps', '--format', '{{.Names}}']);
     const containerNames = stdout.split('\n').map(s => s.trim()).filter(Boolean);
-
-    if (containerNames.includes(nodeName)) {
-      return nodeName;
-    }
-
-    const match = containerNames.find(name => name.includes(nodeName) || nodeName.includes(name));
-    if (match) {
-      return match;
-    }
+    if (containerNames.includes(nodeName)) return nodeName;
+    const matches = containerNames.filter(name => name.includes(nodeName));
+    if (matches.length === 1) return matches[0];
   } catch {}
-
-  return nodeName;
+  return null;
 }
 
+// Runs a shell command on the node. Every value interpolated into `command` must
+// already be validated by the caller (see the is* checks below).
+// docker exec is used when a container runs the node; only otherwise minikube ssh.
+// It does not fall back on a non-zero exit, which is often the expected answer
+// (e.g. `iptables -C` when a rule is absent), so a command never runs twice or on
+// another cluster.
 async function execOnNode(nodeName: string, command: string): Promise<{ stdout: string; stderr: string; code: number }> {
+  if (!isNodeName(nodeName)) {
+    return { stdout: '', stderr: `invalid node name: ${JSON.stringify(nodeName)}`, code: 1 };
+  }
   const container = await resolveContainerName(nodeName);
-
-  // 1. Primary execution strategy: docker exec directly without cmd.exe shell wrapper
   try {
-    const { stdout, stderr } = await execFileAsync('docker', ['exec', container, 'sh', '-c', command]);
+    const { stdout, stderr } = container
+      ? await execFileAsync('docker', ['exec', container, 'sh', '-c', command], { timeout: 15000 })
+      : await execFileAsync('minikube', ['ssh', '-n', nodeName, '--', command], { timeout: 15000 });
     return { stdout: stdout.trim(), stderr: stderr.trim(), code: 0 };
   } catch (err: any) {
-    // 2. Fallback: minikube ssh
-    try {
-      const { stdout, stderr } = await execFileAsync('minikube', ['ssh', '-n', nodeName, '--', command]);
-      return { stdout: stdout.trim(), stderr: stderr.trim(), code: 0 };
-    } catch (mErr: any) {
-      return {
-        stdout: err.stdout?.trim() || mErr.stdout?.trim() || '',
-        stderr: err.stderr?.trim() || mErr.stderr?.trim() || err.message,
-        code: err.code || 1,
-      };
-    }
+    return {
+      stdout: err.stdout?.trim() || '',
+      stderr: err.stderr?.trim() || err.message,
+      code: typeof err.code === 'number' ? err.code : 1,
+    };
   }
 }
 
@@ -138,12 +137,46 @@ function demoDeployment(name: string, replicas: number, nodeName?: string) {
   };
 }
 
+// Input checks. Values from requests reach shell commands (on the node, through
+// docker exec / minikube ssh), so each one must match a strict pattern first.
 function isPodName(v: unknown): v is string {
   return typeof v === 'string' && /^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$/.test(v);
 }
 
 function isNodeName(v: unknown): v is string {
-  return typeof v === 'string' && /^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$/.test(v);
+  return typeof v === 'string' && /^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$/.test(v);
+}
+
+function isNamespace(v: unknown): v is string {
+  return typeof v === 'string' && /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(v);
+}
+
+function isIPv4(v: unknown): v is string {
+  return typeof v === 'string' && /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/.test(v);
+}
+
+function isCaliIface(v: unknown): v is string {
+  return typeof v === 'string' && /^cali[0-9a-f]{1,11}$/.test(v);
+}
+
+const MAX_BODY_BYTES = 64 * 1024;
+
+// The API runs kubectl and root commands on the cluster, so it only answers this
+// page: no CORS headers are sent, and a request a browser marks as coming from
+// another site, or carrying a foreign Origin, is refused. POSTs must be JSON, which
+// a cross-site page cannot send without a CORS preflight.
+function rejectForeign(req: IncomingMessage): string | null {
+  if (req.headers['sec-fetch-site'] === 'cross-site') return 'cross-site requests are not allowed';
+  const origin = req.headers.origin;
+  if (origin) {
+    let host = '';
+    try { host = new URL(origin).host; } catch {}
+    if (host !== req.headers.host) return 'cross-origin requests are not allowed';
+  }
+  if (req.method === 'POST' && !String(req.headers['content-type'] ?? '').startsWith('application/json')) {
+    return 'POST requests must be application/json';
+  }
+  return null;
 }
 
 function parseJsonBody<T = any>(req: IncomingMessage): Promise<T> {
@@ -151,6 +184,10 @@ function parseJsonBody<T = any>(req: IncomingMessage): Promise<T> {
     let body = '';
     req.on('data', chunk => {
       body += chunk;
+      if (body.length > MAX_BODY_BYTES) {
+        reject(new Error('Request body too large'));
+        req.destroy();
+      }
     });
     req.on('end', () => {
       try {
@@ -164,12 +201,7 @@ function parseJsonBody<T = any>(req: IncomingMessage): Promise<T> {
 }
 
 function sendJson(res: ServerResponse, status: number, data: any) {
-  res.writeHead(status, {
-    'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
-  });
+  res.writeHead(status, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(data));
 }
 
@@ -257,12 +289,13 @@ export function faultInjectorPlugin(_options: FaultApiOptions = {}): Plugin {
         }
 
         if (req.method === 'OPTIONS') {
-          res.writeHead(204, {
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-            'Access-Control-Allow-Headers': 'Content-Type',
-          });
+          // No CORS: a preflight from another origin gets no permission.
+          res.writeHead(204);
           return res.end();
+        }
+        const refused = rejectForeign(req);
+        if (refused) {
+          return sendJson(res, 403, { error: refused });
         }
 
         try {
@@ -271,8 +304,8 @@ export function faultInjectorPlugin(_options: FaultApiOptions = {}): Plugin {
           // -------------------------------------------------------------
           if (url === '/api/fault/iptables/drop' && req.method === 'POST') {
             const { nodeName } = await parseJsonBody(req);
-            if (!nodeName) {
-              return sendJson(res, 400, { error: 'nodeName is required' });
+            if (!isNodeName(nodeName)) {
+              return sendJson(res, 400, { error: 'a valid nodeName is required' });
             }
 
             // Check if rule already exists
@@ -316,13 +349,13 @@ export function faultInjectorPlugin(_options: FaultApiOptions = {}): Plugin {
           // -------------------------------------------------------------
           if (url === '/api/fault/iptables/restore' && req.method === 'POST') {
             const { nodeName } = await parseJsonBody(req);
-            if (!nodeName) {
-              return sendJson(res, 400, { error: 'nodeName is required' });
+            if (!isNodeName(nodeName)) {
+              return sendJson(res, 400, { error: 'a valid nodeName is required' });
             }
 
-            // Delete rules in a loop until none remain
+            // Delete rules in a loop until none remain (bounded, like the tunnel restore)
             let removedCount = 0;
-            while (true) {
+            while (removedCount < 20) {
               const checkRes = await execOnNode(
                 nodeName,
                 'iptables -C FORWARD -j DROP -m comment --comment "exp11-failure" 2>/dev/null'
@@ -351,8 +384,8 @@ export function faultInjectorPlugin(_options: FaultApiOptions = {}): Plugin {
           if (url.startsWith('/api/fault/iptables/status') && req.method === 'GET') {
             const parsedUrl = new URL(url, 'http://localhost');
             const nodeName = parsedUrl.searchParams.get('nodeName');
-            if (!nodeName) {
-              return sendJson(res, 400, { error: 'nodeName is required' });
+            if (!isNodeName(nodeName)) {
+              return sendJson(res, 400, { error: 'a valid nodeName is required' });
             }
 
             const checkRes = await execOnNode(
@@ -382,12 +415,14 @@ export function faultInjectorPlugin(_options: FaultApiOptions = {}): Plugin {
           // -------------------------------------------------------------
           if (url === '/api/fault/ping' && req.method === 'POST') {
             const { namespace = 'default', podName, targetIP = '8.8.8.8' } = await parseJsonBody(req);
-            if (!podName) {
-              return sendJson(res, 400, { error: 'podName is required' });
+            if (!isPodName(podName) || !isNamespace(namespace) || !isIPv4(targetIP)) {
+              return sendJson(res, 400, { error: 'a valid podName, namespace and IPv4 targetIP are required' });
             }
 
-            const pingCmd = `kubectl exec -n ${namespace} ${podName} -- ping -c 3 -W 1 ${targetIP}`;
-            const pingRes = await runShell(pingCmd);
+            // Arguments, not a shell string: nothing in them is interpreted by a shell.
+            const pingRes = await execFileAsync('kubectl', ['exec', '-n', namespace, podName, '--', 'ping', '-c', '3', '-W', '1', targetIP], { timeout: 15000 })
+              .then(({ stdout, stderr }) => ({ stdout: stdout.trim(), stderr: stderr.trim(), code: 0 }))
+              .catch((err: any) => ({ stdout: err.stdout?.trim() || '', stderr: err.stderr?.trim() || err.message, code: typeof err.code === 'number' ? err.code : 1 }));
 
             // Extract packet loss percentage
             const match = pingRes.stdout.match(/(\d+)%\s+packet loss/);
@@ -409,15 +444,15 @@ export function faultInjectorPlugin(_options: FaultApiOptions = {}): Plugin {
             const namespace = parsedUrl.searchParams.get('namespace') || 'default';
             const podIP = parsedUrl.searchParams.get('podIP') || '';
 
-            if (!nodeName) {
-              return sendJson(res, 400, { error: 'nodeName is required' });
+            if (!isNodeName(nodeName) || (podName && !isPodName(podName)) || !isNamespace(namespace) || (podIP && !isIPv4(podIP))) {
+              return sendJson(res, 400, { error: 'invalid nodeName, podName, namespace or podIP' });
             }
 
             const iface = await resolvePodCaliInterface(nodeName, podName, namespace, podIP);
             let isDown = false;
             let statusRaw = '';
 
-            if (iface) {
+            if (isCaliIface(iface)) {
               const linkCheck = await execOnNode(nodeName, `ip link show ${iface}`);
               statusRaw = linkCheck.stdout;
               isDown = statusRaw.includes('state DOWN');
@@ -434,8 +469,9 @@ export function faultInjectorPlugin(_options: FaultApiOptions = {}): Plugin {
 
           if (url === '/api/fault/veth/toggle' && req.method === 'POST') {
             const { nodeName, podName, namespace = 'default', podIP, action = 'down', iface: providedIface } = await parseJsonBody(req);
-            if (!nodeName) {
-              return sendJson(res, 400, { error: 'nodeName is required' });
+            if (!isNodeName(nodeName) || (podName && !isPodName(podName)) || !isNamespace(namespace) ||
+                (podIP && !isIPv4(podIP)) || (providedIface && !isCaliIface(providedIface))) {
+              return sendJson(res, 400, { error: 'invalid nodeName, podName, namespace, podIP or iface' });
             }
 
             let iface = providedIface;
@@ -443,7 +479,7 @@ export function faultInjectorPlugin(_options: FaultApiOptions = {}): Plugin {
               iface = await resolvePodCaliInterface(nodeName, podName, namespace, podIP);
             }
 
-            if (!iface) {
+            if (!isCaliIface(iface)) {
               return sendJson(res, 404, { error: `Could not determine Calico veth interface for pod ${podName} on node ${nodeName}` });
             }
 
@@ -474,8 +510,8 @@ export function faultInjectorPlugin(_options: FaultApiOptions = {}): Plugin {
           if (url.startsWith('/api/fault/tunnel/status') && req.method === 'GET') {
             const parsedUrl = new URL(url, 'http://localhost');
             const nodeName = parsedUrl.searchParams.get('nodeName');
-            if (!nodeName) {
-              return sendJson(res, 400, { error: 'nodeName is required' });
+            if (!isNodeName(nodeName)) {
+              return sendJson(res, 400, { error: 'a valid nodeName is required' });
             }
 
             const ruleCheck = await execOnNode(nodeName, 'iptables -C OUTPUT -p 4 -j DROP -m comment --comment "tunl0-drop" 2>/dev/null');
@@ -491,8 +527,8 @@ export function faultInjectorPlugin(_options: FaultApiOptions = {}): Plugin {
 
           if (url === '/api/fault/tunnel/toggle' && req.method === 'POST') {
             const { nodeName, action = 'down' } = await parseJsonBody(req);
-            if (!nodeName) {
-              return sendJson(res, 400, { error: 'nodeName is required' });
+            if (!isNodeName(nodeName)) {
+              return sendJson(res, 400, { error: 'a valid nodeName is required' });
             }
 
             const validAction = action === 'up' ? 'up' : 'down';
@@ -507,11 +543,13 @@ export function faultInjectorPlugin(_options: FaultApiOptions = {}): Plugin {
               await execOnNode(nodeName, 'ip link set tunl0 down 2>/dev/null || true');
               commandRan = 'iptables -I OUTPUT -p 4 -j DROP -m comment --comment "tunl0-drop" && ip link set tunl0 down';
             } else {
-              // Clean up iptables rule and bring interface up
-              while (true) {
+              // Clean up iptables rule and bring interface up. Bounded: a delete that
+              // keeps failing must not hang the request forever.
+              for (let i = 0; i < 20; i++) {
                 const check = await execOnNode(nodeName, 'iptables -C OUTPUT -p 4 -j DROP -m comment --comment "tunl0-drop" 2>/dev/null');
                 if (check.code !== 0) break;
-                await execOnNode(nodeName, 'iptables -D OUTPUT -p 4 -j DROP -m comment --comment "tunl0-drop"');
+                const del = await execOnNode(nodeName, 'iptables -D OUTPUT -p 4 -j DROP -m comment --comment "tunl0-drop"');
+                if (del.code !== 0) break;
               }
               await execOnNode(nodeName, 'ip link set tunl0 up 2>/dev/null || true');
               commandRan = 'iptables -D OUTPUT -p 4 -j DROP && ip link set tunl0 up';

@@ -26,11 +26,13 @@ package recovery
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -118,65 +120,58 @@ func (m *Manager) RecoverNode(ctx context.Context, nodeName string, cniNamespace
 // TaintNode applies the recovery NoSchedule taint to a node (idempotent). It reports
 // whether this call added the taint, which marks the start of a new fault episode.
 func (m *Manager) TaintNode(ctx context.Context, nodeName string) (bool, error) {
-	logger := logf.FromContext(ctx).WithName("recovery")
-
-	node := &corev1.Node{}
-	if err := m.client.Get(ctx, client.ObjectKey{Name: nodeName}, node); err != nil {
-		return false, fmt.Errorf("get node: %w", err)
-	}
-
-	// Check if taint already exists to remain idempotent.
-	for _, t := range node.Spec.Taints {
-		if t.Key == recoveryTaintKey && t.Effect == recoveryTaintEffect {
-			logger.V(1).Info("Recovery taint already present", "node", nodeName)
-			return false, nil
+	added, err := m.changeTaints(ctx, nodeName, func(taints []corev1.Taint) ([]corev1.Taint, bool) {
+		if slices.ContainsFunc(taints, isRecoveryTaint) {
+			return taints, false
 		}
-	}
-
-	node.Spec.Taints = append(node.Spec.Taints, corev1.Taint{
-		Key:    recoveryTaintKey,
-		Effect: recoveryTaintEffect,
+		return append(taints, corev1.Taint{Key: recoveryTaintKey, Effect: recoveryTaintEffect}), true
 	})
-
-	if err := m.client.Update(ctx, node); err != nil {
-		return false, fmt.Errorf("update node taints: %w", err)
+	if err == nil && added {
+		logf.FromContext(ctx).WithName("recovery").Info("Applied recovery taint", "node", nodeName)
 	}
-
-	logger.Info("Applied recovery taint", "node", nodeName)
-	return true, nil
+	return added, err
 }
 
 // UntaintNode removes the recovery taint from a node (idempotent).
 func (m *Manager) UntaintNode(ctx context.Context, nodeName string) error {
-	logger := logf.FromContext(ctx).WithName("recovery")
-
-	node := &corev1.Node{}
-	if err := m.client.Get(ctx, client.ObjectKey{Name: nodeName}, node); err != nil {
-		return fmt.Errorf("get node: %w", err)
+	removed, err := m.changeTaints(ctx, nodeName, func(taints []corev1.Taint) ([]corev1.Taint, bool) {
+		kept := slices.DeleteFunc(slices.Clone(taints), isRecoveryTaint)
+		return kept, len(kept) != len(taints)
+	})
+	if err == nil && removed {
+		logf.FromContext(ctx).WithName("recovery").Info("Removed recovery taint", "node", nodeName)
 	}
+	return err
+}
 
-	newTaints := make([]corev1.Taint, 0, len(node.Spec.Taints))
-	removed := false
-	for _, t := range node.Spec.Taints {
-		if t.Key == recoveryTaintKey && t.Effect == recoveryTaintEffect {
-			removed = true
-			continue // Skip - this removes it.
+func isRecoveryTaint(t corev1.Taint) bool {
+	return t.Key == recoveryTaintKey && t.Effect == recoveryTaintEffect
+}
+
+// changeTaints applies change to a fresh copy of the node's taints and writes it with
+// an optimistically locked patch. The health agents patch every Node's annotation
+// every few seconds, so a full Update of a cached copy conflicted often; on a
+// conflict the change is simply redone on the newest copy. It reports whether the
+// taints changed.
+func (m *Manager) changeTaints(ctx context.Context, nodeName string,
+	change func([]corev1.Taint) ([]corev1.Taint, bool)) (bool, error) {
+	changed := false
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		node := &corev1.Node{}
+		if err := m.client.Get(ctx, client.ObjectKey{Name: nodeName}, node); err != nil {
+			return fmt.Errorf("get node: %w", err)
 		}
-		newTaints = append(newTaints, t)
+		patch := client.MergeFromWithOptions(node.DeepCopy(), client.MergeFromWithOptimisticLock{})
+		node.Spec.Taints, changed = change(node.Spec.Taints)
+		if !changed {
+			return nil
+		}
+		return m.client.Patch(ctx, node, patch)
+	})
+	if err != nil {
+		return false, fmt.Errorf("update node taints: %w", err)
 	}
-
-	if !removed {
-		logger.V(1).Info("Recovery taint not present, nothing to remove", "node", nodeName)
-		return nil
-	}
-
-	node.Spec.Taints = newTaints
-	if err := m.client.Update(ctx, node); err != nil {
-		return fmt.Errorf("update node taints: %w", err)
-	}
-
-	logger.Info("Removed recovery taint", "node", nodeName)
-	return nil
+	return changed, nil
 }
 
 // RestartCNIAgentPod deletes the CNI agent pod on a specific node.
