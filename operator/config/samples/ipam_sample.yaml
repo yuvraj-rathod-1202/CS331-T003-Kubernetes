@@ -23,7 +23,7 @@ spec:
   maxBlockSize: 22            # Largest single block: /22 = 1024 addresses
   expandThresholdPercent: 80  # Grow when a node is 80% used...
   triggerFloor: 8             # ...or has fewer than 8 free addresses
-  growthPercent: 50           # Grow by 50% of current capacity (power of two)
+  # A grow adds what the node's pods are short of (to restore the two settings above), nothing more.
   capacityCapPercent: 120      # Never exceed 120% of the node's max pods
   initialBlockPercent: 25     # First block: 25% of max pods (min 16 addresses)
   shrinkThresholdPercent: 50   # Give a block back only if the rest would be <= 50% used

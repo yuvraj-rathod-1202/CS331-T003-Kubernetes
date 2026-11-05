@@ -76,6 +76,16 @@ type Agent struct {
 	DrainSettle time.Duration
 	// Now is the clock; nil means time.Now.
 	Now func() time.Time
+
+	// releasing remembers, per block, which half is being given back and since
+	// when the CNI config has left it out. Lost on restart, which only means
+	// the settle time is waited again.
+	releasing map[string]releaseMark
+}
+
+type releaseMark struct {
+	half  string
+	since time.Time
 }
 
 func (a *Agent) now() time.Time {
@@ -184,16 +194,10 @@ func (a *Agent) syncRoutes(nodes []corev1.Node, blocks []remediationv1alpha1.Nod
 		haveSet[r] = true
 	}
 
+	// New routes go in before stale ones come out. When a block is split or
+	// buddies merge, the old and new prefixes overlap; the longest prefix wins,
+	// so traffic never sees a gap.
 	var errs []error
-	for _, r := range have {
-		if !wantSet[r] {
-			if err := a.Routes.Delete(r); err != nil {
-				errs = append(errs, fmt.Errorf("delete route %s: %w", r.Dst, err))
-				continue
-			}
-			logger.Info("route removed", "dst", r.Dst, "via", r.Gateway)
-		}
-	}
 	for _, r := range want {
 		if !haveSet[r] {
 			if err := a.Routes.Replace(r); err != nil {
@@ -201,6 +205,15 @@ func (a *Agent) syncRoutes(nodes []corev1.Node, blocks []remediationv1alpha1.Nod
 				continue
 			}
 			logger.Info("route installed", "dst", r.Dst, "via", r.Gateway)
+		}
+	}
+	for _, r := range have {
+		if !wantSet[r] {
+			if err := a.Routes.Delete(r); err != nil {
+				errs = append(errs, fmt.Errorf("delete route %s: %w", r.Dst, err))
+				continue
+			}
+			logger.Info("route removed", "dst", r.Dst, "via", r.Gateway)
 		}
 	}
 	// A skipped owner (no InternalIP) means the routes are incomplete.
@@ -264,7 +277,9 @@ func (a *Agent) syncOwn(ctx context.Context, nodes []corev1.Node, blocks []remed
 				inConfig = append(inConfig, b)
 			}
 		case remediationv1alpha1.NodeBlockPending:
-			if routesOK && ReadyToPromote(a.NodeName, b, nodes, a.now(), a.PromoteTimeout) {
+			// A block created to be given back (the released half of a split)
+			// never joins the config.
+			if !b.Spec.Drain && routesOK && ReadyToPromote(a.NodeName, b, nodes, a.now(), a.PromoteTimeout) {
 				inConfig = append(inConfig, b)
 				promote = append(promote, b)
 			}
@@ -275,7 +290,7 @@ func (a *Agent) syncOwn(ctx context.Context, nodes []corev1.Node, blocks []remed
 	if len(inConfig) > 0 {
 		cidrs := make([]string, len(inConfig))
 		for i, b := range inConfig {
-			cidrs[i] = b.Spec.CIDR
+			cidrs[i] = ServedCIDR(b)
 		}
 		conf, err := RenderCNIConfig(a.NetName, a.DataDir, cidrs)
 		if err != nil {
@@ -313,6 +328,13 @@ func (a *Agent) syncOwn(ctx context.Context, nodes []corev1.Node, blocks []remed
 		return fmt.Errorf("count leases: %w", err)
 	}
 
+	// Usage per half, so the controller can see a half that could be given back.
+	halfUsed, err := countHalves(a.LeaseDir, own)
+	if err != nil {
+		return err
+	}
+	ready := a.releaseReady(own, halfUsed, configOK)
+
 	promoted := map[string]bool{}
 	for _, b := range promote {
 		promoted[b.Name] = true
@@ -322,8 +344,11 @@ func (a *Agent) syncOwn(ctx context.Context, nodes []corev1.Node, blocks []remed
 		name, n := b.Name, used[b.Spec.CIDR]
 		promoting := promoted[name]
 		reclaimedHere := reclaimed[b.Spec.CIDR]
+		hu := halfUsage(b.Spec.CIDR, halfUsed)
+		rr := ready[name]
+		readCIDR, readRelease := b.Spec.CIDR, b.Spec.Release
 		if err := a.updateStatus(ctx, name, func(cur *remediationv1alpha1.NodeBlock) bool {
-			changed := false
+			changed := setHalfStatus(cur, readCIDR, readRelease, hu, rr)
 			if ph := a.nextPhase(cur, promoting, n, configOK); ph != "" {
 				now := metav1.NewTime(a.now())
 				cur.Status.Phase = ph
@@ -345,6 +370,87 @@ func (a *Agent) syncOwn(ctx context.Context, nodes []corev1.Node, blocks []remed
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// countHalves counts the leases in each half of every block.
+func countHalves(dir string, own []*remediationv1alpha1.NodeBlock) (map[string]int, error) {
+	var halves []string
+	for _, b := range own {
+		if lo, hi, err := buddy.Halves(b.Spec.CIDR); err == nil {
+			halves = append(halves, lo, hi)
+		}
+	}
+	n, err := CountLeases(dir, halves)
+	if err != nil {
+		return nil, fmt.Errorf("count leases per half: %w", err)
+	}
+	return n, nil
+}
+
+// halfUsage is a block's [lower, upper] lease count, or nil if it has no halves.
+func halfUsage(cidr string, halfUsed map[string]int) []int {
+	lo, hi, err := buddy.Halves(cidr)
+	if err != nil {
+		return nil
+	}
+	return []int{halfUsed[lo], halfUsed[hi]}
+}
+
+// setHalfStatus records the per-half usage and release readiness, and reports
+// whether it changed anything. The block may have been split since it was
+// read: the numbers only apply to the CIDR and release they were computed for.
+func setHalfStatus(cur *remediationv1alpha1.NodeBlock, readCIDR, readRelease string, halfUsage []int, ready string) bool {
+	if cur.Spec.CIDR != readCIDR {
+		return false
+	}
+	changed := false
+	if !slices.Equal(cur.Status.HalfUsage, halfUsage) {
+		cur.Status.HalfUsage = halfUsage
+		changed = true
+	}
+	if cur.Spec.Release != readRelease {
+		ready = ""
+	}
+	if cur.Status.ReleaseReady != ready {
+		cur.Status.ReleaseReady = ready
+		changed = true
+	}
+	return changed
+}
+
+// releaseReady reports, per block name, the half that can be given back: the
+// CNI config has left it out for at least DrainSettle and it holds no lease.
+// The settle time covers a pod sandbox that read the old config.
+func (a *Agent) releaseReady(own []*remediationv1alpha1.NodeBlock, halfUsed map[string]int, configOK bool) map[string]string {
+	if a.releasing == nil {
+		a.releasing = map[string]releaseMark{}
+	}
+	out := map[string]string{}
+	seen := map[string]bool{}
+	for _, b := range own {
+		half := b.Spec.Release
+		if half == "" || b.Spec.Drain || phaseOf(b) != remediationv1alpha1.NodeBlockActive || ServedCIDR(b) == b.Spec.CIDR {
+			continue
+		}
+		seen[b.Name] = true
+		m, ok := a.releasing[b.Name]
+		if !ok || m.half != half {
+			if !configOK {
+				continue // the config on disk may still hand out the half
+			}
+			m = releaseMark{half: half, since: a.now()}
+			a.releasing[b.Name] = m
+		}
+		if halfUsed[half] == 0 && a.now().Sub(m.since) >= a.DrainSettle {
+			out[b.Name] = half
+		}
+	}
+	for name := range a.releasing {
+		if !seen[name] {
+			delete(a.releasing, name)
+		}
+	}
+	return out
 }
 
 func transitionTime(b *remediationv1alpha1.NodeBlock) time.Time {
@@ -380,6 +486,11 @@ func (a *Agent) nextPhase(cur *remediationv1alpha1.NodeBlock, promoting bool, us
 		return remediationv1alpha1.NodeBlockDraining
 	case phase == remediationv1alpha1.NodeBlockDraining && !cur.Spec.Drain:
 		return remediationv1alpha1.NodeBlockActive
+	case phase == remediationv1alpha1.NodeBlockPending && cur.Spec.Drain && used == 0 &&
+		a.now().Sub(transitionTime(cur)) >= a.DrainSettle:
+		// Created to be given back (the released half of a split, when the
+		// controller did not get to quarantine it itself): never in the config.
+		return remediationv1alpha1.NodeBlockQuarantined
 	case phase == remediationv1alpha1.NodeBlockDraining && used == 0 && configOK &&
 		a.now().Sub(transitionTime(cur)) >= a.DrainSettle:
 		// Empty and out of the config: routes can be withdrawn and the block held

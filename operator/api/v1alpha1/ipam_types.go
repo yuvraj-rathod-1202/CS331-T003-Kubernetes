@@ -73,9 +73,10 @@ type IPPoolSpec struct {
 	// +kubebuilder:validation:Minimum=0
 	TriggerFloor int `json:"triggerFloor,omitempty"`
 
-	// GrowthPercent is how much a node grows by, as a percentage of its current
-	// capacity, rounded up to a power of two (at least one minimum block).
-	// Default: 50.
+	// GrowthPercent is deprecated and ignored. A node used to grow by this
+	// percentage of its current capacity, whatever it needed. It now grows by
+	// what its pods are short of (see ExpandThresholdPercent and
+	// TriggerFloor), rounded up to a whole minimum block.
 	// +kubebuilder:default=50
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=100
@@ -179,6 +180,13 @@ type NodeAllocationSummary struct {
 
 	// UtilizationPercent is (AllocatedIPs / TotalCapacity) * 100.
 	UtilizationPercent int `json:"utilizationPercent"`
+
+	// LastBlockChange is when the controller last changed this node's blocks:
+	// added, drained, restored, split or released one. A "no IP addresses"
+	// failure older than this has already been answered. A released block
+	// leaves no NodeBlock behind, so this is where that change is remembered.
+	// +optional
+	LastBlockChange *metav1.Time `json:"lastBlockChange,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -322,6 +330,24 @@ type NodeBlockSpec struct {
 	// the space back before the drain finishes.
 	// +optional
 	Drain bool `json:"drain,omitempty"`
+
+	// Initial marks the node's starting block. The controller never drains or
+	// splits it: the node always keeps its starting capacity. Only blocks the
+	// node got later are given back. On blocks created before this field
+	// existed, the node's oldest block counts as its starting block.
+	// +optional
+	Initial bool `json:"initial,omitempty"`
+
+	// Release is one half of CIDR that the controller is giving back to the
+	// pool while the node keeps the other half (a split). The owner stops
+	// handing out addresses from it; once the agent reports it empty
+	// (status.releaseReady), the controller shrinks CIDR to the kept half and
+	// quarantines the released half as its own block. The controller clears it
+	// again if the node needs the space before the split happens.
+	// A split block keeps its original name, so its name can show a larger
+	// prefix than its CIDR.
+	// +optional
+	Release string `json:"release,omitempty"`
 }
 
 // NodeBlockStatus is written only by the node agent (and, for lifecycle phases
@@ -333,6 +359,17 @@ type NodeBlockStatus struct {
 	// UsedAddresses is how many addresses in the block hold a lease, counted
 	// from the node's host-local lease files.
 	UsedAddresses int `json:"usedAddresses,omitempty"`
+
+	// HalfUsage is UsedAddresses split by half of the block: [lower, upper].
+	// The controller uses it to find a block with an empty half to give back.
+	// +optional
+	HalfUsage []int `json:"halfUsage,omitempty"`
+
+	// ReleaseReady is set by the owner's agent to spec.release once that half
+	// has been out of the CNI config for the drain settle time and holds no
+	// lease. The controller then completes the split.
+	// +optional
+	ReleaseReady string `json:"releaseReady,omitempty"`
 
 	// ReclaimedLeases counts leaked host-local leases the agent removed from
 	// this block: leases with no pod behind them.

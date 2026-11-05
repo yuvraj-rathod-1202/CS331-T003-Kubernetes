@@ -65,6 +65,20 @@ func routable(phase string) bool {
 	return false
 }
 
+// ServedCIDR is the part of a block its owner hands out: the whole block, or
+// only the kept half while the controller is giving the other half back.
+// An invalid release is ignored.
+func ServedCIDR(b *remediationv1alpha1.NodeBlock) string {
+	if b.Spec.Release == "" {
+		return b.Spec.CIDR
+	}
+	keep, err := buddy.OtherHalf(b.Spec.CIDR, b.Spec.Release)
+	if err != nil {
+		return b.Spec.CIDR
+	}
+	return keep
+}
+
 func phaseOf(b *remediationv1alpha1.NodeBlock) string {
 	if b.Status.Phase == "" {
 		return remediationv1alpha1.NodeBlockPending

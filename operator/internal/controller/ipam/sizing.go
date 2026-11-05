@@ -68,7 +68,7 @@ func capacityOf(cidrs []string) int {
 func blocksCapacity(blocks []*remediationv1alpha1.NodeBlock) int {
 	cidrs := make([]string, len(blocks))
 	for i, b := range blocks {
-		cidrs[i] = b.Spec.CIDR
+		cidrs[i] = servedCIDR(b)
 	}
 	return capacityOf(cidrs)
 }
@@ -100,18 +100,31 @@ func needsGrowth(spec *remediationv1alpha1.IPPoolSpec, capacity, used int) bool 
 	return capacity-used < threshold
 }
 
-// growthTarget is the address count to add: GrowthPercent% of the current
-// capacity, rounded up to a power of two, and at least one minimum block. It is
-// then halved until its usable size fits in the headroom left under the node's
-// capacity cap. It returns 0 when not even a minimum block fits.
-func growthTarget(spec *remediationv1alpha1.IPPoolSpec, capacity, headroom, minBlock int) int {
-	want := max((capacity*spec.GrowthPercent+99)/100, minBlock)
-	target := nextPow2(want)
-	for target > minBlock && usableAddresses(target) > headroom {
-		target >>= 1
+// requiredCapacity is the smallest capacity that does not trigger a grow for
+// the given demand: the first capacity at which needsGrowth is false. It is
+// searched, not computed, so it agrees with needsGrowth to the last address
+// (whose threshold rounds down).
+func requiredCapacity(spec *remediationv1alpha1.IPPoolSpec, demand int) int {
+	c := demand + spec.TriggerFloor
+	for limit := 2*demand + spec.TriggerFloor + 8; c < limit && needsGrowth(spec, c, demand); c++ {
 	}
-	if usableAddresses(target) > headroom {
+	return c
+}
+
+// growthNeed is the address count to add to a node: what its demand is short of
+// (see requiredCapacity), plus the 3 addresses a new range loses, rounded up to
+// a whole minimum block. Nothing more: a node is given what it needs, not a
+// percentage of what it already has. It is then cut back until its usable
+// size fits in the headroom left under the node's capacity cap, and is 0 when
+// not even a minimum block fits.
+func growthNeed(spec *remediationv1alpha1.IPPoolSpec, capacity, demand, headroom, minBlock int) int {
+	short := max(requiredCapacity(spec, demand)-capacity, 1)
+	need := (short + blockOverhead + minBlock - 1) / minBlock * minBlock
+	for need >= minBlock && usableAddresses(need) > headroom {
+		need -= minBlock
+	}
+	if need < minBlock {
 		return 0
 	}
-	return target
+	return need
 }

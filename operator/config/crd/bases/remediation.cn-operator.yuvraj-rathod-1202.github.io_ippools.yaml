@@ -84,9 +84,10 @@ spec:
               growthPercent:
                 default: 50
                 description: |-
-                  GrowthPercent is how much a node grows by, as a percentage of its current
-                  capacity, rounded up to a power of two (at least one minimum block).
-                  Default: 50.
+                  GrowthPercent is deprecated and ignored. A node used to grow by this
+                  percentage of its current capacity, whatever it needed. It now grows by
+                  what its pods are short of (see ExpandThresholdPercent and
+                  TriggerFloor), rounded up to a whole minimum block.
                 maximum: 100
                 minimum: 1
                 type: integer
@@ -228,6 +229,14 @@ spec:
                       items:
                         type: string
                       type: array
+                    lastBlockChange:
+                      description: |-
+                        LastBlockChange is when the controller last changed this node's blocks:
+                        added, drained, restored, split or released one. A "no IP addresses"
+                        failure older than this has already been answered. A released block
+                        leaves no NodeBlock behind, so this is where that change is remembered.
+                      format: date-time
+                      type: string
                     nodeName:
                       description: NodeName is the name of the Kubernetes node.
                       type: string

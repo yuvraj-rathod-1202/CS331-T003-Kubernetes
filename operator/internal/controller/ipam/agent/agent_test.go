@@ -46,6 +46,8 @@ const (
 	block0       = "10.244.0.0/27"
 	block1       = "10.244.0.32/27"
 	block2       = "10.244.0.64/27"
+	mergedCIDR   = "10.244.0.0/26" // block0 and block1 together
+	ipN2         = "192.168.0.2"
 )
 
 func mkNode(name, ip string, ready bool) corev1.Node {
@@ -85,6 +87,8 @@ type fakeRoutes struct {
 	mu      sync.Mutex
 	table   map[Route]bool
 	failFor string
+	// onChange, if set, sees every Replace and Delete in order.
+	onChange func(op string, r Route)
 }
 
 func (f *fakeRoutes) Managed() ([]Route, error) {
@@ -104,6 +108,9 @@ func (f *fakeRoutes) Replace(r Route) error {
 		return errors.New("netlink: operation not permitted")
 	}
 	f.table[r] = true
+	if f.onChange != nil {
+		f.onChange("replace", r)
+	}
 	return nil
 }
 
@@ -111,6 +118,9 @@ func (f *fakeRoutes) Delete(r Route) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.table, r)
+	if f.onChange != nil {
+		f.onChange("delete", r)
+	}
 	return nil
 }
 
@@ -126,7 +136,7 @@ func (f *fakeRoutes) dsts() []string {
 }
 
 func TestDesiredRoutesAggregatesAndSkipsOwn(t *testing.T) {
-	nodes := []corev1.Node{mkNode("n1", "192.168.0.1", true), mkNode("n2", "192.168.0.2", true), mkNode("n3", "192.168.0.3", true)}
+	nodes := []corev1.Node{mkNode("n1", "192.168.0.1", true), mkNode("n2", ipN2, true), mkNode("n3", "192.168.0.3", true)}
 	blocks := []remediationv1alpha1.NodeBlock{
 		mkBlock("n1", block0, phaseActive),
 		mkBlock("n2", block1, phaseActive),
@@ -136,7 +146,7 @@ func TestDesiredRoutesAggregatesAndSkipsOwn(t *testing.T) {
 		mkBlock("n3", "10.244.2.0/24", "Released"),
 	}
 	got, problems := DesiredRoutes("n1", nodes, blocks)
-	want := []Route{{Dst: "10.244.0.32/27", Gateway: "192.168.0.2"}, {Dst: "10.244.0.64/26", Gateway: "192.168.0.2"}}
+	want := []Route{{Dst: "10.244.0.32/27", Gateway: ipN2}, {Dst: "10.244.0.64/26", Gateway: ipN2}}
 	if !reflect.DeepEqual(got, want) || len(problems) != 0 {
 		t.Fatalf("routes = %v problems = %v", got, problems)
 	}
@@ -299,7 +309,7 @@ func nobj(n corev1.Node) *corev1.Node                                    { retur
 func TestSyncPromotesOnlyAfterRoutesAreAcked(t *testing.T) {
 	// n1 owns a Pending block. n2 is Ready and has not acked yet.
 	e := newEnv(t,
-		nobj(mkNode("n1", "192.168.0.1", true)), nobj(mkNode("n2", "192.168.0.2", true)),
+		nobj(mkNode("n1", "192.168.0.1", true)), nobj(mkNode("n2", ipN2, true)),
 		obj(mkBlock("n1", block0, phasePending)))
 
 	if err := e.agent("n1").Sync(context.Background()); err != nil {
@@ -333,7 +343,7 @@ func TestSyncPromotesOnlyAfterRoutesAreAcked(t *testing.T) {
 
 func TestSyncPromotesAfterTimeoutWhenNodeIsSilent(t *testing.T) {
 	e := newEnv(t,
-		nobj(mkNode("n1", "192.168.0.1", true)), nobj(mkNode("n2", "192.168.0.2", true)),
+		nobj(mkNode("n1", "192.168.0.1", true)), nobj(mkNode("n2", ipN2, true)),
 		obj(mkBlock("n1", block0, phasePending)))
 	a := e.agent("n1")
 	_ = a.Sync(context.Background())
@@ -351,7 +361,7 @@ func TestSyncPromotesAfterTimeoutWhenNodeIsSilent(t *testing.T) {
 
 func TestRouteFailureBlocksPromotion(t *testing.T) {
 	e := newEnv(t,
-		nobj(mkNode("n1", "192.168.0.1", true)), nobj(mkNode("n2", "192.168.0.2", true)),
+		nobj(mkNode("n1", "192.168.0.1", true)), nobj(mkNode("n2", ipN2, true)),
 		obj(mkBlock("n1", block0, phasePending)), obj(mkBlock("n2", block1, phaseActive)))
 	e.routes.failFor = block1
 	err := e.agent("n1").Sync(context.Background())
@@ -368,7 +378,7 @@ func TestRouteFailureBlocksPromotion(t *testing.T) {
 
 func TestSyncRemovesStaleRoutesAndRestoresAfterReboot(t *testing.T) {
 	e := newEnv(t,
-		nobj(mkNode("n1", "192.168.0.1", true)), nobj(mkNode("n2", "192.168.0.2", true)),
+		nobj(mkNode("n1", "192.168.0.1", true)), nobj(mkNode("n2", ipN2, true)),
 		obj(mkBlock("n2", block1, phaseActive)))
 	a := e.agent("n1")
 	// A leftover route from a block that no longer exists.
@@ -448,7 +458,7 @@ func confRanges(t *testing.T, path string) []string {
 }
 
 func TestSyncKeepsDrainingAndPendingOutOfConfig(t *testing.T) {
-	e := newEnv(t, nobj(mkNode("n1", "192.168.0.1", true)), nobj(mkNode("n2", "192.168.0.2", true)),
+	e := newEnv(t, nobj(mkNode("n1", "192.168.0.1", true)), nobj(mkNode("n2", ipN2, true)),
 		obj(mkBlock("n1", block0, phaseActive)),
 		drainBlock(block1, "Draining"),
 		obj(mkBlock("n1", block2, phasePending)))
@@ -508,7 +518,7 @@ func TestDrainIsUndoneWhenControllerWithdrawsIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	// block0 and block1 are buddies, so the restored block merges into one range.
-	if r := confRanges(t, e.conf); !reflect.DeepEqual(r, []string{"10.244.0.0/26"}) {
+	if r := confRanges(t, e.conf); !reflect.DeepEqual(r, []string{mergedCIDR}) {
 		t.Fatalf("config: %v", r)
 	}
 	if got := e.block(block1).Status.Phase; got != phaseActive {
@@ -588,7 +598,7 @@ func TestSyncReclaimsLeakedLeaseAndCountsIt(t *testing.T) {
 }
 
 func TestRunSyncsOnTriggerWithoutWaitingForTheInterval(t *testing.T) {
-	e := newEnv(t, nobj(mkNode("n1", "192.168.0.1", true)), nobj(mkNode("n2", "192.168.0.2", true)),
+	e := newEnv(t, nobj(mkNode("n1", "192.168.0.1", true)), nobj(mkNode("n2", ipN2, true)),
 		obj(mkBlock("n2", block1, "Active")))
 	a := e.agent("n1")
 	ctx := t.Context()
@@ -638,7 +648,86 @@ func TestRenderMergesBuddiesIntoOneRange(t *testing.T) {
 		got = append(got, r.Subnet)
 	}
 	// block0 + block1 are buddies; block2 stands alone.
-	if want := []string{"10.244.0.0/26", block2}; !reflect.DeepEqual(got, want) {
+	if want := []string{mergedCIDR, block2}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("ranges = %v, want %v", got, want)
+	}
+}
+
+func TestHalfReleaseLifecycle(t *testing.T) {
+	// block0 (/27) gives back its upper half 10.244.0.16/28.
+	b := mkBlock("n1", block0, phaseActive)
+	b.Spec.Release = "10.244.0.16/28"
+	e := newEnv(t, nobj(mkNode("n1", "192.168.0.1", true)), obj(b))
+	if err := os.MkdirAll(e.leases, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(e.leases, "10.244.0.5"), []byte("x"), 0o600)
+	_ = os.WriteFile(filepath.Join(e.leases, "10.244.0.20"), []byte("x"), 0o600) // a pod still in the half
+	a := e.agent("n1")
+	a.DrainSettle = 5 * time.Second
+
+	if err := a.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if r := confRanges(t, e.conf); !reflect.DeepEqual(r, []string{"10.244.0.0/28"}) {
+		t.Fatalf("only the kept half belongs in the config, got %v", r)
+	}
+	got := e.block(block0)
+	if !reflect.DeepEqual(got.Status.HalfUsage, []int{1, 1}) || got.Status.ReleaseReady != "" || got.Status.Phase != phaseActive {
+		t.Fatalf("status %+v", got.Status)
+	}
+
+	// The pod leaves, but the settle time has not passed.
+	_ = os.Remove(filepath.Join(e.leases, "10.244.0.20"))
+	e.now = e.now.Add(time.Second)
+	if err := a.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.block(block0).Status.ReleaseReady; got != "" {
+		t.Fatalf("ready before the settle time: %s", got)
+	}
+
+	e.now = e.now.Add(10 * time.Second)
+	if err := a.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.block(block0).Status; got.ReleaseReady != "10.244.0.16/28" || !reflect.DeepEqual(got.HalfUsage, []int{1, 0}) {
+		t.Fatalf("status %+v", got)
+	}
+}
+
+func TestReleasedHalfCreatedPendingIsQuarantinedNotServed(t *testing.T) {
+	// The controller created the released half but crashed before marking it
+	// Quarantined: the agent never serves it and quarantines it itself.
+	half := mkBlock("n1", "10.244.0.48/28", "")
+	half.Spec.Drain = true
+	e := newEnv(t, nobj(mkNode("n1", "192.168.0.1", true)), obj(mkBlock("n1", block0, phaseActive)), obj(half))
+	a := e.agent("n1")
+	a.DrainSettle = 5 * time.Second
+	e.now = e.now.Add(time.Minute)
+	if err := a.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if r := confRanges(t, e.conf); !reflect.DeepEqual(r, []string{block0}) {
+		t.Fatalf("config: %v", r)
+	}
+	if got := e.block("10.244.0.48/28").Status.Phase; got != "Quarantined" {
+		t.Fatalf("phase %s, want Quarantined", got)
+	}
+}
+
+func TestRoutesAreInstalledBeforeStaleOnesAreRemoved(t *testing.T) {
+	// n2's block shrank from /26 to /27: the /27 route must exist before the
+	// /26 one goes, so the kept half is never unreachable.
+	e := newEnv(t, nobj(mkNode("n1", "192.168.0.1", true)), nobj(mkNode("n2", ipN2, true)),
+		obj(mkBlock("n2", block0, phaseActive)))
+	e.routes.table[Route{Dst: mergedCIDR, Gateway: ipN2}] = true
+	var order []string
+	e.routes.onChange = func(op string, r Route) { order = append(order, op+" "+r.Dst) }
+	if err := e.agent("n1").Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(order, []string{"replace " + block0, "delete 10.244.0.0/26"}) {
+		t.Fatalf("route order: %v", order)
 	}
 }
