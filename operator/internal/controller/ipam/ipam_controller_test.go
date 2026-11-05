@@ -71,7 +71,10 @@ func node(name string, pods int64, ip string) *corev1.Node {
 func pool(name string, cidrs ...string) *remediationv1alpha1.IPPool {
 	return &remediationv1alpha1.IPPool{
 		ObjectMeta: metav1.ObjectMeta{Name: name, CreationTimestamp: metav1.Now()},
-		Spec:       remediationv1alpha1.IPPoolSpec{CIDRs: cidrs},
+		// The fake client applies no CRD defaults; set the ones the API server
+		// would fill for omitted fields, as a real cluster does.
+		Spec: remediationv1alpha1.IPPoolSpec{CIDRs: cidrs, TriggerFloor: 8, ShrinkCooldownSeconds: 300,
+			QuarantineSeconds: 60, LowWaterPercent: 10},
 	}
 }
 

@@ -172,15 +172,10 @@ type BuddyAllocator struct {
 //   - minPrefixLen: smallest allocatable block prefix (e.g. 28 for /28)
 //   - maxPrefixLen: largest allocatable block prefix (e.g. 22 for /22)
 func NewBuddyAllocator(cidr string, minPrefixLen, maxPrefixLen int) (*BuddyAllocator, error) {
-	_, network, err := net.ParseCIDR(cidr)
+	network, rootPrefix, err := ParseIPv4CIDR(cidr)
 	if err != nil {
-		return nil, fmt.Errorf("invalid CIDR %q: %w", cidr, err)
+		return nil, err
 	}
-	if network.IP.To4() == nil {
-		return nil, fmt.Errorf("CIDR %q is not IPv4", cidr)
-	}
-
-	rootPrefix, _ := network.Mask.Size()
 
 	if maxPrefixLen < rootPrefix {
 		return nil, fmt.Errorf("maxPrefixLen /%d is larger than the pool /%d", maxPrefixLen, rootPrefix)
@@ -222,11 +217,10 @@ func (a *BuddyAllocator) SetClock(now func() time.Time) {
 
 // Contains reports whether the allocator's root CIDR contains the block.
 func (a *BuddyAllocator) Contains(cidr string) bool {
-	_, n, err := net.ParseCIDR(cidr)
+	n, p, err := ParseIPv4CIDR(cidr)
 	if err != nil {
 		return false
 	}
-	p, _ := n.Mask.Size()
 	return p >= a.root.PrefixLen && a.root.Network.Contains(n.IP)
 }
 
@@ -435,11 +429,10 @@ func (a *BuddyAllocator) Reserve(cidr, nodeName string) (*Block, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	_, n, err := net.ParseCIDR(cidr)
+	n, prefix, err := ParseIPv4CIDR(cidr)
 	if err != nil {
-		return nil, fmt.Errorf("invalid CIDR %q: %w", cidr, err)
+		return nil, err
 	}
-	prefix, _ := n.Mask.Size()
 	base := ipToUint32(n.IP)
 	if !a.Contains(cidr) {
 		return nil, fmt.Errorf("%s is outside %s", cidr, a.root.CIDR)
@@ -481,11 +474,10 @@ func (a *BuddyAllocator) childFor(b *Block, base uint32) *Block {
 func (a *BuddyAllocator) Find(cidr string) *Block {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	_, n, err := net.ParseCIDR(cidr)
+	n, prefix, err := ParseIPv4CIDR(cidr)
 	if err != nil || !a.Contains(cidr) {
 		return nil
 	}
-	prefix, _ := n.Mask.Size()
 	base := ipToUint32(n.IP)
 	cur := a.root
 	for cur.State == BlockSplit && cur.PrefixLen < prefix {
@@ -710,8 +702,28 @@ func (a *BuddyAllocator) GetBlocksForNode(nodeName string) []*Block {
 	return out
 }
 
+// ParseIPv4CIDR parses an IPv4 CIDR and returns its network and prefix length.
+// It rejects IPv6 and IPv4-mapped IPv6 forms such as ::ffff:10.0.0.0/120, whose
+// 128-bit mask would give prefix lengths above 32 and break the block math.
+func ParseIPv4CIDR(cidr string) (*net.IPNet, int, error) {
+	_, n, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return nil, 0, fmt.Errorf("invalid CIDR %q: %w", cidr, err)
+	}
+	ones, bits := n.Mask.Size()
+	if bits != 32 || n.IP.To4() == nil {
+		return nil, 0, fmt.Errorf("CIDR %q is not IPv4", cidr)
+	}
+	return n, ones, nil
+}
+
+// ipToUint32 expects an IPv4 address; callers validate with ParseIPv4CIDR.
+// A non-IPv4 address yields 0 instead of a panic.
 func ipToUint32(ip net.IP) uint32 {
 	v := ip.To4()
+	if v == nil {
+		return 0
+	}
 	return uint32(v[0])<<24 | uint32(v[1])<<16 | uint32(v[2])<<8 | uint32(v[3])
 }
 

@@ -100,6 +100,18 @@ func withDefaults(in remediationv1alpha1.IPPoolSpec) remediationv1alpha1.IPPoolS
 	return s
 }
 
+// withAPIDefaults is withDefaults for a spec read from the API server. The
+// fields below allow 0 and carry a CRD default, so the API server already fills
+// them when omitted: a 0 here was set on purpose (e.g. no quarantine) and is kept.
+func withAPIDefaults(in remediationv1alpha1.IPPoolSpec) remediationv1alpha1.IPPoolSpec {
+	s := withDefaults(in)
+	s.TriggerFloor = in.TriggerFloor
+	s.ShrinkCooldownSeconds = in.ShrinkCooldownSeconds
+	s.QuarantineSeconds = in.QuarantineSeconds
+	s.LowWaterPercent = in.LowWaterPercent
+	return s
+}
+
 func allocatablePods(n *corev1.Node) int {
 	if q, ok := n.Status.Allocatable[corev1.ResourcePods]; ok && q.Value() > 0 {
 		return int(q.Value())
@@ -131,12 +143,16 @@ func blockAddresses(cidr string) int {
 func validCIDRs(spec *remediationv1alpha1.IPPoolSpec, nodes []corev1.Node) (ok, problems []string) {
 	var reserved []*net.IPNet
 	for _, r := range spec.ReservedCIDRs {
-		if _, n, err := net.ParseCIDR(r); err == nil {
-			reserved = append(reserved, n)
+		_, n, err := net.ParseCIDR(r)
+		if err != nil {
+			// Reported, so a typo does not silently turn the overlap guard off.
+			problems = append(problems, fmt.Sprintf("reserved CIDR %q is invalid and is not enforced: %v", r, err))
+			continue
 		}
+		reserved = append(reserved, n)
 	}
 	for _, c := range spec.CIDRs {
-		_, n, err := net.ParseCIDR(c)
+		n, _, err := buddy.ParseIPv4CIDR(c)
 		if err != nil {
 			problems = append(problems, fmt.Sprintf("CIDR %q is invalid: %v", c, err))
 			continue
@@ -171,12 +187,32 @@ func validCIDRs(spec *remediationv1alpha1.IPPoolSpec, nodes []corev1.Node) (ok, 
 
 // buildPool rebuilds the buddy forest from scratch: the pool CIDRs, minus every
 // block that a NodeBlock says is taken. The controller keeps no other state.
-func buildPool(spec *remediationv1alpha1.IPPoolSpec, nodes []corev1.Node, blocks []remediationv1alpha1.NodeBlock) (*buddy.Pool, []string) {
+//
+// foreign are NodeBlocks that belong to another pool (or name a pool that no
+// longer exists). This pool does not manage them, but their addresses may still
+// be in use, so any that fall inside this pool's CIDRs are reserved too.
+// Otherwise renaming or replacing a pool would hand live blocks out twice.
+func buildPool(spec *remediationv1alpha1.IPPoolSpec, nodes []corev1.Node, blocks, foreign []remediationv1alpha1.NodeBlock) (*buddy.Pool, []string) {
 	p := buddy.NewPool()
 	cidrs, problems := validCIDRs(spec, nodes)
 	for _, c := range cidrs {
+		if f := coveringBlock(c, foreign); f != nil {
+			problems = append(problems, fmt.Sprintf("CIDR %s lies inside block %s of pool %q (node %s); not used",
+				c, f.Spec.CIDR, f.Spec.PoolRef, f.Spec.NodeName))
+			continue
+		}
 		if err := p.AddCIDR(c, spec.MinBlockSize, spec.MaxBlockSize); err != nil {
 			problems = append(problems, err.Error())
+		}
+	}
+	for i := range foreign {
+		f := &foreign[i]
+		if blockPhase(f) == remediationv1alpha1.NodeBlockReleased || !overlapsAny(f.Spec.CIDR, cidrs) {
+			continue
+		}
+		if _, err := p.Reserve(f.Spec.CIDR, f.Spec.NodeName); err == nil {
+			problems = append(problems, fmt.Sprintf("NodeBlock %s (%s) of pool %q is inside this pool; its addresses are held back",
+				f.Name, f.Spec.CIDR, f.Spec.PoolRef))
 		}
 	}
 	sorted := append([]remediationv1alpha1.NodeBlock(nil), blocks...)
@@ -208,6 +244,41 @@ type planInput struct {
 	// and Pods to how many pods on it hold or need one. They size a grow to the
 	// demand actually there, and cover usage numbers that lag. Both may be nil.
 	Waiting, Pods map[string]int
+	// Foreign are NodeBlocks of other pools; see buildPool. May be nil.
+	Foreign []remediationv1alpha1.NodeBlock
+}
+
+// coveringBlock returns the foreign block that contains all of cidr, if any.
+func coveringBlock(cidr string, foreign []remediationv1alpha1.NodeBlock) *remediationv1alpha1.NodeBlock {
+	n, ones, err := buddy.ParseIPv4CIDR(cidr)
+	if err != nil {
+		return nil
+	}
+	for i := range foreign {
+		f := &foreign[i]
+		if blockPhase(f) == remediationv1alpha1.NodeBlockReleased {
+			continue
+		}
+		fn, fones, err := buddy.ParseIPv4CIDR(f.Spec.CIDR)
+		if err == nil && fones <= ones && fn.Contains(n.IP) {
+			return f
+		}
+	}
+	return nil
+}
+
+// overlapsAny reports whether cidr shares any address with one of cidrs.
+func overlapsAny(cidr string, cidrs []string) bool {
+	n, _, err := buddy.ParseIPv4CIDR(cidr)
+	if err != nil {
+		return false
+	}
+	for _, c := range cidrs {
+		if m, _, err := buddy.ParseIPv4CIDR(c); err == nil && (m.Contains(n.IP) || n.Contains(m.IP)) {
+			return true
+		}
+	}
+	return false
 }
 
 // planPool decides which blocks to create, drain or delete. It never changes the
@@ -215,7 +286,7 @@ type planInput struct {
 // undoing a drain, otherwise by a new block); or shrink by draining one block.
 // Quarantined blocks are deleted once their quarantine has passed.
 func planPool(spec *remediationv1alpha1.IPPoolSpec, nodes []corev1.Node, blocks []remediationv1alpha1.NodeBlock, in planInput) *poolPlan {
-	p, problems := buildPool(spec, nodes, blocks)
+	p, problems := buildPool(spec, nodes, blocks, in.Foreign)
 	plan := &poolPlan{Pool: p, Problems: problems}
 
 	exists := map[string]bool{}

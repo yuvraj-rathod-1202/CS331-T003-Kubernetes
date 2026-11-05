@@ -43,6 +43,7 @@ type IPPoolSpec struct {
 	// CIDRs is the list of CIDR blocks available for allocation.
 	// Supports discontiguous ranges (e.g. ["10.244.0.0/16", "172.20.0.0/18"]).
 	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:items:Pattern=`^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2])$`
 	CIDRs []string `json:"cidrs"`
 
 	// MinBlockSize is the smallest block the buddy allocator will hand out,
@@ -323,6 +324,8 @@ type NodeBlockSpec struct {
 	PoolRef string `json:"poolRef"`
 
 	// CIDR is the block, aligned to its own size (e.g. "10.244.0.64/27").
+	// Only IPv4 is supported.
+	// +kubebuilder:validation:Pattern=`^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2])$`
 	CIDR string `json:"cidr"`
 
 	// Drain asks the owner to stop handing out addresses from the block. The

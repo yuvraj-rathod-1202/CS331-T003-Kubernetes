@@ -78,7 +78,9 @@ export function aggregate(blocks: { base: number; size: number }[]): { base: num
   for (let changed = true; changed;) {
     changed = false;
     for (const b of set.values()) {
-      const sib = { base: b.base ^ b.size, size: b.size };
+      // `>>> 0` keeps the XOR unsigned: addresses at or above 128.0.0.0 would
+      // otherwise give a negative sibling base that never matches.
+      const sib = { base: (b.base ^ b.size) >>> 0, size: b.size };
       if (set.has(key(sib))) {
         set.delete(key(b));
         set.delete(key(sib));

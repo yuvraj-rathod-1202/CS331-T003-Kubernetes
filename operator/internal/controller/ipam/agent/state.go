@@ -137,15 +137,38 @@ func DesiredRoutes(self string, nodes []corev1.Node, blocks []remediationv1alpha
 
 // AckableBlocks are the blocks owned by other nodes whose routes this node
 // installs, so it can acknowledge them once DesiredRoutes has been applied.
-func AckableBlocks(self string, blocks []remediationv1alpha1.NodeBlock) []string {
+//
+// Blocks whose owner has no InternalIP are left out (their route could not be
+// installed), and so are blocks the cached copy already shows as acknowledged
+// by this node, which saves a GET per block on every pass.
+func AckableBlocks(self string, nodes []corev1.Node, blocks []remediationv1alpha1.NodeBlock) []string {
+	skipped := UnroutableOwners(self, nodes, blocks)
 	var out []string
 	for i := range blocks {
 		b := &blocks[i]
-		if b.Spec.NodeName != self && routable(b.Status.Phase) {
+		if b.Spec.NodeName != self && routable(b.Status.Phase) && !skipped[b.Spec.NodeName] &&
+			!slices.Contains(b.Status.RoutesAckedBy, self) {
 			out = append(out, b.Name)
 		}
 	}
 	slices.Sort(out)
+	return out
+}
+
+// UnroutableOwners returns the other nodes that own routable blocks but have no
+// InternalIP, so no route to their blocks can be installed yet.
+func UnroutableOwners(self string, nodes []corev1.Node, blocks []remediationv1alpha1.NodeBlock) map[string]bool {
+	ips := map[string]string{}
+	for i := range nodes {
+		ips[nodes[i].Name] = internalIP(&nodes[i])
+	}
+	out := map[string]bool{}
+	for i := range blocks {
+		b := &blocks[i]
+		if b.Spec.NodeName != self && routable(b.Status.Phase) && ips[b.Spec.NodeName] == "" {
+			out[b.Spec.NodeName] = true
+		}
+	}
 	return out
 }
 

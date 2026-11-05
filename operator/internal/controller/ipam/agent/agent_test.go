@@ -151,7 +151,7 @@ func TestDesiredRoutesAggregatesAndSkipsOwn(t *testing.T) {
 		t.Fatalf("routes = %v problems = %v", got, problems)
 	}
 	// n3's blocks are Quarantined or Released: no route. n1's own: none.
-	ack := AckableBlocks("n1", blocks)
+	ack := AckableBlocks("n1", nodes, blocks)
 	if len(ack) != 3 {
 		t.Fatalf("ackable = %v", ack)
 	}
@@ -162,6 +162,36 @@ func TestDesiredRoutesNeedsOwnerIP(t *testing.T) {
 	got, problems := DesiredRoutes("n1", nil, blocks)
 	if len(got) != 0 || len(problems) != 1 {
 		t.Fatalf("routes = %v problems = %v", got, problems)
+	}
+}
+
+// An owner with no InternalIP keeps only its own blocks unacknowledged; the
+// other owners' blocks are still acked. Already-acked blocks are skipped.
+func TestAckableBlocksSkipsUnroutableOwnerOnly(t *testing.T) {
+	nodes := []corev1.Node{mkNode("n1", "192.168.0.1", true), mkNode("n2", ipN2, true), mkNode("noip", "", true)}
+	blocks := []remediationv1alpha1.NodeBlock{
+		mkBlock("n2", block1, phaseActive),
+		mkBlock("n2", block2, phaseActive, "n1"),
+		mkBlock("noip", "10.244.1.0/24", phaseActive),
+	}
+	if got := AckableBlocks("n1", nodes, blocks); !reflect.DeepEqual(got, []string{blockNameOf(block1)}) {
+		t.Fatalf("ackable = %v", got)
+	}
+	if got := UnroutableOwners("n1", nodes, blocks); !reflect.DeepEqual(got, map[string]bool{"noip": true}) {
+		t.Fatalf("unroutable = %v", got)
+	}
+}
+
+// A NodeBlock with a non-IPv4 CIDR must be reported, not crash the agent.
+func TestDesiredRoutesRejectsIPv6Block(t *testing.T) {
+	nodes := []corev1.Node{mkNode("n2", ipN2, true)}
+	blocks := []remediationv1alpha1.NodeBlock{mkBlock("n2", "fd00::/64", phaseActive)}
+	got, problems := DesiredRoutes("n1", nodes, blocks)
+	if len(got) != 0 || len(problems) != 1 {
+		t.Fatalf("routes = %v problems = %v", got, problems)
+	}
+	if _, err := RenderCNIConfig("net", "/tmp", []string{"fd00::/64"}); err == nil {
+		t.Fatal("expected an error for an IPv6 block")
 	}
 }
 

@@ -134,7 +134,7 @@ func (r *IPAMController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			fmt.Sprintf("IPPool %s is serving the cluster's nodes", primary))
 	}
 
-	spec := withDefaults(ippool.Spec)
+	spec := withAPIDefaults(ippool.Spec)
 
 	if r.ConfigureKubeProxy && r.APIReader != nil && !r.kubeProxyDone.Load() {
 		if changed, err := EnsureKubeProxyLocalMode(ctx, r.APIReader, r.Client); err != nil {
@@ -153,7 +153,7 @@ func (r *IPAMController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	if err := r.List(ctx, &nodes); err != nil {
 		return ctrl.Result{}, err
 	}
-	blocks, err := r.blocksFor(ctx, ippool.Name)
+	blocks, foreign, err := r.blocksFor(ctx, ippool.Name)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -172,7 +172,7 @@ func (r *IPAMController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			lastChange[na.NodeName] = na.LastBlockChange.Time
 		}
 	}
-	plan := planPool(&spec, nodes.Items, blocks, planInput{Now: time.Now(), Starved: starved, LastChange: lastChange, Waiting: waiting, Pods: pods})
+	plan := planPool(&spec, nodes.Items, blocks, planInput{Now: time.Now(), Starved: starved, LastChange: lastChange, Waiting: waiting, Pods: pods, Foreign: foreign})
 	touched := plan.changedNodes(blocks)
 
 	collided := false
@@ -204,7 +204,7 @@ func (r *IPAMController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 
 	// Re-list so the status reflects what was just created.
 	if len(plan.New) > 0 || changed {
-		if blocks, err = r.blocksFor(ctx, ippool.Name); err != nil {
+		if blocks, _, err = r.blocksFor(ctx, ippool.Name); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
@@ -449,18 +449,22 @@ func (r *IPAMController) primaryPool(ctx context.Context) (string, error) {
 	return items[0].Name, nil
 }
 
-func (r *IPAMController) blocksFor(ctx context.Context, pool string) ([]remediationv1alpha1.NodeBlock, error) {
+// blocksFor splits all NodeBlocks into the ones this pool manages and the
+// foreign ones (another pool's, or a pool's that no longer exists).
+func (r *IPAMController) blocksFor(ctx context.Context, pool string) (mine, foreign []remediationv1alpha1.NodeBlock, err error) {
 	var list remediationv1alpha1.NodeBlockList
 	if err := r.List(ctx, &list); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	out := make([]remediationv1alpha1.NodeBlock, 0, len(list.Items))
+	mine = make([]remediationv1alpha1.NodeBlock, 0, len(list.Items))
 	for _, b := range list.Items {
 		if b.Spec.PoolRef == pool {
-			out = append(out, b)
+			mine = append(mine, b)
+		} else {
+			foreign = append(foreign, b)
 		}
 	}
-	return out, nil
+	return mine, foreign, nil
 }
 
 // splitBlock completes a release: the block shrinks to the half it keeps, and

@@ -34,6 +34,11 @@ const (
 	kubeProxyConfigKey = "config.conf"
 	// restartAnnotation is the one `kubectl rollout restart` uses.
 	restartAnnotation = "kubectl.kubernetes.io/restartedAt"
+	// restartPendingAnnotation marks the ConfigMap between writing the new
+	// config and restarting kube-proxy. If the restart fails, the next pass sees
+	// the mark and restarts it, instead of finding the config already correct
+	// and never restarting.
+	restartPendingAnnotation = "ipam.cn-operator/kube-proxy-restart-pending"
 )
 
 // kubeProxyLocalMode is what kube-proxy needs for pods in discontiguous pools
@@ -82,20 +87,34 @@ func EnsureKubeProxyLocalMode(ctx context.Context, reader client.Reader, c clien
 		return false, fmt.Errorf("parse kube-proxy config: %w", err)
 	}
 	if !kubeProxyLocalMode(conf) {
-		return false, nil
+		if cm.Annotations[restartPendingAnnotation] == "" {
+			return false, nil
+		}
+		// The config was written earlier but the restart did not happen.
+		return true, restartKubeProxy(ctx, reader, c, &cm)
 	}
 	out, err := yaml.Marshal(conf)
 	if err != nil {
 		return false, err
 	}
 	cm.Data[kubeProxyConfigKey] = string(out)
+	if cm.Annotations == nil {
+		cm.Annotations = map[string]string{}
+	}
+	cm.Annotations[restartPendingAnnotation] = "true"
 	if err := c.Update(ctx, &cm); err != nil {
 		return false, fmt.Errorf("update kube-proxy ConfigMap: %w", err)
 	}
+	return true, restartKubeProxy(ctx, reader, c, &cm)
+}
 
+// restartKubeProxy rolls the kube-proxy DaemonSet and then clears the pending
+// mark on its ConfigMap. The mark stays if either step fails, so it is retried.
+func restartKubeProxy(ctx context.Context, reader client.Reader, c client.Client, cm *corev1.ConfigMap) error {
+	key := types.NamespacedName{Namespace: kubeProxyNamespace, Name: kubeProxyName}
 	var ds appsv1.DaemonSet
 	if err := reader.Get(ctx, key, &ds); err != nil {
-		return true, fmt.Errorf("get kube-proxy DaemonSet: %w", err)
+		return fmt.Errorf("get kube-proxy DaemonSet: %w", err)
 	}
 	patch := client.MergeFrom(ds.DeepCopy())
 	if ds.Spec.Template.Annotations == nil {
@@ -103,7 +122,12 @@ func EnsureKubeProxyLocalMode(ctx context.Context, reader client.Reader, c clien
 	}
 	ds.Spec.Template.Annotations[restartAnnotation] = time.Now().Format(time.RFC3339)
 	if err := c.Patch(ctx, &ds, patch); err != nil {
-		return true, fmt.Errorf("restart kube-proxy: %w", err)
+		return fmt.Errorf("restart kube-proxy: %w", err)
 	}
-	return true, nil
+	cmPatch := client.MergeFrom(cm.DeepCopy())
+	delete(cm.Annotations, restartPendingAnnotation)
+	if err := c.Patch(ctx, cm, cmPatch); err != nil {
+		return fmt.Errorf("clear kube-proxy restart mark: %w", err)
+	}
+	return nil
 }

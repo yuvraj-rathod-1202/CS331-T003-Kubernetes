@@ -341,6 +341,36 @@ func TestEnsureKubeProxyLocalMode(t *testing.T) {
 	}
 }
 
+// A restart that fails after the ConfigMap was written must be retried on the
+// next pass, even though the config itself is already correct by then.
+func TestEnsureKubeProxyRetriesFailedRestart(t *testing.T) {
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: kubeProxyNamespace, Name: kubeProxyName},
+		Data:       map[string]string{"config.conf": "kind: KubeProxyConfiguration\nclusterCIDR: 10.244.0.0/16\n"},
+	}
+	r, c := fakeReconciler(t, cm) // no DaemonSet yet: the restart fails
+	ctx := context.Background()
+	if _, err := EnsureKubeProxyLocalMode(ctx, c, r.Client); err == nil {
+		t.Fatal("expected the restart to fail without a DaemonSet")
+	}
+	ds := appsv1.DaemonSet{ObjectMeta: metav1.ObjectMeta{Namespace: kubeProxyNamespace, Name: kubeProxyName}}
+	if err := c.Create(ctx, &ds); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := EnsureKubeProxyLocalMode(ctx, c, r.Client)
+	if err != nil || !changed {
+		t.Fatalf("retry: changed=%v err=%v", changed, err)
+	}
+	var got appsv1.DaemonSet
+	_ = c.Get(ctx, types.NamespacedName{Namespace: kubeProxyNamespace, Name: kubeProxyName}, &got)
+	if got.Spec.Template.Annotations[restartAnnotation] == "" {
+		t.Fatal("kube-proxy was not restarted on retry")
+	}
+	if changed, err := EnsureKubeProxyLocalMode(ctx, c, r.Client); err != nil || changed {
+		t.Fatalf("third run: changed=%v err=%v", changed, err)
+	}
+}
+
 var appsDS = appsv1.DaemonSet{ObjectMeta: metav1.ObjectMeta{Namespace: kubeProxyNamespace, Name: kubeProxyName}}
 
 func TestShrinkDrainsSeveralBlocksButKeepsTheFloor(t *testing.T) {

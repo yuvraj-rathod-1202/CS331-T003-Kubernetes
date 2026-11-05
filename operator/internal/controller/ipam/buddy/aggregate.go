@@ -18,7 +18,6 @@ package buddy
 
 import (
 	"cmp"
-	"fmt"
 	"net"
 	"slices"
 )
@@ -33,11 +32,10 @@ func Aggregate(cidrs []string) ([]string, error) {
 	}
 	set := make(map[pfx]struct{}, len(cidrs))
 	for _, c := range cidrs {
-		_, n, err := net.ParseCIDR(c)
+		n, l, err := ParseIPv4CIDR(c)
 		if err != nil {
-			return nil, fmt.Errorf("invalid CIDR %q: %w", c, err)
+			return nil, err
 		}
-		l, _ := n.Mask.Size()
 		set[pfx{ipToUint32(n.IP), l}] = struct{}{}
 	}
 	for changed := true; changed; {

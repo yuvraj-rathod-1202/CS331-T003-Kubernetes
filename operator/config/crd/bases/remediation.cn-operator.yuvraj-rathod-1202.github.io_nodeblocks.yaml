@@ -57,7 +57,10 @@ spec:
             description: NodeBlockSpec is written only by the controller.
             properties:
               cidr:
-                description: CIDR is the block, aligned to its own size (e.g. "10.244.0.64/27").
+                description: |-
+                  CIDR is the block, aligned to its own size (e.g. "10.244.0.64/27").
+                  Only IPv4 is supported.
+                pattern: ^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2])$
                 type: string
               drain:
                 description: |-

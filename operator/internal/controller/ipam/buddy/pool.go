@@ -213,7 +213,15 @@ func (p *Pool) allocatePrefixOrSplit(prefix, minP int, nodeName string) ([]*Bloc
 		return nil, err
 	}
 	second, err := p.allocatePrefixOrSplit(prefix+1, minP, nodeName)
-	return append(first, second...), err
+	if err != nil {
+		// Give back the half already taken, so a failed request leaves the
+		// tree as it was instead of leaking that half.
+		for _, b := range first {
+			_ = p.freeNowLocked(b)
+		}
+		return nil, err
+	}
+	return append(first, second...), nil
 }
 
 // SplitDemand returns the prefix lengths, largest block first, that cover

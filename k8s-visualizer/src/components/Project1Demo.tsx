@@ -163,10 +163,14 @@ export function Project1Demo() {
     setLog(l => [...l, ...items].sort((a, b) => a.t - b.t).slice(-MAX_LOG));
   }, []);
 
+  // Polls and the refreshes after button presses can overlap. Only the newest
+  // request may update the page, so a slow older answer never overwrites newer state.
+  const requestSeq = useRef(0);
   const refresh = useCallback(async () => {
+    const mine = ++requestSeq.current;
     try {
       const st = await getJson('/api/fault/ipam/status');
-      if (!alive.current) return;
+      if (!alive.current || mine !== requestSeq.current) return;
       if (!st.success) throw new Error(st.error ?? 'status failed');
       const t = Date.now();
 
@@ -384,22 +388,25 @@ export function Project1Demo() {
       setConn('ok');
       setNow(t);
     } catch (e: any) {
-      if (!alive.current) return;
+      if (!alive.current || mine !== requestSeq.current) return;
       setConn('error');
       setErr(e.message);
     }
   }, [addLog]);
 
   // A new poll starts only after the last one ended, so a button press never waits behind slow polls.
+  // Each run of this effect has its own `stopped` flag: under StrictMode the effect
+  // mounts twice, and a shared ref would let the first loop keep running.
   useEffect(() => {
     alive.current = true;
+    let stopped = false;
     let timer: ReturnType<typeof setTimeout>;
     const loop = async () => {
       await refresh();
-      if (alive.current) timer = setTimeout(loop, POLL_MS);
+      if (!stopped) timer = setTimeout(loop, POLL_MS);
     };
     loop();
-    return () => { alive.current = false; clearTimeout(timer); };
+    return () => { stopped = true; alive.current = false; clearTimeout(timer); };
   }, [refresh]);
 
   // ---- actions --------------------------------------------------------------------------------

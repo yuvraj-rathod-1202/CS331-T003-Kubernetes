@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"time"
 
@@ -148,16 +149,21 @@ func (a *Agent) Sync(ctx context.Context) error {
 
 	var errs []error
 
-	// 1. Routes to every other node's blocks.
+	// 1. Routes to every other node's blocks. An owner with no InternalIP yet
+	// is skipped and reported, but it does not hold up the other owners: its
+	// blocks are simply not acknowledged until its route can be installed.
 	routesOK := true
 	if err := a.syncRoutes(nodes, blocks, logger); err != nil {
 		routesOK = false
 		errs = append(errs, err)
 	}
+	if skipped := UnroutableOwners(a.NodeName, nodes, blocks); len(skipped) > 0 {
+		errs = append(errs, fmt.Errorf("incomplete routes: no InternalIP for %v", slices.Sorted(maps.Keys(skipped))))
+	}
 
 	// 2. Acknowledge them, only once they are really installed.
 	if routesOK {
-		for _, name := range AckableBlocks(a.NodeName, blocks) {
+		for _, name := range AckableBlocks(a.NodeName, nodes, blocks) {
 			if err := a.ack(ctx, name); err != nil {
 				errs = append(errs, err)
 			}
@@ -216,10 +222,8 @@ func (a *Agent) syncRoutes(nodes []corev1.Node, blocks []remediationv1alpha1.Nod
 			logger.Info("route removed", "dst", r.Dst, "via", r.Gateway)
 		}
 	}
-	// A skipped owner (no InternalIP) means the routes are incomplete.
-	if len(problems) > 0 {
-		errs = append(errs, fmt.Errorf("incomplete routes: %v", problems))
-	}
+	// Owners skipped for lack of an InternalIP are reported by Sync and only
+	// keep their own blocks unacknowledged; they are not an install failure.
 	return errors.Join(errs...)
 }
 

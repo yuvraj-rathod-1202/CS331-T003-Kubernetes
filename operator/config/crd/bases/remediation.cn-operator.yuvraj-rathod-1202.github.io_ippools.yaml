@@ -66,6 +66,7 @@ spec:
                   CIDRs is the list of CIDR blocks available for allocation.
                   Supports discontiguous ranges (e.g. ["10.244.0.0/16", "172.20.0.0/18"]).
                 items:
+                  pattern: ^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2])$
                   type: string
                 minItems: 1
                 type: array
