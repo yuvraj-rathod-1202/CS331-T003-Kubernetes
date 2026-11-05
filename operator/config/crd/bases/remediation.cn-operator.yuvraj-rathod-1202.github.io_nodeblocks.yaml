@@ -65,11 +65,29 @@ spec:
                   controller sets it to shrink a node; it clears it again if the node needs
                   the space back before the drain finishes.
                 type: boolean
+              initial:
+                description: |-
+                  Initial marks the node's starting block. The controller never drains or
+                  splits it: the node always keeps its starting capacity. Only blocks the
+                  node got later are given back. On blocks created before this field
+                  existed, the node's oldest block counts as its starting block.
+                type: boolean
               nodeName:
                 description: NodeName is the node that owns the block.
                 type: string
               poolRef:
                 description: PoolRef is the IPPool the block was carved from.
+                type: string
+              release:
+                description: |-
+                  Release is one half of CIDR that the controller is giving back to the
+                  pool while the node keeps the other half (a split). The owner stops
+                  handing out addresses from it; once the agent reports it empty
+                  (status.releaseReady), the controller shrinks CIDR to the kept half and
+                  quarantines the released half as its own block. The controller clears it
+                  again if the node needs the space before the split happens.
+                  A split block keeps its original name, so its name can show a larger
+                  prefix than its CIDR.
                 type: string
             required:
             - cidr
@@ -81,6 +99,13 @@ spec:
               NodeBlockStatus is written only by the node agent (and, for lifecycle phases
               the agent cannot observe, by the controller).
             properties:
+              halfUsage:
+                description: |-
+                  HalfUsage is UsedAddresses split by half of the block: [lower, upper].
+                  The controller uses it to find a block with an empty half to give back.
+                items:
+                  type: integer
+                type: array
               lastTransitionTime:
                 description: LastTransitionTime is when Phase last changed.
                 format: date-time
@@ -93,6 +118,12 @@ spec:
                   ReclaimedLeases counts leaked host-local leases the agent removed from
                   this block: leases with no pod behind them.
                 type: integer
+              releaseReady:
+                description: |-
+                  ReleaseReady is set by the owner's agent to spec.release once that half
+                  has been out of the CNI config for the drain settle time and holds no
+                  lease. The controller then completes the split.
+                type: string
               routesAckedBy:
                 description: RoutesAckedBy lists the nodes that have installed a route
                   for this block.

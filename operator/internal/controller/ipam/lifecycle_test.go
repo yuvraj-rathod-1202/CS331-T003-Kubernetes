@@ -34,6 +34,9 @@ import (
 
 var t0 = time.Unix(1_000_000, 0)
 
+// testPoolCIDR is the pool the planning tests carve blocks from.
+const testPoolCIDR = "10.244.0.0/22"
+
 // nblock builds a NodeBlock as the agent would leave it: in the given phase
 // since `since`, with `used` leases.
 func nblock(node, cidr, phase string, used int, since time.Time) remediationv1alpha1.NodeBlock {
@@ -46,7 +49,7 @@ func nblock(node, cidr, phase string, used int, since time.Time) remediationv1al
 }
 
 func plan(spec remediationv1alpha1.IPPoolSpec, nodes []corev1.Node, blocks []remediationv1alpha1.NodeBlock, now time.Time, starved ...string) *poolPlan {
-	spec.CIDRs = []string{"10.244.0.0/22"}
+	spec.CIDRs = []string{testPoolCIDR}
 	s := withDefaults(spec)
 	st := map[string]time.Time{}
 	for _, n := range starved {
@@ -207,7 +210,7 @@ func TestReconcileDrainsThenQuarantinesThenReleases(t *testing.T) {
 		b := nblock("n1", cidr, phase, used, old.Time)
 		return &b
 	}
-	p := pool(poolName, "10.244.0.0/22")
+	p := pool(poolName, testPoolCIDR)
 	r, c := fakeReconciler(t, p, node("n1", 110, "192.168.58.2"), mk(b0, "Active", 4), mk(b1, "Active", 0))
 	get := func(cidr string) remediationv1alpha1.NodeBlock {
 		var b remediationv1alpha1.NodeBlock
@@ -258,7 +261,20 @@ func TestStarvedNodeFromEventsGrowsOnReconcile(t *testing.T) {
 		Source:        corev1.EventSource{Component: "kubelet", Host: "n1"},
 		LastTimestamp: metav1.Now(),
 	}
-	r, c := fakeReconciler(t, pool(poolName, "10.244.0.0/22"), node("n1", 110, "192.168.58.2"), &b, ev)
+	// No pod is waiting for an address any more: the failure is history.
+	r, c := fakeReconciler(t, pool(poolName, testPoolCIDR), node("n1", 110, "192.168.58.2"), b.DeepCopy(), ev.DeepCopy())
+	runReconcile(t, r, poolName)
+	if got := blocksOf(listBlocks(t, c), "n1"); len(got) != 1 {
+		t.Fatalf("grew for a failure no pod is waiting on: %v", got)
+	}
+
+	// A pod on n1 still has no IP: grow.
+	waiting := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "w1", Namespace: testNS},
+		Spec:       corev1.PodSpec{NodeName: "n1"},
+		Status:     corev1.PodStatus{Phase: corev1.PodPending},
+	}
+	r, c = fakeReconciler(t, pool(poolName, testPoolCIDR), node("n1", 110, "192.168.58.2"), &b, ev, waiting)
 	runReconcile(t, r, poolName)
 	if got := blocksOf(listBlocks(t, c), "n1"); len(got) < 2 {
 		t.Fatalf("starved node did not grow: %v", got)
@@ -282,7 +298,7 @@ func TestOldNoIPEventsAreIgnored(t *testing.T) {
 		LastTimestamp: metav1.Now(),
 	}
 	r, _ := fakeReconciler(t, ev, other)
-	st, err := r.starvedNodes(context.Background(), time.Now())
+	st, err := r.starvedNodes(context.Background(), time.Now(), map[string]int{"n1": 1})
 	if err != nil || len(st) != 0 {
 		t.Fatalf("starved = %v, err = %v; want none", st, err)
 	}
@@ -343,5 +359,390 @@ func TestShrinkDrainsSeveralBlocksButKeepsTheFloor(t *testing.T) {
 	}
 	if slices.Contains(p.Drain, blockName("10.244.0.0/27")) {
 		t.Fatalf("the busiest block should be the one that stays: %v", p.Drain)
+	}
+}
+
+func TestStatusHeartbeat(t *testing.T) {
+	r, c := fakeReconciler(t, pool(poolName, testPoolCIDR), node("n1", 110, "192.168.58.2"))
+	runReconcile(t, r, poolName)
+	get := func() *metav1.Time {
+		var p remediationv1alpha1.IPPool
+		_ = c.Get(context.Background(), types.NamespacedName{Name: poolName}, &p)
+		return p.Status.LastReconcileTime
+	}
+	first := get()
+	if first == nil {
+		t.Fatal("status has no timestamp")
+	}
+	// Nothing changed and the timestamp is fresh: no write.
+	runReconcile(t, r, poolName)
+	if got := get(); !got.Equal(first) {
+		t.Fatalf("timestamp rewritten without need: %v -> %v", first, got)
+	}
+	if heartbeatDue(first, first.Add(10*time.Second)) || !heartbeatDue(first, first.Add(31*time.Second)) {
+		t.Fatal("heartbeat should be due after 30s and not before")
+	}
+	if !heartbeatDue(nil, time.Now()) {
+		t.Fatal("a missing timestamp is always due")
+	}
+}
+
+func TestNoShrinkRightAfterTheNodeGrew(t *testing.T) {
+	// A full old block and a new empty one: the node just grew, so nothing drains,
+	// even though the old block is past its own cooldown.
+	blocks := []remediationv1alpha1.NodeBlock{
+		nblock("n1", b0, "Active", 29, t0.Add(-time.Hour)),
+		nblock("n1", b1, "Active", 0, t0.Add(-30*time.Second)),
+		nblock("n1", "10.244.0.64/26", "Active", 0, t0.Add(-30*time.Second)),
+	}
+	if p := plan(remediationv1alpha1.IPPoolSpec{}, nodes1(), blocks, t0); len(p.Drain) != 0 {
+		t.Fatalf("drained %v right after the node grew", p.Drain)
+	}
+	// Once the node has been stable for the cooldown, the emptiest block goes.
+	if p := plan(remediationv1alpha1.IPPoolSpec{}, nodes1(), blocks, t0.Add(10*time.Minute)); len(p.Drain) == 0 {
+		t.Fatal("a stable node with spare blocks should shrink")
+	}
+}
+
+func TestControllerWakesWhenATimerRunsOut(t *testing.T) {
+	// No event marks the end of a quarantine or a cooldown, so the controller
+	// must requeue for it instead of waiting for its idle interval.
+	spec := withDefaults(remediationv1alpha1.IPPoolSpec{CIDRs: []string{testPoolCIDR}, QuarantineSeconds: 10, ShrinkCooldownSeconds: 20})
+	A := remediationv1alpha1.NodeBlockActive
+	Q := remediationv1alpha1.NodeBlockQuarantined
+
+	cases := []struct {
+		name   string
+		blocks []remediationv1alpha1.NodeBlock
+		want   time.Duration
+	}{
+		{"one block per node: nothing to wait for",
+			[]remediationv1alpha1.NodeBlock{nblock("n1", "10.244.0.0/26", A, 0, t0.Add(-time.Hour))}, 0},
+		{"quarantine ends in 4s",
+			[]remediationv1alpha1.NodeBlock{nblock("n1", "10.244.0.0/26", A, 0, t0.Add(-time.Hour)), nblock("n1", "10.244.0.64/26", Q, 0, t0.Add(-6*time.Second))}, 4 * time.Second},
+		{"cooldown of a two-block node ends in 15s",
+			[]remediationv1alpha1.NodeBlock{nblock("n1", "10.244.0.0/26", A, 0, t0.Add(-time.Hour)), nblock("n1", "10.244.0.64/26", A, 0, t0.Add(-5*time.Second))}, 15 * time.Second},
+		{"expired timers are not waited for",
+			[]remediationv1alpha1.NodeBlock{nblock("n1", "10.244.0.0/26", A, 0, t0.Add(-time.Hour)), nblock("n1", "10.244.0.64/26", A, 0, t0.Add(-time.Minute))}, 0},
+	}
+	for _, c := range cases {
+		if got := nextTimer(&spec, c.blocks, t0); got != c.want {
+			t.Errorf("%s: nextTimer = %v, want %v", c.name, got, c.want)
+		}
+	}
+
+	if got := requeueAfter(4 * time.Second); got != 4*time.Second+timerSlack {
+		t.Errorf("requeueAfter(4s) = %v", got)
+	}
+	if got := requeueAfter(0); got != requeueInterval {
+		t.Errorf("requeueAfter(0) = %v, want the idle interval", got)
+	}
+	if got := requeueAfter(10 * time.Minute); got != requeueInterval {
+		t.Errorf("requeueAfter(10m) = %v, want the idle interval", got)
+	}
+}
+
+// A grown /26 of node n1 and its two halves.
+const (
+	grownCIDR  = "10.244.0.64/26"
+	grownLower = "10.244.0.64/27"
+	grownUpper = "10.244.0.96/27"
+)
+
+// grown builds an Active block node n1 got after its starting block, with
+// per-half usage as the agent reports it.
+func grown(cidr string, lower, upper int, since time.Time) remediationv1alpha1.NodeBlock {
+	b := nblock("n1", cidr, remediationv1alpha1.NodeBlockActive, lower+upper, since)
+	b.Status.HalfUsage = []int{lower, upper}
+	return b
+}
+
+// starting builds node n1's marked starting block.
+func starting(cidr string, used int, since time.Time) remediationv1alpha1.NodeBlock {
+	b := nblock("n1", cidr, remediationv1alpha1.NodeBlockActive, used, since)
+	b.Spec.Initial = true
+	return b
+}
+
+func TestShrinkNeverDrainsTheStartingBlock(t *testing.T) {
+	// The starting block is the emptiest, but it is never given back; the
+	// grown /26 is.
+	old := t0.Add(-time.Hour)
+	p := plan(remediationv1alpha1.IPPoolSpec{}, nodes1(), []remediationv1alpha1.NodeBlock{
+		starting("10.244.0.0/27", 0, old),
+		grown(grownCIDR, 10, 0, old),
+	}, t0)
+	if !reflect.DeepEqual(p.Drain, []string{blockName(grownCIDR)}) {
+		t.Fatalf("Drain = %v, want only the grown block", p.Drain)
+	}
+}
+
+func TestSplitGivesBackTheEmptyHalfOfAGrownBlock(t *testing.T) {
+	// 25 pods. The grown /26 cannot go whole (29 left for 25 pods), but its
+	// upper half is empty: giving it back leaves 58 for 25.
+	old := t0.Add(-time.Hour)
+	blocks := []remediationv1alpha1.NodeBlock{
+		starting("10.244.0.0/27", 15, old),
+		grown(grownCIDR, 10, 0, old),
+	}
+	p := plan(remediationv1alpha1.IPPoolSpec{}, nodes1(), blocks, t0)
+	want := []halfRelease{{Name: blockName(grownCIDR), Half: grownUpper}}
+	if len(p.Drain) != 0 || !reflect.DeepEqual(p.Release, want) {
+		t.Fatalf("Drain = %v, Release = %v, want %v", p.Drain, p.Release, want)
+	}
+
+	// Both halves in use: nothing to give back.
+	blocks[1] = grown(grownCIDR, 5, 5, old)
+	if p := plan(remediationv1alpha1.IPPoolSpec{}, nodes1(), blocks, t0); len(p.Release) != 0 {
+		t.Fatalf("Release = %v with both halves in use", p.Release)
+	}
+
+	// Too young: the cooldown applies as to a drain.
+	blocks[1] = grown(grownCIDR, 10, 0, t0.Add(-time.Second))
+	if p := plan(remediationv1alpha1.IPPoolSpec{}, nodes1(), blocks, t0); len(p.Release) != 0 {
+		t.Fatalf("Release = %v inside the cooldown", p.Release)
+	}
+}
+
+func TestSplitNeverTouchesTheStartingBlock(t *testing.T) {
+	// The starting /25 has an empty upper half and giving it back would fit,
+	// but it is the starting block. The grown /24 is busy in both halves.
+	old := t0.Add(-time.Hour)
+	first := starting("10.244.0.0/25", 5, old)
+	first.Status.HalfUsage = []int{5, 0}
+	p := plan(remediationv1alpha1.IPPoolSpec{}, nodes1(), []remediationv1alpha1.NodeBlock{
+		first,
+		grown("10.244.1.0/24", 60, 40, old),
+	}, t0)
+	if len(p.Release) != 0 || len(p.Drain) != 0 {
+		t.Fatalf("Release = %v, Drain = %v: the starting block must stay whole", p.Release, p.Drain)
+	}
+}
+
+func TestStartingBlockWithoutTheMarkIsTheOldest(t *testing.T) {
+	// Blocks from before spec.initial existed: the oldest one is the start.
+	blocks := []remediationv1alpha1.NodeBlock{
+		nblock("n1", grownCIDR, remediationv1alpha1.NodeBlockActive, 0, t0.Add(-time.Minute)),
+		nblock("n1", "10.244.0.0/27", remediationv1alpha1.NodeBlockActive, 0, t0.Add(-time.Hour)),
+	}
+	if got := startingBlock(blocks); got != blockName("10.244.0.0/27") {
+		t.Fatalf("startingBlock = %s", got)
+	}
+	blocks[0].Spec.Initial = true
+	if got := startingBlock(blocks); got != blockName(grownCIDR) {
+		t.Fatalf("the marked block wins, got %s", got)
+	}
+}
+
+func TestReleaseIsCompletedOrWithdrawn(t *testing.T) {
+	old := t0.Add(-time.Hour)
+	rel := grown(grownCIDR, 10, 0, old)
+	rel.Spec.Release = grownUpper
+	blocks := []remediationv1alpha1.NodeBlock{starting("10.244.0.0/27", 15, old), rel}
+
+	// Not yet reported empty: wait, and plan nothing else for the node.
+	p := plan(remediationv1alpha1.IPPoolSpec{}, nodes1(), blocks, t0)
+	if len(p.Split)+len(p.Release)+len(p.Drain)+len(p.Unrelease) != 0 {
+		t.Fatalf("waiting for the agent, got %+v", p)
+	}
+
+	// The agent reports the half empty: complete the split.
+	blocks[1].Status.ReleaseReady = grownUpper
+	if p := plan(remediationv1alpha1.IPPoolSpec{}, nodes1(), blocks, t0); !reflect.DeepEqual(p.Split, []string{rel.Name}) {
+		t.Fatalf("Split = %v", p.Split)
+	}
+
+	// The node fills up before that: keep the half instead of growing.
+	blocks[1].Status.ReleaseReady = ""
+	blocks[0].Status.UsedAddresses = 29
+	blocks[1].Status.UsedAddresses = 29
+	p = plan(remediationv1alpha1.IPPoolSpec{}, nodes1(), blocks, t0)
+	if !reflect.DeepEqual(p.Unrelease, []string{rel.Name}) || len(p.New) != 0 {
+		t.Fatalf("Unrelease = %v, New = %v", p.Unrelease, p.New)
+	}
+}
+
+func TestReconcileSplitsABlock(t *testing.T) {
+	old := metav1.NewTime(t0.Add(-time.Hour))
+	first := starting("10.244.0.0/27", 15, old.Time)
+	rel := grown(grownCIDR, 10, 0, old.Time)
+	rel.Spec.Release = grownUpper
+	rel.Status.ReleaseReady = grownUpper
+	for _, b := range []*remediationv1alpha1.NodeBlock{&first, &rel} {
+		b.Spec.PoolRef = poolName
+	}
+	r, c := fakeReconciler(t, pool(poolName, testPoolCIDR), node("n1", 110, "192.168.58.2"), &first, &rel)
+	runReconcile(t, r, poolName)
+
+	var kept remediationv1alpha1.NodeBlock
+	if err := c.Get(context.Background(), types.NamespacedName{Name: rel.Name}, &kept); err != nil {
+		t.Fatal(err)
+	}
+	if kept.Spec.CIDR != grownLower || kept.Spec.Release != "" || kept.Status.ReleaseReady != "" {
+		t.Fatalf("kept block: %+v %+v", kept.Spec, kept.Status)
+	}
+	var half remediationv1alpha1.NodeBlock
+	if err := c.Get(context.Background(), types.NamespacedName{Name: blockName(grownUpper)}, &half); err != nil {
+		t.Fatalf("released half: %v", err)
+	}
+	if half.Spec.NodeName != "n1" || !half.Spec.Drain || half.Status.Phase != remediationv1alpha1.NodeBlockQuarantined {
+		t.Fatalf("released half: %+v %+v", half.Spec, half.Status)
+	}
+	// The pool sees both, without overlap.
+	if got := blocksOf(listBlocks(t, c), "n1"); !reflect.DeepEqual(got, []string{"10.244.0.0/27", grownLower, grownUpper}) {
+		t.Fatalf("blocks: %v", got)
+	}
+	var p remediationv1alpha1.IPPool
+	_ = c.Get(context.Background(), types.NamespacedName{Name: poolName}, &p)
+	if strings.Contains(p.Status.Message, "cannot be placed") {
+		t.Fatalf("pool status: %s", p.Status.Message)
+	}
+}
+
+func TestNewStartingBlocksAreMarked(t *testing.T) {
+	r, c := fakeReconciler(t, pool(poolName, testPoolCIDR), node("n1", 110, "192.168.58.2"))
+	runReconcile(t, r, poolName)
+	for _, b := range listBlocks(t, c) {
+		if !b.Spec.Initial {
+			t.Fatalf("starting block %s not marked", b.Spec.CIDR)
+		}
+	}
+}
+
+func TestFailuresRightAfterAGrowDoNotGrowAgain(t *testing.T) {
+	// A block went Active at t0. Pods that read the old config fail one second
+	// later; that is not a new shortage. A failure after the grace period is.
+	blocks := []remediationv1alpha1.NodeBlock{
+		nblock("n1", b0, "Active", 3, t0.Add(-time.Hour)),
+		nblock("n1", b1, "Active", 0, t0),
+	}
+	spec := withDefaults(remediationv1alpha1.IPPoolSpec{CIDRs: []string{testPoolCIDR}})
+	late := map[string]time.Time{"n1": t0.Add(time.Second)}
+	if p := planPool(&spec, nodes1(), blocks, planInput{Now: t0.Add(2 * time.Second), Starved: late}); len(p.New) != 0 {
+		t.Fatalf("grew for failures from before the new block: %v", p.New)
+	}
+	later := map[string]time.Time{"n1": t0.Add(starveGrace + time.Second)}
+	if p := planPool(&spec, nodes1(), blocks, planInput{Now: t0.Add(10 * time.Second), Starved: later}); len(p.New) == 0 {
+		t.Fatal("a failure after the grace period must still grow the node")
+	}
+}
+
+func TestReleasedBlockDoesNotMakeOldFailuresCountAgain(t *testing.T) {
+	// Seen live: a node with no pods grew, drained and released the same block
+	// eight times. The "no IP" failures from an earlier burst were newer than its
+	// one remaining block, so after every release they looked new again.
+	old := metav1.NewTime(time.Now().Add(-time.Hour))
+	first := starting(b0, 0, old.Time)
+	first.Spec.PoolRef = poolName
+	rest := nblock("n1", b1, remediationv1alpha1.NodeBlockQuarantined, 0, time.Now().Add(-time.Minute))
+	rest.Spec.PoolRef = poolName
+	rest.Spec.Drain = true
+	ev := &corev1.Event{
+		ObjectMeta:    metav1.ObjectMeta{Name: "e1", Namespace: testNS},
+		Reason:        sandboxFailedReason,
+		Message:       `failed to set up sandbox: plugin type="ptp" failed (add): failed to allocate for range 0: no IP addresses available in range set: 10.244.0.0-10.244.0.30`,
+		Source:        corev1.EventSource{Component: "kubelet", Host: "n1"},
+		LastTimestamp: metav1.NewTime(time.Now().Add(-2 * time.Minute)),
+	}
+	p := pool(poolName, testPoolCIDR)
+	p.Spec.QuarantineSeconds = 10
+	r, c := fakeReconciler(t, p, node("n1", 110, "192.168.58.2"), &first, &rest, ev)
+
+	// Pass 1 releases the quarantined block and remembers the change.
+	runReconcile(t, r, poolName)
+	if got := blocksOf(listBlocks(t, c), "n1"); !reflect.DeepEqual(got, []string{b0}) {
+		t.Fatalf("after release: %v", got)
+	}
+	var st remediationv1alpha1.IPPool
+	_ = c.Get(context.Background(), types.NamespacedName{Name: poolName}, &st)
+	if len(st.Status.NodeAllocations) != 1 || st.Status.NodeAllocations[0].LastBlockChange == nil {
+		t.Fatalf("release not remembered: %+v", st.Status.NodeAllocations)
+	}
+
+	// Pass 2: the old failure is older than the release, so no grow.
+	runReconcile(t, r, poolName)
+	if got := blocksOf(listBlocks(t, c), "n1"); !reflect.DeepEqual(got, []string{b0}) {
+		t.Fatalf("grew again for a failure the release came after: %v", got)
+	}
+}
+
+func TestGrowthIsSizedToTheShortfall(t *testing.T) {
+	// 52 pods on 61 usable addresses (two buddy /27s): short by 4 for the spare
+	// room the pool asks for. One /28 is enough; a /27 would be over-allocation.
+	old := t0.Add(-time.Hour)
+	blocks := []remediationv1alpha1.NodeBlock{
+		starting(b0, 26, old),
+		nblock("n1", b1, remediationv1alpha1.NodeBlockActive, 26, old),
+	}
+	spec := withDefaults(remediationv1alpha1.IPPoolSpec{CIDRs: []string{testPoolCIDR}})
+	p := planPool(&spec, nodes1(), blocks, planInput{Now: t0})
+	if len(p.New) != 1 || blockAddresses(p.New[0].CIDR) != 16 {
+		t.Fatalf("New = %v, want a single /28", p.New)
+	}
+}
+
+func TestPodsWaitingForAnAddressSizeTheGrow(t *testing.T) {
+	// 10 leases but 40 more pods scheduled and waiting: demand 50 needs 63, so
+	// 34 more usable addresses: a whole /27 buddy plus a /28, in one step.
+	old := t0.Add(-time.Hour)
+	blocks := []remediationv1alpha1.NodeBlock{starting(b0, 10, old)}
+	spec := withDefaults(remediationv1alpha1.IPPoolSpec{CIDRs: []string{testPoolCIDR}})
+	p := planPool(&spec, nodes1(), blocks, planInput{Now: t0, Waiting: map[string]int{"n1": 40}})
+	total := 0
+	for _, nb := range p.New {
+		total += blockAddresses(nb.CIDR)
+	}
+	if total != 48 {
+		t.Fatalf("New = %v (%d addresses), want 48", p.New, total)
+	}
+
+	// The same node with no waiting pods and 10 in use does not grow at all.
+	if p := planPool(&spec, nodes1(), blocks, planInput{Now: t0}); len(p.New) != 0 {
+		t.Fatalf("grew without demand: %v", p.New)
+	}
+	// Pods that already hold an address but are not in the lease count yet
+	// (the agent reports with a delay) count as demand too.
+	if p := planPool(&spec, nodes1(), blocks, planInput{Now: t0, Pods: map[string]int{"n1": 28}}); len(p.New) == 0 {
+		t.Fatal("28 pods on 29 addresses must grow the node")
+	}
+}
+
+func TestAWholeBuddyIsEnoughWhenItMergesIntoTheNeededSize(t *testing.T) {
+	// Seen live: 49 pods on a /27 got the neighbouring /27 and then a /28 on top
+	// (74 addresses). The two /27s merge into one /26 with 61 usable, which
+	// already holds 49 pods with the spare room the pool asks for.
+	old := t0.Add(-time.Hour)
+	blocks := []remediationv1alpha1.NodeBlock{starting(b0, 0, old)}
+	spec := withDefaults(remediationv1alpha1.IPPoolSpec{CIDRs: []string{testPoolCIDR}})
+	p := planPool(&spec, nodes1(), blocks, planInput{Now: t0, Waiting: map[string]int{"n1": 49}})
+	if len(p.New) != 1 || p.New[0].CIDR != b1 {
+		t.Fatalf("New = %v, want only the buddy %s", p.New, b1)
+	}
+	if got := capacityOf([]string{b0, p.New[0].CIDR}); got != 61 {
+		t.Fatalf("capacity %d, want 61", got)
+	}
+
+	// A node with a /26 and 50 pods is one address short: one /28, nothing more.
+	blocks = []remediationv1alpha1.NodeBlock{starting("10.244.0.64/26", 0, old)}
+	p = planPool(&spec, nodes1(), blocks, planInput{Now: t0, Waiting: map[string]int{"n1": 50}})
+	if len(p.New) != 1 || blockAddresses(p.New[0].CIDR) != 16 {
+		t.Fatalf("New = %v, want a single /28", p.New)
+	}
+}
+
+func TestShrinkTrustsTheRealPodCountOverALaggingLeaseCount(t *testing.T) {
+	// The agent reports 10 leases, so the node looks like it could give back its
+	// second /27. But 40 pods really run there (the report lags): it must not.
+	old := t0.Add(-time.Hour)
+	blocks := []remediationv1alpha1.NodeBlock{
+		starting(b0, 5, old),
+		nblock("n1", b1, remediationv1alpha1.NodeBlockActive, 5, old),
+	}
+	spec := withDefaults(remediationv1alpha1.IPPoolSpec{CIDRs: []string{testPoolCIDR}})
+	if p := planPool(&spec, nodes1(), blocks, planInput{Now: t0}); len(p.Drain) != 1 {
+		t.Fatalf("with 10 pods the second block should be given back, Drain = %v", p.Drain)
+	}
+	if p := planPool(&spec, nodes1(), blocks, planInput{Now: t0, Pods: map[string]int{"n1": 40}}); len(p.Drain) != 0 || len(p.Release) != 0 {
+		t.Fatalf("40 pods are running: Drain = %v, Release = %v", p.Drain, p.Release)
 	}
 }

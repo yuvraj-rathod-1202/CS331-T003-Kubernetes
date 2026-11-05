@@ -41,8 +41,9 @@ type Policy interface {
 	// Churn stops each pod on every node independently with probability p.
 	Churn(p float64)
 	// Starved tells the policy that node n just failed to start pods for lack
-	// of addresses (the kubelet's "no IP addresses available" event).
-	Starved(n int)
+	// of addresses (the kubelet's "no IP addresses available" event), and how
+	// many pods are waiting for one.
+	Starved(n, waiting int)
 	// Tick runs the policy's control loop at simulated time t (seconds).
 	Tick(t float64)
 	Pods(n int) int

@@ -32,8 +32,8 @@ type Plan = poolPlan
 // clock and the starved nodes supplied by the caller. The simulator uses it so
 // that it exercises the same code the controller runs, not a copy.
 func PlanPool(spec *remediationv1alpha1.IPPoolSpec, nodes []corev1.Node, blocks []remediationv1alpha1.NodeBlock,
-	now time.Time, starved map[string]time.Time) *Plan {
-	return planPool(spec, nodes, blocks, planInput{Now: now, Starved: starved})
+	now time.Time, starved map[string]time.Time, waiting map[string]int) *Plan {
+	return planPool(spec, nodes, blocks, planInput{Now: now, Starved: starved, Waiting: waiting})
 }
 
 // WithDefaults fills unset IPPool spec fields with their defaults.

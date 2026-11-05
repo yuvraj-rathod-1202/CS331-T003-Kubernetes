@@ -140,7 +140,7 @@ func Run(s Scenario, name PolicyName, seed int64) Result {
 				got := pol.Place(n, d-have)
 				if got < d-have {
 					unmet += d - have - got
-					pol.Starved(n)
+					pol.Starved(n, d-have-got)
 				}
 			case d < have:
 				pol.Remove(n, have-d)

@@ -152,18 +152,37 @@ func TestSizing(t *testing.T) {
 	if needsGrowth(&spec, 1000, 800) || !needsGrowth(&spec, 1000, 801) {
 		t.Error("percentage threshold wrong")
 	}
-	if got := growthTarget(&spec, 29, 103, 16); got != 16 {
-		t.Errorf("growthTarget = %d, want 16", got)
+	// Growth is what the demand is short of, not a share of the current size.
+	// capacity, demand, headroom -> addresses to add (minimum block 16):
+	//   29 of 29 used: needs 37, short 8             -> one /28
+	//   61 with 52 pods: needs 65, short 4           -> one /28, not a /27
+	//   252 with 250: needs 313, short 61            -> 64
+	//   no pods at all (emergency): one minimum block
+	for _, c := range []struct{ capacity, demand, headroom, want int }{
+		{29, 29, 103, 16}, {61, 52, 71, 16}, {252, 250, 200, 64}, {29, 0, 100, 16},
+		{252, 250, 40, 32}, // cut back to fit under the node's capacity cap
+		{252, 250, 5, 0},   // no room at all
+	} {
+		if got := growthNeed(&spec, c.capacity, c.demand, c.headroom, 16); got != c.want {
+			t.Errorf("growthNeed(capacity %d, demand %d, headroom %d) = %d, want %d", c.capacity, c.demand, c.headroom, got, c.want)
+		}
 	}
-	if got := growthTarget(&spec, 252, 200, 16); got != 128 {
-		t.Errorf("growthTarget = %d, want 128", got)
+	// requiredCapacity is exactly the first capacity at which needsGrowth is quiet.
+	for demand := 1; demand < 3000; demand++ {
+		c := requiredCapacity(&spec, demand)
+		if needsGrowth(&spec, c, demand) {
+			t.Fatalf("demand %d: capacity %d still triggers a grow", demand, c)
+		}
+		if c > demand+spec.TriggerFloor && !needsGrowth(&spec, c-1, demand) {
+			t.Fatalf("demand %d: capacity %d would already do, asked for %d", demand, c-1, c)
+		}
 	}
-	// Capped by headroom: halve until it fits.
-	if got := growthTarget(&spec, 252, 40, 16); got != 32 {
-		t.Errorf("growthTarget under cap = %d, want 32", got)
-	}
-	if got := growthTarget(&spec, 252, 5, 16); got != 0 {
-		t.Errorf("growthTarget with no headroom = %d, want 0", got)
+	// The result never triggers a grow again for the same demand.
+	for demand := 1; demand < 400; demand += 7 {
+		need := growthNeed(&spec, 29, demand, 10_000, 16)
+		if needsGrowth(&spec, 29+usableAddresses(need)+blockOverhead, demand) && demand > 29 {
+			t.Errorf("demand %d: adding %d addresses still leaves the node short", demand, need)
+		}
 	}
 }
 
@@ -267,17 +286,26 @@ func TestGrowthNeedsActiveBlockAndWaitsForPending(t *testing.T) {
 	}
 }
 
-func TestGrowInPlaceTakesTheBuddy(t *testing.T) {
+func TestGrowthTakesWhatItNeedsFromTheBuddy(t *testing.T) {
 	r, c := fakeReconciler(t, pool(poolName, "10.244.0.0/24"), node("n1", 110, "192.168.58.2"))
 	runReconcile(t, r, poolName) // n1 gets 10.244.0.0/27, with its buddy left free
 	activate(t, c, map[string]int{"n1": 28})
 	runReconcile(t, r, poolName)
 
-	// Growth wants 16 addresses. The free buddy is a /27, at most twice that, so
-	// the node doubles in place: the halves merge into one /26 range.
+	// Growth wants 16 addresses. The free buddy is a /27, more than that, so the
+	// node gets only the /28 of it next to its block; the other /28 stays free.
 	got := blocksOf(listBlocks(t, c), "n1")
-	if !reflect.DeepEqual(got, []string{firstBlock, "10.244.0.32/27"}) {
+	if !reflect.DeepEqual(got, []string{firstBlock, "10.244.0.32/28"}) {
 		t.Fatalf("first growth: %v", got)
+	}
+
+	// The next grow takes the rest of the buddy, and it all merges back into
+	// one /26 range and one route.
+	activate(t, c, map[string]int{"n1": 20}) // 40 of 42 used
+	runReconcile(t, r, poolName)
+	got = blocksOf(listBlocks(t, c), "n1")
+	if !reflect.DeepEqual(got, []string{firstBlock, "10.244.0.32/28", "10.244.0.48/28"}) {
+		t.Fatalf("second growth: %v", got)
 	}
 	agg, _ := buddy.Aggregate(got)
 	if !reflect.DeepEqual(agg, []string{"10.244.0.0/26"}) {

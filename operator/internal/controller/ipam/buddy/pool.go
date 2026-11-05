@@ -239,6 +239,18 @@ func SplitDemand(requestedAddrs, minPrefixLen, maxPrefixLen int) []int {
 	return out
 }
 
+// AllocateFromBuddy takes requestedAddrs addresses out of the free buddy of
+// block (see BuddyAllocator.AllocateFromBuddy).
+func (p *Pool) AllocateFromBuddy(block *Block, requestedAddrs int, nodeName string) (*Block, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	a := p.ownerLocked(block.CIDR)
+	if a == nil {
+		return nil, fmt.Errorf("block %s is not in the pool", block.CIDR)
+	}
+	return a.AllocateFromBuddy(block, requestedAddrs, nodeName)
+}
+
 // AllocateBuddyOf gives nodeName the buddy of block if it is free, so the
 // node's two blocks aggregate into one route.
 func (p *Pool) AllocateBuddyOf(block *Block, nodeName string) (*Block, error) {

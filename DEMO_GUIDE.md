@@ -140,23 +140,63 @@ To make the demo clear, visual, and easy to follow during a presentation, the we
 
 ## Problem 1: Buddy-style dynamic IPAM demo (`/project1`)
 
-Run the dashboard (`cd k8s-visualizer && npm run dev`) and open `/project1`.
-The page is an in-browser simulation of the operator's IPAM planner (same rules
-and default parameters, time scaled up); it does not need a cluster.
+`/project1` shows the live cluster: every block, address count and log line comes from the cluster
+(read with kubectl by the dashboard's dev server). The demo uses a real workload: a Deployment of
+real pods, so each pod takes a real address from its node's block. `/project1/sim` is an offline
+simulation of the planner, for when no cluster is available.
 
-1. **Pool map**: each square is 16 addresses, coloured by the node that owns it.
-   Striped = Pending (routes being installed), dashed = Draining, grey = Quarantined.
-2. **Burst**: every node goes to 200 pods. Watch blocks go Pending → Active, nodes double
-   in place (two buddy blocks are served as one range), and stop at the capacity cap.
-3. **Calm**: demand drops to 15. Idle blocks drain, are quarantined, and return to the pool.
-4. **Skew**: one node goes hot while the others stay light; only that node grows.
-5. **Emergency grow / Shrink toggles**: turn them off and push demand past capacity to see
-   what each mechanism contributes.
-6. **Evaluation tab**: results of `operator/cmd/ipam-sim` against fixed /24, fixed /25 and
-   Calico-style blocks, plus the checks run on a real 3-node minikube cluster
-   (`operator/docs/ipam-evaluation.md`).
+### Setup
+```bash
+export KUBECONFIG=$HOME/buddy.kubeconfig                    # every terminal, including the dashboard's
+kubectl apply -f operator/config/crd/bases/ && kubectl apply -f operator/config/samples/ipam_sample.yaml
+kubectl apply -f operator/deploy/ipam-agent.yaml            # node agents
+(cd operator && go run ./cmd --controllers=ipam --health-probe-bind-address=:18081 --metrics-bind-address=0)
+(cd k8s-visualizer && npm run dev)                           # then open http://localhost:5173/project1
+```
+The header must show Cluster connected, Controller running, Node agents 3/3 and Pool Ready.
 
-`/project1?preset=burst` starts mid-burst; `?tab=eval` or `?tab=how` opens a tab.
+Demo settings used on the `buddy-ipam` cluster (cluster only; the repo defaults are unchanged):
+- IPPool `cidrs: ["10.244.0.0/24"]`: a small pool of 256 addresses, so the demo can fill it. With the
+  usual `/16` the nodes' capacity cap (120% of max pods: 720 addresses per node here, where nodes allow 600 pods, so about 2,160 for 3 nodes) stops growth
+  long before the pool could run out.
+- IPPool `initialBlockPercent: 5`, `shrinkCooldownSeconds: 20`, `quarantineSeconds: 10`,
+  `shrinkThresholdPercent: 70` (a node gives space back while it stays at most 70% full; the default 50%
+  keeps more spare room, which looks like waste in a short demo).
+- Agent DaemonSet args: `--interval=5s --promote-timeout=15s --leak-min-age=20s --drain-settle=3s`.
+The defaults in `config/samples` and `deploy/ipam-agent.yaml` are the safer production values.
+
+Changing the pool CIDR on a running cluster (how the /24 was set, or to go back to the /16):
+```bash
+kubectl delete deployment -l app=ipam-demo                     # no demo pods may hold old addresses
+kubectl patch ippool buddy-pool --type merge -p '{"spec":{"cidrs":["10.244.0.0/24"]}}'
+kubectl delete nodeblocks --all                                # the controller gives every node a new first block
+# once the new blocks are Active, restart pods that still hold old addresses (CoreDNS):
+kubectl delete pod -n kube-system -l k8s-app=kube-dns
+```
+
+### The page
+One screen, three panels:
+- **Inject a fault** (left): **Fill the IP pool**, **Free the pool**, **Reset**, and steps that tick off
+  as each stage is seen in the cluster.
+- **IP addresses** (middle): the pool as one line, with each node's ranges in its colour, and every
+  node's blocks with one square per address. Each node has a pods box and **Set**, to run exactly that
+  many demo pods on it. Click a pod's square to stop that pod; click a free square to start a pod on
+  that node (it takes the node's next free address).
+- **What is happening** (right): every request and every change in the cluster, written as sentences.
+
+### Demo flow (1–2 minutes)
+1. **Fill the IP pool**: 150 real pods across the nodes. Nodes fill, the controller gives them more
+   blocks (the free space next to their own block first, so ranges merge), the agents add routes, the
+   blocks turn Active and all pods run.
+2. **Free the pool**: the pods are removed and the controller takes the extra blocks back (drain, a
+   short rest, back to the pool). Each node keeps its starting block.
+3. **One node by hand**: set a node to, say, 29 pods and watch it grow by just what it needs; set it
+   lower and watch it give back a whole block or the empty half of one.
+4. To show a full pool, set the nodes high enough together (the pool holds 256 addresses): the pool
+   turns **Full**, the extra pods wait for an address, and it recovers by itself when pods are removed.
+
+Wait until each node is back to one block between runs (about a minute). **Reset** deletes all demo
+pods.
 
 ## Problem 2: Dual-CNI resilience demo (`/project2`)
 

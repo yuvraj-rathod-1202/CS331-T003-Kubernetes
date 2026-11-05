@@ -51,6 +51,8 @@ type buddyPolicy struct {
 	nodes   []corev1.Node
 	blocks  map[string]*remediationv1alpha1.NodeBlock
 	starved map[string]time.Time
+	// waiting is the pods that could not get an address in the last tick, per node.
+	waiting map[string]int
 	now     time.Time
 	ops     int
 	name    string
@@ -66,7 +68,7 @@ func newBuddy(name string, rng *rand.Rand, nodes, maxPods int, cfg BuddyConfig) 
 		ns[i].Status.Addresses = []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: fmt.Sprintf("192.168.%d.%d", i/250, i%250+1)}}
 	}
 	return &buddyPolicy{cfg: cfg, rng: rng, spec: ipam.WithDefaults(cfg.Spec), nodes: ns, name: name,
-		blocks: map[string]*remediationv1alpha1.NodeBlock{}, starved: map[string]time.Time{}, now: epoch}
+		blocks: map[string]*remediationv1alpha1.NodeBlock{}, starved: map[string]time.Time{}, waiting: map[string]int{}, now: epoch}
 }
 
 func nodeName(i int) string { return fmt.Sprintf("n%04d", i) }
@@ -187,9 +189,10 @@ func (b *buddyPolicy) Churn(p float64) {
 	}
 }
 
-func (b *buddyPolicy) Starved(n int) {
+func (b *buddyPolicy) Starved(n, waiting int) {
 	if !b.cfg.NoStarve {
 		b.starved[nodeName(n)] = b.now
+		b.waiting[nodeName(n)] = waiting
 	}
 }
 
@@ -230,7 +233,8 @@ func (b *buddyPolicy) Tick(t float64) {
 	for _, blk := range b.blocks {
 		items = append(items, *blk)
 	}
-	plan := ipam.PlanPool(&b.spec, b.nodes, items, b.now, b.starved)
+	plan := ipam.PlanPool(&b.spec, b.nodes, items, b.now, b.starved, b.waiting)
+	b.waiting = map[string]int{}
 
 	for _, pb := range plan.New {
 		ts := metav1.NewTime(b.now)

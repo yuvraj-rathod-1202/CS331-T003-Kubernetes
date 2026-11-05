@@ -36,16 +36,21 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
+	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	remediationv1alpha1 "CS331-CN-Project-1/operator/api/v1alpha1"
+	"CS331-CN-Project-1/operator/internal/controller/ipam/buddy"
 	"CS331-CN-Project-1/operator/internal/controller/ipam/monitor"
 )
 
@@ -54,6 +59,8 @@ const (
 	requeueInterval = 30 * time.Second
 	// requeueBusy is used while a block is Pending, or after a name collision.
 	requeueBusy = 5 * time.Second
+	// timerSlack is added to a timer's deadline so the next pass sees it expired.
+	timerSlack = 500 * time.Millisecond
 )
 
 // Pool phases.
@@ -123,7 +130,7 @@ func (r *IPAMController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 	if primary != ippool.Name {
-		return ctrl.Result{}, r.updateStatus(ctx, &ippool, nil, nil, phaseInactive,
+		return ctrl.Result{}, r.updateStatus(ctx, &ippool, nil, nil, nil, phaseInactive,
 			fmt.Sprintf("IPPool %s is serving the cluster's nodes", primary))
 	}
 
@@ -151,11 +158,22 @@ func (r *IPAMController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 
-	starved, err := r.starvedNodes(ctx, time.Now())
+	pods, waiting, err := r.nodePods(ctx)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	plan := planPool(&spec, nodes.Items, blocks, planInput{Now: time.Now(), Starved: starved})
+	starved, err := r.starvedNodes(ctx, time.Now(), waiting)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	lastChange := map[string]time.Time{}
+	for _, na := range ippool.Status.NodeAllocations {
+		if na.LastBlockChange != nil {
+			lastChange[na.NodeName] = na.LastBlockChange.Time
+		}
+	}
+	plan := planPool(&spec, nodes.Items, blocks, planInput{Now: time.Now(), Starved: starved, LastChange: lastChange, Waiting: waiting, Pods: pods})
+	touched := plan.changedNodes(blocks)
 
 	collided := false
 	for _, pb := range plan.New {
@@ -190,7 +208,7 @@ func (r *IPAMController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			return ctrl.Result{}, err
 		}
 	}
-	if err := r.updateStatus(ctx, &ippool, plan, blocks, phase, msg); err != nil {
+	if err := r.updateStatus(ctx, &ippool, plan, blocks, touched, phase, msg); err != nil {
 		if apierrors.IsConflict(err) {
 			// The cache is a write behind our own previous status update.
 			return ctrl.Result{RequeueAfter: time.Second}, nil
@@ -201,7 +219,7 @@ func (r *IPAMController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	if collided || plan.Pending || changed {
 		return ctrl.Result{RequeueAfter: requeueBusy}, nil
 	}
-	return ctrl.Result{RequeueAfter: requeueInterval}, nil
+	return ctrl.Result{RequeueAfter: requeueAfter(nextTimer(&spec, blocks, time.Now()))}, nil
 }
 
 func phaseFor(plan *poolPlan) (string, string) {
@@ -250,6 +268,49 @@ func (r *IPAMController) applyLifecycle(ctx context.Context, pool *remediationv1
 		}
 	}
 
+	setRelease := func(name, half string) error {
+		var nb remediationv1alpha1.NodeBlock
+		if err := r.Get(ctx, types.NamespacedName{Name: name}, &nb); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+		if nb.Spec.Release == half {
+			return nil
+		}
+		was := nb.Spec.Release
+		nb.Spec.Release = half
+		if err := r.Update(ctx, &nb); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+		if half != "" {
+			logger.Info("Releasing half of block", "block", nb.Spec.CIDR, "half", half, "node", nb.Spec.NodeName)
+			r.event(pool, corev1.EventTypeNormal, "BlockHalfReleasing",
+				fmt.Sprintf("Releasing half %s of block %s of node %s", half, nb.Spec.CIDR, nb.Spec.NodeName))
+		} else {
+			logger.Info("Kept block whole", "block", nb.Spec.CIDR, "half", was, "node", nb.Spec.NodeName)
+			r.event(pool, corev1.EventTypeNormal, "BlockHalfRestored",
+				fmt.Sprintf("Kept half %s of block %s of node %s", was, nb.Spec.CIDR, nb.Spec.NodeName))
+		}
+		changed = true
+		return nil
+	}
+	for _, h := range plan.Release {
+		if err := setRelease(h.Name, h.Half); err != nil {
+			return changed, err
+		}
+	}
+	for _, n := range plan.Unrelease {
+		if err := setRelease(n, ""); err != nil {
+			return changed, err
+		}
+	}
+	for _, n := range plan.Split {
+		done, err := r.splitBlock(ctx, pool, n)
+		if err != nil {
+			return changed, err
+		}
+		changed = changed || done
+	}
+
 	for _, n := range plan.Quarantine {
 		var nb remediationv1alpha1.NodeBlock
 		if err := r.Get(ctx, types.NamespacedName{Name: n}, &nb); err != nil {
@@ -270,12 +331,19 @@ func (r *IPAMController) applyLifecycle(ctx context.Context, pool *remediationv1
 	}
 
 	for _, n := range plan.Delete {
-		nb := &remediationv1alpha1.NodeBlock{ObjectMeta: metav1.ObjectMeta{Name: n}}
-		if err := r.Delete(ctx, nb); client.IgnoreNotFound(err) != nil {
+		// Read the block first so the log and event name its CIDR, not its object name.
+		var nb remediationv1alpha1.NodeBlock
+		if err := r.Get(ctx, types.NamespacedName{Name: n}, &nb); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
 			return changed, err
 		}
-		logger.Info("Released block", "block", n)
-		r.event(pool, corev1.EventTypeNormal, "BlockReleased", fmt.Sprintf("block %s returned to the pool", n))
+		if err := r.Delete(ctx, &nb); client.IgnoreNotFound(err) != nil {
+			return changed, err
+		}
+		logger.Info("Released block", "block", nb.Spec.CIDR, "node", nb.Spec.NodeName)
+		r.event(pool, corev1.EventTypeNormal, "BlockReleased", fmt.Sprintf("block %s of node %s returned to the pool", nb.Spec.CIDR, nb.Spec.NodeName))
 		changed = true
 	}
 	return changed, nil
@@ -288,7 +356,7 @@ const starveWindow = 3 * time.Minute
 // starvedNodes returns, per node, when its kubelet last failed to create a pod
 // sandbox because host-local had no address left, within starveWindow. That is
 // demand the usage counter cannot see, so it forces a grow.
-func (r *IPAMController) starvedNodes(ctx context.Context, now time.Time) (map[string]time.Time, error) {
+func (r *IPAMController) starvedNodes(ctx context.Context, now time.Time, waiting map[string]int) (map[string]time.Time, error) {
 	var events corev1.EventList
 	if err := r.List(ctx, &events); err != nil {
 		return nil, err
@@ -317,7 +385,40 @@ func (r *IPAMController) starvedNodes(ctx context.Context, now time.Time) (map[s
 			out[node] = t
 		}
 	}
+	// A failure only matters while a pod on that node is still waiting for an
+	// address. Seen live: after a full pool was freed, the waiting pods were
+	// deleted, but their recent failures made the controller grab every block
+	// that came back, only to drain it again.
+	for node := range out {
+		if waiting[node] == 0 {
+			delete(out, node)
+		}
+	}
 	return out, nil
+}
+
+// nodePods counts, per node, the pods that hold or need an address (not host
+// network, not finished, not being deleted) and, of those, the ones still
+// Pending without an IP: waiting for an address. The controller sizes a grow to
+// this demand, so a node gets what its pods need and no more.
+func (r *IPAMController) nodePods(ctx context.Context) (pods, waiting map[string]int, err error) {
+	var list corev1.PodList
+	if err := r.List(ctx, &list); err != nil {
+		return nil, nil, err
+	}
+	pods, waiting = map[string]int{}, map[string]int{}
+	for i := range list.Items {
+		p := &list.Items[i]
+		if p.Spec.NodeName == "" || p.Spec.HostNetwork || !p.DeletionTimestamp.IsZero() ||
+			p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
+			continue
+		}
+		pods[p.Spec.NodeName]++
+		if p.Status.Phase == corev1.PodPending && p.Status.PodIP == "" {
+			waiting[p.Spec.NodeName]++
+		}
+	}
+	return pods, waiting, nil
 }
 
 // sandboxFailedReason is the kubelet event reason for a pod sandbox that could
@@ -362,6 +463,74 @@ func (r *IPAMController) blocksFor(ctx context.Context, pool string) ([]remediat
 	return out, nil
 }
 
+// splitBlock completes a release: the block shrinks to the half it keeps, and
+// the released half becomes its own Quarantined block, so it rests like any
+// drained block before going back to the pool.
+//
+// Order matters. The block shrinks first, in one update, so the half is never
+// owned twice. Before this, the owner's CNI config already left the half out
+// and the agent saw it empty for the settle time, so a crash before the second
+// step is harmless: the half is simply free again, without its rest. Other
+// nodes replace their route for the whole block by one for the kept half; the
+// agent installs the new route before removing the old one.
+func (r *IPAMController) splitBlock(ctx context.Context, pool *remediationv1alpha1.IPPool, name string) (bool, error) {
+	logger := logf.FromContext(ctx).WithName("ipam-controller")
+	var nb remediationv1alpha1.NodeBlock
+	if err := r.Get(ctx, types.NamespacedName{Name: name}, &nb); err != nil {
+		return false, client.IgnoreNotFound(err)
+	}
+	half := nb.Spec.Release
+	if half == "" || nb.Status.ReleaseReady != half {
+		return false, nil
+	}
+	whole := nb.Spec.CIDR
+	keep, err := buddy.OtherHalf(whole, half)
+	if err != nil {
+		// Not a half of this block: drop the request.
+		nb.Spec.Release = ""
+		return true, client.IgnoreNotFound(r.Update(ctx, &nb))
+	}
+
+	nb.Spec.CIDR = keep
+	nb.Spec.Release = ""
+	if err := r.Update(ctx, &nb); err != nil {
+		return false, client.IgnoreNotFound(err)
+	}
+	now := metav1.Now()
+	nb.Status.HalfUsage = nil
+	nb.Status.ReleaseReady = ""
+	nb.Status.LastTransitionTime = &now
+	if err := r.Status().Update(ctx, &nb); err != nil && !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
+		return true, err
+	}
+
+	rest := &remediationv1alpha1.NodeBlock{
+		ObjectMeta: metav1.ObjectMeta{Name: blockName(half)},
+		Spec: remediationv1alpha1.NodeBlockSpec{
+			NodeName: nb.Spec.NodeName,
+			PoolRef:  pool.Name,
+			CIDR:     half,
+			Drain:    true,
+		},
+	}
+	if err := r.Create(ctx, rest); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return true, err
+		}
+	} else {
+		// Should this write fail, the agent moves the block to Quarantined itself.
+		rest.Status.Phase = remediationv1alpha1.NodeBlockQuarantined
+		rest.Status.LastTransitionTime = &now
+		if err := r.Status().Update(ctx, rest); err != nil && !apierrors.IsNotFound(err) {
+			return true, err
+		}
+	}
+	logger.Info("Split block", "block", whole, "kept", keep, "released", half, "node", nb.Spec.NodeName)
+	r.event(pool, corev1.EventTypeNormal, "BlockSplit",
+		fmt.Sprintf("Split block %s of node %s: kept %s, %s goes back to the pool", whole, nb.Spec.NodeName, keep, half))
+	return true, nil
+}
+
 // createBlock persists a planned block as a Pending NodeBlock. It returns false
 // without error when the name is already taken, which is exactly how double
 // allocation is prevented.
@@ -372,6 +541,7 @@ func (r *IPAMController) createBlock(ctx context.Context, pool *remediationv1alp
 			NodeName: pb.NodeName,
 			PoolRef:  pool.Name,
 			CIDR:     pb.CIDR,
+			Initial:  pb.Reason == reasonInitial,
 		},
 	}
 	// No owner reference on purpose: deleting an IPPool must not garbage-collect
@@ -393,7 +563,7 @@ func (r *IPAMController) createBlock(ctx context.Context, pool *remediationv1alp
 }
 
 func (r *IPAMController) updateStatus(ctx context.Context, pool *remediationv1alpha1.IPPool, plan *poolPlan,
-	blocks []remediationv1alpha1.NodeBlock, phase, msg string) error {
+	blocks []remediationv1alpha1.NodeBlock, touched map[string]bool, phase, msg string) error {
 	st := remediationv1alpha1.IPPoolStatus{Phase: phase, Message: msg}
 	now := metav1.Now()
 	st.LastReconcileTime = &now
@@ -406,11 +576,59 @@ func (r *IPAMController) updateStatus(ctx context.Context, pool *remediationv1al
 		st.NodeAllocations = summarise(blocks)
 		st.CIDRs = plan.CIDRs
 	}
-	if equalStatus(pool.Status, st) {
+	stampChanges(st.NodeAllocations, pool.Status.NodeAllocations, touched, now)
+	// An unchanged status is not rewritten, except for a heartbeat: the timestamp
+	// is refreshed every heartbeatEvery so a dashboard can tell a running
+	// controller from a stopped one.
+	if equalStatus(pool.Status, st) && !heartbeatDue(pool.Status.LastReconcileTime, now.Time) {
 		return nil
 	}
 	pool.Status = st
-	return r.Status().Update(ctx, pool)
+	err := r.Status().Update(ctx, pool)
+	if !apierrors.IsConflict(err) || len(touched) == 0 {
+		return err
+	}
+	// The change times must not be lost: without them the failures this pass
+	// answered would count again on the next one. Retry on the latest object.
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var fresh remediationv1alpha1.IPPool
+		if err := r.Get(ctx, types.NamespacedName{Name: pool.Name}, &fresh); err != nil {
+			return err
+		}
+		stampChanges(st.NodeAllocations, fresh.Status.NodeAllocations, touched, now)
+		fresh.Status = st
+		if err := r.Status().Update(ctx, &fresh); err != nil {
+			return err
+		}
+		*pool = fresh
+		return nil
+	})
+}
+
+// stampChanges carries each node's LastBlockChange over from the previous
+// status, and sets it to now for the nodes this pass changed.
+func stampChanges(cur, prev []remediationv1alpha1.NodeAllocationSummary, touched map[string]bool, now metav1.Time) {
+	last := map[string]*metav1.Time{}
+	for i := range prev {
+		last[prev[i].NodeName] = prev[i].LastBlockChange
+	}
+	for i := range cur {
+		switch {
+		case touched[cur[i].NodeName]:
+			t := now
+			cur[i].LastBlockChange = &t
+		case last[cur[i].NodeName] != nil:
+			t := *last[cur[i].NodeName]
+			cur[i].LastBlockChange = &t
+		}
+	}
+}
+
+// heartbeatEvery is how often an otherwise unchanged pool status is rewritten.
+const heartbeatEvery = 30 * time.Second
+
+func heartbeatDue(last *metav1.Time, now time.Time) bool {
+	return last == nil || now.Sub(last.Time) >= heartbeatEvery
 }
 
 // equalStatus ignores the timestamp so an idle pool does not write every pass.
@@ -459,10 +677,37 @@ func (r *IPAMController) event(obj client.Object, typ, reason, msg string) {
 	}
 }
 
+// newEventRecorder returns a recorder whose rate limits fit this controller. The
+// default recorder lets an object emit a burst of 25 events and then about one
+// every five minutes, and merges similar events into one "(combined from similar
+// events)" object. A pool that fills up makes dozens of block decisions in a
+// minute, so with the defaults most of them never reach the API, and they are
+// what people read to see what the controller did.
+func newEventRecorder(mgr ctrl.Manager) (record.EventRecorder, error) {
+	cs, err := kubernetes.NewForConfig(mgr.GetConfig())
+	if err != nil {
+		return nil, err
+	}
+	b := record.NewBroadcasterWithCorrelatorOptions(record.CorrelatorOptions{BurstSize: 1000, QPS: 10, MaxEvents: 1000})
+	b.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: cs.CoreV1().Events("")})
+	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+		<-ctx.Done()
+		b.Shutdown()
+		return nil
+	})); err != nil {
+		return nil, err
+	}
+	return b.NewRecorder(mgr.GetScheme(), corev1.EventSource{Component: "ipam-controller"}), nil
+}
+
 // SetupWithManager sets up the controller with the Manager. Node and NodeBlock
 // changes both trigger a reconcile of the pool they belong to.
 func (r *IPAMController) SetupWithManager(mgr ctrl.Manager) error {
-	r.Recorder = mgr.GetEventRecorderFor("ipam-controller") //nolint:staticcheck
+	rec, err := newEventRecorder(mgr)
+	if err != nil {
+		return err
+	}
+	r.Recorder = rec
 	r.APIReader = mgr.GetAPIReader()
 
 	allPools := handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, _ client.Object) []reconcile.Request {
@@ -494,4 +739,13 @@ func (r *IPAMController) SetupWithManager(mgr ctrl.Manager) error {
 		}))).
 		Named("ipam").
 		Complete(r)
+}
+
+// requeueAfter wakes the controller when the next timer runs out (see
+// nextTimer), and otherwise at the idle interval.
+func requeueAfter(timer time.Duration) time.Duration {
+	if timer > 0 && timer+timerSlack < requeueInterval {
+		return timer + timerSlack
+	}
+	return requeueInterval
 }

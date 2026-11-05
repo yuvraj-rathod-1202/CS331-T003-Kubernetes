@@ -367,3 +367,6 @@
   .p2-nodes, .p2-scroll { overflow: visible; }
   .p2-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+.p2-nav-link { font-size: 0.8rem; color: #93c5fd; text-decoration: none; }
+.p2-nav-link:hover { text-decoration: underline; }

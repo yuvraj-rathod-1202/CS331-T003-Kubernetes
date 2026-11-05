@@ -379,8 +379,58 @@ func (a *BuddyAllocator) AllocateBuddyOf(block *Block, nodeName string) (*Block,
 	return buddy, nil
 }
 
-// Reserve allocates the exact block named by cidr for nodeName. It is used to
-// rebuild allocator state from persisted NodeBlock objects after a restart.
+// ownedBy reports whether everything under b is allocated to nodeName.
+func (b *Block) ownedBy(nodeName string) bool {
+	switch b.State {
+	case BlockAllocated:
+		return b.NodeName == nodeName
+	case BlockSplit:
+		return b.Left.ownedBy(nodeName) && b.Right.ownedBy(nodeName)
+	}
+	return false
+}
+
+// AllocateFromBuddy gives nodeName a block of requestedAddrs addresses next to
+// block. "Next to" means the free buddy of the largest range around block that
+// nodeName owns completely: two /28s that make up a /27 grow towards the /27's
+// buddy, the way the agent serves them, as one range. A buddy no larger than
+// the request is taken whole, so the two merge into one range and one route. A
+// larger buddy is split, and only the piece next to the node's range is taken;
+// the rest stays free beside the node, so a later grow can take it and
+// everything merges back. This grows a node by what it needs without taking
+// space from another node's area, and keeps its blocks in as few ranges as
+// possible.
+func (a *BuddyAllocator) AllocateFromBuddy(block *Block, requestedAddrs int, nodeName string) (*Block, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.sweepLocked()
+
+	anchor := block
+	for anchor.Parent != nil && anchor.Buddy() != nil && anchor.Buddy().ownedBy(nodeName) {
+		anchor = anchor.Parent
+	}
+	cur := anchor.Buddy()
+	if cur == nil || cur.State != BlockFree {
+		return nil, ErrBuddyUnavailable
+	}
+	prefix, err := a.prefixFor(requestedAddrs)
+	if err != nil {
+		return nil, err
+	}
+	for cur.PrefixLen < prefix {
+		l, r := a.split(cur)
+		// The half nearer to the node's range: the lower one if the buddy lies above it.
+		cur = l
+		if cur.base < anchor.base {
+			cur = r
+		}
+	}
+	a.removeFree(cur)
+	cur.State = BlockAllocated
+	cur.NodeName = nodeName
+	return cur, nil
+}
+
 func (a *BuddyAllocator) Reserve(cidr, nodeName string) (*Block, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
