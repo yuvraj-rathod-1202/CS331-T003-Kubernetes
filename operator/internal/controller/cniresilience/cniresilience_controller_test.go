@@ -26,6 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -74,7 +75,7 @@ func TestRepairNeedsProofNotJustNoVerdict(t *testing.T) {
 		WithIndex(&corev1.Pod{}, "spec.nodeName", func(o client.Object) []string {
 			return []string{o.(*corev1.Pod).Spec.NodeName}
 		}).Build()
-	r := NewCNIResilienceController(c, scheme)
+	r := NewCNIResilienceController(c, scheme, record.NewFakeRecorder(10))
 	r.recoveryPending["b"] = true
 	ctx := context.Background()
 	request := ctrl.Request{NamespacedName: client.ObjectKey{Name: "r"}}
@@ -182,7 +183,7 @@ func TestRestartOncePerFault(t *testing.T) {
 	// and reports whether the calico pod on b was deleted.
 	reconcile := func(pod string) bool {
 		t.Helper()
-		r := NewCNIResilienceController(c, scheme)
+		r := NewCNIResilienceController(c, scheme, record.NewFakeRecorder(10))
 		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKey{Name: "r"}}); err != nil {
 			t.Fatal(err)
 		}

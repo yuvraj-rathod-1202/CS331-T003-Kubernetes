@@ -1,11 +1,15 @@
 # DaemonSet for the CNI health agent.
 #
 # The agent is a normal pod, not hostNetwork, so its probes cross the real pod data
-# path. It answers on port 9100, probes one peer each round, and writes results to an
+# path. It answers on port 9100, probes every peer each round, and writes results to an
 # annotation on its own Node. Build it with:
-#   go build -o bin/healthagent ./cmd/healthagent
+#   GOOS=linux CGO_ENABLED=0 go build -o bin/healthagent ./cmd/healthagent
 #   docker build -f Dockerfile.healthagent -t cni-health-agent:dev bin
 #   minikube -p k8s-experiments image load cni-health-agent:dev
+# Warning: `image load` does not replace an image whose tag already exists on the nodes.
+# For an existing tag, load it into each node's Docker instead:
+#   docker save cni-health-agent:dev | docker exec -i <node> docker load
+# then `kubectl -n kube-system rollout restart ds/cni-health-agent`.
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -77,7 +81,7 @@ rules:
     verbs: ["get", "list"]
   - apiGroups: [""]
     resources: ["nodes"]
-    verbs: ["patch"]
+    verbs: ["get", "patch"]
   - apiGroups: ["remediation.cn-operator.yuvraj-rathod-1202.github.io"]
     resources: ["cniresiliences"]
     verbs: ["get", "list"]

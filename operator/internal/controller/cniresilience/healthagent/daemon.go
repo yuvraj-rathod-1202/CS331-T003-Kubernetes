@@ -21,10 +21,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"maps"
 	"net"
 	"net/http"
-	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -51,30 +49,6 @@ const (
 	multusNetworkStatusAnnotation = "k8s.v1.cni.cncf.io/network-status"
 )
 
-// RingOffsets returns the offsets a cluster of n nodes rotates through: 1 to n/2.
-// The offset where 2r = n stays in, although that one round alone cannot separate a
-// node from a link: without it, opposite nodes on an even ring are never paired.
-// Reports keep the latest result per peer, so the sweep as a whole can separate them.
-func RingOffsets(n int) []int {
-	var offsets []int
-	for r := 1; r <= n/2; r++ {
-		offsets = append(offsets, r)
-	}
-	return offsets
-}
-
-// RingTarget returns which node this one probes in the given round, or "" if it
-// has nobody to probe. Round numbers come from the clock, so all agents agree.
-func RingTarget(sortedNodes []string, self string, round int64) string {
-	offsets := RingOffsets(len(sortedNodes))
-	index := slices.Index(sortedNodes, self)
-	if len(offsets) == 0 || index < 0 {
-		return ""
-	}
-	offset := offsets[round%int64(len(offsets))]
-	return sortedNodes[(index+offset)%len(sortedNodes)]
-}
-
 // streak turns raw probe results into a stable state: it flips only after threshold
 // identical results in a row, so one lost packet or one lucky reply changes nothing.
 type streak struct {
@@ -99,11 +73,28 @@ type Daemon struct {
 	Client   client.Client
 	NodeName string
 
+	// Probe checks one peer address. Nil means the package's probe.
+	Probe func(ctx context.Context, ip string, timeout time.Duration) bool
+
 	mu       sync.Mutex
 	primary  map[string]*streak
 	backup   map[string]*streak
 	lastSent string
 	lastTime time.Time
+
+	// lastProbe is the end of the last round that listed the agent pods.
+	lastProbe time.Time
+	// staleLogged is true while publishing is paused for lack of probe rounds.
+	staleLogged bool
+	// now is the clock; nil means time.Now.
+	now func() time.Time
+}
+
+func (d *Daemon) clock() time.Time {
+	if d.now != nil {
+		return d.now()
+	}
+	return time.Now()
 }
 
 // Serve answers peers' probes.
@@ -123,11 +114,41 @@ func Serve(ctx context.Context) error {
 	return nil
 }
 
-// Run probes one ring target per round until ctx ends.
-func (d *Daemon) Run(ctx context.Context) {
-	logger := logf.FromContext(ctx).WithName("health-agent")
+// init allocates the streak maps.
+func (d *Daemon) init() {
 	d.primary = make(map[string]*streak)
 	d.backup = make(map[string]*streak)
+}
+
+// seed starts every streak from this node's last fresh report, so a restart does not
+// report a down peer as healthy again. With run 0, it still takes threshold opposite
+// results to flip a seeded verdict.
+func (d *Daemon) seed(ctx context.Context) {
+	logger := logf.FromContext(ctx).WithName("health-agent")
+	node := &corev1.Node{}
+	if err := d.Client.Get(ctx, client.ObjectKey{Name: d.NodeName}, node); err != nil {
+		logger.Error(err, "Reading last report failed", "node", d.NodeName)
+		return
+	}
+	report, ok := ParseReport(node, time.Now())
+	if !ok {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for peer, r := range report.Peers {
+		d.primary[peer] = &streak{healthy: r.Primary}
+		if r.Backup != nil {
+			d.backup[peer] = &streak{healthy: *r.Backup}
+		}
+	}
+}
+
+// Run probes every peer each round until ctx ends.
+func (d *Daemon) Run(ctx context.Context) {
+	logger := logf.FromContext(ctx).WithName("health-agent")
+	d.init()
+	d.seed(ctx)
 
 	interval, timeout, threshold := 2*time.Second, time.Second, 3
 	for {
@@ -139,7 +160,7 @@ func (d *Daemon) Run(ctx context.Context) {
 			threshold = spec.FailureThreshold
 		}
 
-		if err := d.round(ctx, interval, timeout, threshold); err != nil {
+		if err := d.round(ctx, timeout, threshold); err != nil {
 			logger.Error(err, "Probe round failed")
 		}
 
@@ -152,44 +173,107 @@ func (d *Daemon) Run(ctx context.Context) {
 	}
 }
 
-func (d *Daemon) round(ctx context.Context, interval, timeout time.Duration, threshold int) error {
+// round probes every other agent on both paths at once, then applies the results to
+// the streaks and publishes. The lock is not held while probing.
+func (d *Daemon) round(ctx context.Context, timeout time.Duration, threshold int) error {
 	var pods corev1.PodList
 	if err := d.Client.List(ctx, &pods, client.MatchingLabels{"app": agentLabel}); err != nil {
+		logf.FromContext(ctx).WithName("health-agent").Error(err, "Listing agent pods failed")
 		return d.publish(ctx)
 	}
 
+	check := d.Probe
+	if check == nil {
+		check = probe
+	}
+
 	type peer struct{ primaryIP, backupIP string }
+	type outcome struct {
+		primary   bool
+		backup    bool
+		hasBackup bool
+	}
 	peers := make(map[string]peer)
 	for i := range pods.Items {
 		pod := &pods.Items[i]
-		if pod.Status.PodIP != "" && pod.Status.Phase == corev1.PodRunning {
+		if pod.Spec.NodeName != d.NodeName && pod.Status.PodIP != "" && pod.Status.Phase == corev1.PodRunning &&
+			pod.DeletionTimestamp == nil && containersReady(pod) {
 			peers[pod.Spec.NodeName] = peer{pod.Status.PodIP, backupIP(pod)}
 		}
 	}
 
-	names := slices.Sorted(maps.Keys(peers))
-	target := RingTarget(names, d.NodeName, time.Now().UnixNano()/int64(interval))
-	if target != "" {
-		d.mu.Lock()
-		if d.primary[target] == nil {
-			d.primary[target] = &streak{healthy: true}
-		}
-		d.primary[target].observe(probe(ctx, peers[target].primaryIP, timeout), threshold)
-		if ip := peers[target].backupIP; ip != "" {
-			if d.backup[target] == nil {
-				d.backup[target] = &streak{healthy: true}
+	var (
+		wg       sync.WaitGroup
+		resultMu sync.Mutex
+		results  = make(map[string]outcome, len(peers))
+	)
+	for name, p := range peers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var o outcome
+			var inner sync.WaitGroup
+			if p.backupIP != "" {
+				o.hasBackup = true
+				inner.Add(1)
+				go func() {
+					defer inner.Done()
+					o.backup = check(ctx, p.backupIP, timeout)
+				}()
 			}
-			d.backup[target].observe(probe(ctx, ip, timeout), threshold)
-		}
-		d.mu.Unlock()
+			o.primary = check(ctx, p.primaryIP, timeout)
+			inner.Wait()
+			resultMu.Lock()
+			results[name] = o
+			resultMu.Unlock()
+		}()
 	}
+	wg.Wait()
+
+	d.mu.Lock()
+	for name, o := range results {
+		if d.primary[name] == nil {
+			d.primary[name] = &streak{healthy: true}
+		}
+		d.primary[name].observe(o.primary, threshold)
+		if o.hasBackup {
+			if d.backup[name] == nil {
+				d.backup[name] = &streak{healthy: true}
+			}
+			d.backup[name].observe(o.backup, threshold)
+		}
+	}
+	d.lastProbe = d.clock()
+	d.mu.Unlock()
 	return d.publish(ctx)
+}
+
+// containersReady tells whether the pod's containers are ready. A restarting agent is
+// not, and probing it would read its restart as both paths being down.
+func containersReady(pod *corev1.Pod) bool {
+	for _, c := range pod.Status.Conditions {
+		if c.Type == corev1.ContainersReady {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return false
 }
 
 // publish writes the report only when it changed or the heartbeat is due (Part L7).
 func (d *Daemon) publish(ctx context.Context) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+
+	// With no recent probe round, the verdicts are old. Let the report go stale so the
+	// router keeps its routes and the operator treats this node as silent.
+	if d.lastProbe.IsZero() || d.clock().Sub(d.lastProbe) > SilentAfterSeconds*time.Second {
+		if !d.staleLogged {
+			logf.FromContext(ctx).WithName("health-agent").Info("No successful probe round recently, letting the report go stale")
+			d.staleLogged = true
+		}
+		return nil
+	}
+	d.staleLogged = false
 
 	report := Report{Peers: make(map[string]PeerResult, len(d.primary))}
 	for name, state := range d.primary {
@@ -228,12 +312,14 @@ func (d *Daemon) publish(ctx context.Context) error {
 	return nil
 }
 
-// probe needs both requests to work, so a path that passes small packets but drops
+// probe needs both requests to work, and both share one timeout, so a path that passes small packets but drops
 // full-size ones counts as broken. Keep-alives are off because every request must open
 // a new connection: Calico lets established connections through ahead of later rules,
 // so a reused connection keeps working on a path where new ones fail.
 func probe(ctx context.Context, ip string, timeout time.Duration) bool {
-	httpClient := &http.Client{Timeout: timeout, Transport: &http.Transport{DisableKeepAlives: true}}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	httpClient := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
 	address := net.JoinHostPort(ip, strconv.Itoa(Port))
 	for _, path := range []string{"/small", "/large"} {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+address+path, nil)

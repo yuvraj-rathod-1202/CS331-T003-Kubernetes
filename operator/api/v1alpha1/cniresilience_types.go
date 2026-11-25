@@ -63,6 +63,28 @@ type CNIResilienceSpec struct {
 	// to the backup path on primary failure.
 	// +kubebuilder:default=true
 	AutoFailover bool `json:"autoFailover,omitempty"`
+
+	// LinkFailover controls whether a single broken node-to-node link is steered
+	// onto the backup path. A nil value means enabled.
+	// +kubebuilder:default=true
+	// +optional
+	LinkFailover *bool `json:"linkFailover,omitempty"`
+
+	// LinkRelay controls whether a link with no direct path is relayed through
+	// a third node. A nil value means enabled.
+	// +kubebuilder:default=true
+	// +optional
+	LinkRelay *bool `json:"linkRelay,omitempty"`
+}
+
+// LinkFailoverEnabled reports whether per-link failover is on (nil means on).
+func (s CNIResilienceSpec) LinkFailoverEnabled() bool {
+	return s.LinkFailover == nil || *s.LinkFailover
+}
+
+// LinkRelayEnabled reports whether relaying through a third node is on (nil means on).
+func (s CNIResilienceSpec) LinkRelayEnabled() bool {
+	return s.LinkRelay == nil || *s.LinkRelay
 }
 
 // CNIConfig describes one CNI in the dual-CNI setup.
@@ -104,6 +126,54 @@ type CNIResilienceStatus struct {
 
 	// FailoverCount is total number of failovers performed.
 	FailoverCount int `json:"failoverCount,omitempty"`
+
+	// Links lists the directed node-to-node links that are not on the primary path.
+	// +optional
+	Links []LinkStatus `json:"links,omitempty"`
+
+	// Conditions holds the standard conditions, such as LinksReachable.
+	// +listType=map
+	// +listMapKey=type
+	// +optional
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// Values of LinkStatus.Path.
+const (
+	LinkPathPrimary = "primary"
+	LinkPathBackup  = "backup"
+	LinkPathRelay   = "relay"
+	LinkPathNone    = "none"
+)
+
+const (
+	// ConditionLinksReachable is true when every node pair has a working path.
+	ConditionLinksReachable = "LinksReachable"
+	// ReasonNoPath is the reason used when some node pair has no working path.
+	ReasonNoPath = "NoPath"
+
+	// ReasonPathRestored is the event reason used when a node pair that had no path has one again.
+	ReasonPathRestored = "PathRestored"
+)
+
+// LinkStatus is the path used from one node to another.
+type LinkStatus struct {
+	// From is the source node name.
+	From string `json:"from"`
+
+	// To is the destination node name.
+	To string `json:"to"`
+
+	// Path is "primary", "backup", "relay" or "none".
+	Path string `json:"path"`
+
+	// Via is the relay node when Path is "relay".
+	// +optional
+	Via string `json:"via,omitempty"`
+
+	// Since is when the link last changed path.
+	// +optional
+	Since *metav1.Time `json:"since,omitempty"`
 }
 
 // NodeCNIStatus holds the health of both CNI paths on a single node.

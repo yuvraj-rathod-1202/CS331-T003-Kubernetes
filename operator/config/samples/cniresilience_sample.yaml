@@ -30,3 +30,5 @@ spec:
   failureThreshold: 3
   autoRecover: true
   autoFailover: true
+  linkFailover: true  # Steer a single broken node-to-node link onto the backup path
+  linkRelay: true  # Relay a link through a third node when no direct path works
