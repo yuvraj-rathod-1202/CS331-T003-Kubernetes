@@ -216,7 +216,7 @@ func (r *CNIResilienceController) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 	for _, pair := range left {
 		logger.Info("Link has a path again", "from", pair[0], "to", pair[1])
-		r.recorder.Eventf(&cr, corev1.EventTypeNormal, "PathRestored", "Path from %s to %s restored", pair[0], pair[1])
+		r.recorder.Eventf(&cr, corev1.EventTypeNormal, remediationv1alpha1.ReasonPathRestored, "Path from %s to %s restored", pair[0], pair[1])
 	}
 	return r.updateStatusAndRequeue(ctx, original, &cr)
 }

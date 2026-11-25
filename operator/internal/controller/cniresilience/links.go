@@ -85,6 +85,8 @@ func linkStatuses(
 			// The node is gone, and so are its links.
 		case !fresh[key[0]]:
 			links = append(links, old)
+		case !known[key[1]]:
+			// The peer is gone, so there is nothing to restore.
 		case old.Path == remediationv1alpha1.LinkPathNone && !nowNone[key]:
 			left = append(left, key)
 		}

@@ -151,6 +151,9 @@ const (
 	ConditionLinksReachable = "LinksReachable"
 	// ReasonNoPath is the reason used when some node pair has no working path.
 	ReasonNoPath = "NoPath"
+
+	// ReasonPathRestored is the event reason used when a node pair that had no path has one again.
+	ReasonPathRestored = "PathRestored"
 )
 
 // LinkStatus is the path used from one node to another.

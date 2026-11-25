@@ -75,13 +75,24 @@ func TestLinkStatusesListsOnlyNonPrimary(t *testing.T) {
 func TestLinkStatusesTransitions(t *testing.T) {
 	now := time.Now()
 	prev := []remediationv1alpha1.LinkStatus{{From: "a", To: "b", Path: "none"}}
-	nodes := []corev1.Node{linkNode("a", linkAnn(now, "b=backup", "c=none"))}
+	nodes := []corev1.Node{linkNode("a", linkAnn(now, "b=backup", "c=none")), linkNode("b", ""), linkNode("c", "")}
 	_, entered, left := linkStatuses(nodes, now, prev)
 	if len(entered) != 1 || entered[0] != [2]string{"a", "c"} {
 		t.Errorf("entered = %v", entered)
 	}
 	if len(left) != 1 || left[0] != [2]string{"a", "b"} {
 		t.Errorf("left = %v", left)
+	}
+}
+
+// A none link to a deleted node is gone, not restored.
+func TestLinkStatusesNoRestoredEventForDeletedPeer(t *testing.T) {
+	now := time.Now()
+	prev := []remediationv1alpha1.LinkStatus{{From: "a", To: "d", Path: "none"}}
+	nodes := []corev1.Node{linkNode("a", linkAnn(now)), linkNode("b", "")}
+	links, entered, left := linkStatuses(nodes, now, prev)
+	if len(left) != 0 || len(entered) != 0 || len(links) != 0 {
+		t.Errorf("links = %+v entered = %v left = %v", links, entered, left)
 	}
 }
 
