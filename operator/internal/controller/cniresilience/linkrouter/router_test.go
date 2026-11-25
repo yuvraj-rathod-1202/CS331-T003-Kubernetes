@@ -19,9 +19,12 @@ package linkrouter
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -308,5 +311,61 @@ func TestFlannelAddr(t *testing.T) {
 		if got := FlannelAddr(in); got != want {
 			t.Errorf("FlannelAddr(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// Path changes are logged once, and stale or no-route states only when they start.
+func TestSyncLogsPathChangesOnce(t *testing.T) {
+	var lines []string
+	logger := funcr.New(func(prefix, args string) { lines = append(lines, prefix+" "+args) }, funcr.Options{})
+	ctx := logr.NewContext(context.Background(), logger)
+	count := func(msg string) int {
+		n := 0
+		for _, l := range lines {
+			if strings.Contains(l, `"`+msg+`"`) {
+				n++
+			}
+		}
+		return n
+	}
+
+	aReport := reportJSON(t, 0, map[string]string{"b": "b", "c": "pb"})
+	c := newTestClient(t, threeNodes(t, aReport)...)
+	r := newRouter(c, newFakeHost())
+	for range 2 {
+		if err := r.Sync(ctx, testNow); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := count("Changed path"); got != 1 {
+		t.Fatalf("Changed path logged %d times, want 1: %v", got, lines)
+	}
+
+	// Own report goes stale: logged once, then once more when it is fresh again.
+	node := &corev1.Node{}
+	if err := c.Get(ctx, client.ObjectKey{Name: "a"}, node); err != nil {
+		t.Fatal(err)
+	}
+	node.Annotations[healthagent.ReportAnnotation] = reportJSON(t, 31*time.Second, map[string]string{"b": "b", "c": "pb"})
+	if err := c.Update(ctx, node); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := r.Sync(ctx, testNow); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := count("Own probe report is stale, keeping routes"); got != 1 {
+		t.Fatalf("stale logged %d times, want 1", got)
+	}
+	node.Annotations[healthagent.ReportAnnotation] = reportJSON(t, 0, map[string]string{"b": "b", "c": "pb"})
+	if err := c.Update(ctx, node); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Sync(ctx, testNow); err != nil {
+		t.Fatal(err)
+	}
+	if got := count("Own probe report is fresh again"); got != 1 {
+		t.Fatalf("fresh logged %d times, want 1", got)
 	}
 }

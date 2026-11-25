@@ -21,8 +21,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"sort"
 	"time"
 
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -108,6 +110,8 @@ type Router struct {
 
 	current  map[string]Choice
 	loaded   bool
+	stale    bool              // own probe report is stale, routes are kept
+	noRoute  map[string]string // peer to the logged "path/reason" of a path without a route
 	lastSent string
 	lastTime time.Time
 }
@@ -197,8 +201,15 @@ func (r *Router) Sync(ctx context.Context, now time.Time) error {
 		}
 	} else {
 		if _, ok := reports[r.NodeName]; !ok {
-			logger.Info("Own probe report is stale, keeping routes")
+			if !r.stale {
+				logger.Info("Own probe report is stale, keeping routes")
+				r.stale = true
+			}
 			return nil
+		}
+		if r.stale {
+			logger.Info("Own probe report is fresh again")
+			r.stale = false
 		}
 		spec := crs.Items[0].Spec
 		choices = Decide(Inputs{
@@ -214,8 +225,66 @@ func (r *Router) Sync(ctx context.Context, now time.Time) error {
 	if err := Apply(r.Host, Build(choices, peers, r.Config)); err != nil {
 		return fmt.Errorf("apply routes: %w", err)
 	}
+	r.logChanges(logger, choices, peers)
 	r.current = choices
 	return r.publish(ctx, choices, now)
+}
+
+// logChanges logs each path that differs from the previous pass. A peer with no
+// previous choice logs only when its path is not primary. It also logs, once per
+// change, a non-primary path that installs no route, and why.
+func (r *Router) logChanges(logger logr.Logger, choices map[string]Choice, peers map[string]Peer) {
+	names := make([]string, 0, len(choices))
+	for name := range choices {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if r.noRoute == nil {
+		r.noRoute = map[string]string{}
+	}
+	for _, name := range names {
+		now := choices[name]
+		old, known := r.current[name]
+		if known && old != now || !known && now.Path != remediationv1alpha1.LinkPathPrimary {
+			logger.Info("Changed path", "peer", name, "from", old.Path, "to", now.Path, "via", now.Via)
+		}
+
+		reason := noRouteReason(now, peers[name], peers)
+		if reason == "" {
+			delete(r.noRoute, name)
+			continue
+		}
+		key := now.Path + "/" + now.Via + "/" + reason
+		if r.noRoute[name] != key {
+			logger.Info("Path has no route", "peer", name, "path", now.Path, "reason", reason)
+			r.noRoute[name] = key
+		}
+	}
+	for name := range r.noRoute {
+		if _, ok := choices[name]; !ok {
+			delete(r.noRoute, name)
+		}
+	}
+}
+
+// noRouteReason says why a backup or relay choice installs no route, or "".
+func noRouteReason(ch Choice, peer Peer, peers map[string]Peer) string {
+	switch ch.Path {
+	case remediationv1alpha1.LinkPathBackup:
+		if peer.FlannelAddr == "" {
+			return "peer has no flannel address"
+		}
+	case remediationv1alpha1.LinkPathRelay:
+		if peers[ch.Via].InternalIP == "" {
+			return "relay has no internal IP"
+		}
+	default:
+		return ""
+	}
+	if len(peer.CalicoBlocks) == 0 {
+		return "peer has no Calico blocks"
+	}
+	return ""
 }
 
 // confirmedBlocks returns the confirmed Calico block CIDRs per node. A cluster
