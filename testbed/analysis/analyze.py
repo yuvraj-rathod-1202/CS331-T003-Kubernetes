@@ -20,7 +20,7 @@ STREAK = 10
 GROUPS = ("q1", "q0")
 MQTT_FIELDS = ("published", "delivered", "delivery", "lat_p50_ms", "lat_p99_ms",
                "lat_max_ms", "reconnects", "max_gap_s")
-HTTP_FIELDS = ("failed", "recovery_s", "recovered", "failback_failed")
+HTTP_FIELDS = ("failed", "avail", "recovery_s", "recovered", "failback_failed")
 ID_COLS = ["config", "fault", "rep"]
 
 
@@ -146,7 +146,7 @@ def http_metrics(samples, t_fault, t_clear, t_end):
     """samples: sorted list of (ts, code) for one probe name."""
     fault = [(t, c) for t, c in samples if t_fault <= t < t_clear]
     rec = [(t, c) for t, c in samples if t_clear <= t < t_end]
-    m = {"failed": None, "recovery_s": None, "recovered": None,
+    m = {"failed": None, "avail": None, "recovery_s": None, "recovered": None,
          "failback_failed": None}
     if rec:
         m["failback_failed"] = sum(1 for _, c in rec if c != 200)
@@ -154,6 +154,9 @@ def http_metrics(samples, t_fault, t_clear, t_end):
         return m
     failed = sum(1 for _, c in fault if c != 200)
     m["failed"] = failed
+    # Share of probes that succeeded during the fault: the metric for loss and flapping,
+    # where the service is partly up the whole time and "recovery" is not one moment.
+    m["avail"] = (len(fault) - failed) / len(fault)
     if failed == 0:
         m["recovery_s"] = 0.0
         m["recovered"] = 1

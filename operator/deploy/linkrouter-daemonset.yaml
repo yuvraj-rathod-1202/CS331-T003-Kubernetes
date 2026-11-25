@@ -42,6 +42,33 @@ spec:
       tolerations:
         # Run on all nodes, including control plane and tainted ones
         - operator: Exists
+      initContainers:
+        # Each node switches on its own probes, so for a few seconds A->B and B->A can
+        # use different tunnels. With strict reverse-path filtering (rp_filter=1) a node
+        # drops packets that arrive on a tunnel it would not reply through, which turns
+        # that window into a full outage. Set loose mode (2, RFC 3704) on both tunnels.
+        # The kernel uses max(conf/all, conf/<dev>), so this works when all=1.
+        # The router itself has only NET_ADMIN and cannot write /proc/sys.
+        - name: loose-rpf
+          image: busybox:1.36.1
+          imagePullPolicy: IfNotPresent
+          command: [sh, -c]
+          args:
+            - |
+              for i in $(seq 1 60); do
+                [ -d /proc/sys/net/ipv4/conf/tunl0 ] && [ -d /proc/sys/net/ipv4/conf/flannel.1 ] && break
+                sleep 2
+              done
+              for dev in tunl0 flannel.1; do
+                f=/proc/sys/net/ipv4/conf/$dev/rp_filter
+                if [ -f "$f" ]; then echo 2 > "$f"; echo "$dev rp_filter=$(cat "$f")"; else echo "$dev missing"; fi
+              done
+          securityContext:
+            privileged: true
+          resources:
+            limits:
+              cpu: 50m
+              memory: 16Mi
       containers:
         - name: link-router
           image: cni-link-router:dev
