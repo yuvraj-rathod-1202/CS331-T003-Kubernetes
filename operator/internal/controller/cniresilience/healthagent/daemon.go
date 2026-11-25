@@ -81,6 +81,20 @@ type Daemon struct {
 	backup   map[string]*streak
 	lastSent string
 	lastTime time.Time
+
+	// lastProbe is the end of the last round that listed the agent pods.
+	lastProbe time.Time
+	// staleLogged is true while publishing is paused for lack of probe rounds.
+	staleLogged bool
+	// now is the clock; nil means time.Now.
+	now func() time.Time
+}
+
+func (d *Daemon) clock() time.Time {
+	if d.now != nil {
+		return d.now()
+	}
+	return time.Now()
 }
 
 // Serve answers peers' probes.
@@ -164,6 +178,7 @@ func (d *Daemon) Run(ctx context.Context) {
 func (d *Daemon) round(ctx context.Context, timeout time.Duration, threshold int) error {
 	var pods corev1.PodList
 	if err := d.Client.List(ctx, &pods, client.MatchingLabels{"app": agentLabel}); err != nil {
+		logf.FromContext(ctx).WithName("health-agent").Error(err, "Listing agent pods failed")
 		return d.publish(ctx)
 	}
 
@@ -181,7 +196,8 @@ func (d *Daemon) round(ctx context.Context, timeout time.Duration, threshold int
 	peers := make(map[string]peer)
 	for i := range pods.Items {
 		pod := &pods.Items[i]
-		if pod.Spec.NodeName != d.NodeName && pod.Status.PodIP != "" && pod.Status.Phase == corev1.PodRunning {
+		if pod.Spec.NodeName != d.NodeName && pod.Status.PodIP != "" && pod.Status.Phase == corev1.PodRunning &&
+			pod.DeletionTimestamp == nil && containersReady(pod) {
 			peers[pod.Spec.NodeName] = peer{pod.Status.PodIP, backupIP(pod)}
 		}
 	}
@@ -227,14 +243,37 @@ func (d *Daemon) round(ctx context.Context, timeout time.Duration, threshold int
 			d.backup[name].observe(o.backup, threshold)
 		}
 	}
+	d.lastProbe = d.clock()
 	d.mu.Unlock()
 	return d.publish(ctx)
+}
+
+// containersReady tells whether the pod's containers are ready. A restarting agent is
+// not, and probing it would read its restart as both paths being down.
+func containersReady(pod *corev1.Pod) bool {
+	for _, c := range pod.Status.Conditions {
+		if c.Type == corev1.ContainersReady {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return false
 }
 
 // publish writes the report only when it changed or the heartbeat is due (Part L7).
 func (d *Daemon) publish(ctx context.Context) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+
+	// With no recent probe round, the verdicts are old. Let the report go stale so the
+	// router keeps its routes and the operator treats this node as silent.
+	if d.lastProbe.IsZero() || d.clock().Sub(d.lastProbe) > SilentAfterSeconds*time.Second {
+		if !d.staleLogged {
+			logf.FromContext(ctx).WithName("health-agent").Info("No successful probe round recently, letting the report go stale")
+			d.staleLogged = true
+		}
+		return nil
+	}
+	d.staleLogged = false
 
 	report := Report{Peers: make(map[string]PeerResult, len(d.primary))}
 	for name, state := range d.primary {

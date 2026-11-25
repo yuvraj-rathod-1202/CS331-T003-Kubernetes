@@ -25,6 +25,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -33,6 +34,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 func names(n int) []string {
@@ -154,8 +156,11 @@ func agentPod(node, ip, backup string) *corev1.Pod {
 			Name: "agent-" + node, Namespace: "kube-system",
 			Labels: map[string]string{"app": agentLabel},
 		},
-		Spec:   corev1.PodSpec{NodeName: node},
-		Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: ip},
+		Spec: corev1.PodSpec{NodeName: node},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning, PodIP: ip,
+			Conditions: []corev1.PodCondition{{Type: corev1.ContainersReady, Status: corev1.ConditionTrue}},
+		},
 	}
 	if backup != "" {
 		pod.Annotations = map[string]string{
@@ -316,5 +321,89 @@ func TestProbeTimeoutCoversBothRequests(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 280*time.Millisecond {
 		t.Fatalf("probe took %v, want about 200ms", elapsed)
+	}
+}
+
+func failingPodList() interceptor.Funcs {
+	return interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+		if _, ok := list.(*corev1.PodList); ok {
+			return fmt.Errorf("pod list unavailable")
+		}
+		return c.List(ctx, list, opts...)
+	}}
+}
+
+// When pods cannot be listed, the report must go stale instead of repeating old verdicts.
+func TestNoReportWrittenWhenProbingHasBeenFailingTooLong(t *testing.T) {
+	now := time.Now()
+	for name, tc := range map[string]struct {
+		lastProbe time.Time
+		wantWrite bool
+	}{
+		"never probed":  {time.Time{}, false},
+		"too old":       {now.Add(-31 * time.Second), false},
+		"recent enough": {now.Add(-5 * time.Second), true},
+	} {
+		c := fake.NewClientBuilder().WithObjects(nodeWith("a", "")).WithInterceptorFuncs(failingPodList()).Build()
+		d := &Daemon{Client: c, NodeName: "a", Probe: allOK, now: func() time.Time { return now }}
+		d.init()
+		d.primary["b"] = &streak{healthy: true}
+		d.lastProbe = tc.lastProbe
+		if err := d.round(context.Background(), time.Second, 3); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		node := &corev1.Node{}
+		if err := c.Get(context.Background(), client.ObjectKey{Name: "a"}, node); err != nil {
+			t.Fatal(err)
+		}
+		if _, written := node.Annotations[ReportAnnotation]; written != tc.wantWrite {
+			t.Fatalf("%s: report written=%v, want %v", name, written, tc.wantWrite)
+		}
+	}
+}
+
+// A peer agent that is restarting or not ready is not probed, and its state is held.
+func TestRoundSkipsTerminatingAndNotReadyPeers(t *testing.T) {
+	ready := func(pod *corev1.Pod, status corev1.ConditionStatus) *corev1.Pod {
+		pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.ContainersReady, Status: status}}
+		return pod
+	}
+	b := ready(agentPod("b", "10.0.0.2", "10.1.0.2"), corev1.ConditionTrue)
+	now := metav1.Now()
+	b.DeletionTimestamp = &now
+	b.Finalizers = []string{"test/hold"}
+	cNotReady := ready(agentPod("c", "10.0.0.3", "10.1.0.3"), corev1.ConditionFalse)
+	dReady := ready(agentPod("d", "10.0.0.4", ""), corev1.ConditionTrue)
+
+	raw, _ := json.Marshal(Report{Time: time.Now().Unix(), Peers: map[string]PeerResult{
+		"b": {Primary: false}, "c": {Primary: false},
+	}})
+	cl := fake.NewClientBuilder().WithObjects(
+		agentPod("a", "10.0.0.1", ""), b, cNotReady, dReady, nodeWith("a", string(raw)),
+	).Build()
+	var mu sync.Mutex
+	var probed []string
+	d := &Daemon{Client: cl, NodeName: "a", Probe: func(_ context.Context, ip string, _ time.Duration) bool {
+		mu.Lock()
+		probed = append(probed, ip)
+		mu.Unlock()
+		return true
+	}}
+	d.init()
+	d.seed(context.Background())
+	if err := d.round(context.Background(), time.Second, 3); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(probed, []string{"10.0.0.4"}) {
+		t.Fatalf("probed %v, want only d", probed)
+	}
+	report := publishedReport(t, cl, "a")
+	for _, peer := range []string{"b", "c"} {
+		if r, ok := report.Peers[peer]; !ok || r.Primary {
+			t.Fatalf("peer %s state not held: %+v (present %v)", peer, r, ok)
+		}
+	}
+	if !report.Peers["d"].Primary {
+		t.Fatalf("d: %+v", report.Peers["d"])
 	}
 }
