@@ -423,7 +423,7 @@ the first `200` in the client log. Route times are fault to route visible in tab
 | L10 | exp 1: `FailedOver` at +31 s | exp 2: 0 of 13 | Exp 3 differs, see notes |
 | L11 | n/a | n/a | Rules 90, 91, 100 and table 200 gone on all 3 nodes |
 | L12 | n/a | 0 | Route present at every 1 s sample (25 s) |
-| L12b | n/a | | |
+| L12b | n/a | 0 of 45 | B's agent restarted during L1: A's and B's routes present at every 1 s sample (30 s); the new agent kept A primary:false. No NoPath events during the agent rollout |
 | L13 | as L1 and L3 | 0 after recovery | Pod-IP and Service clients both recovered |
 
 Notes on the run:
@@ -450,6 +450,7 @@ Notes on the run:
   `FailedOver` within 1 s. `calico-node` was not restarted in exp 3 because the existing
   2-minute recovery backoff after exp 1 was still running (existing behaviour).
 - L12: the restarted agent kept m03 `primary:false` (seeded from its last report).
+- Re-run on the fixed build (router change logging, agent skips terminating peers): L1 route at +7 s, 0 failures; L2 route removed at +8 s, 0 failures; router logged "Changed path" for both transitions.
 
 ## 8. Limits we know about
 
