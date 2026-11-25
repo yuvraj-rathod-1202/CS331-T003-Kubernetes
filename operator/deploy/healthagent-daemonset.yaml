@@ -6,6 +6,10 @@
 #   go build -o bin/healthagent ./cmd/healthagent
 #   docker build -f Dockerfile.healthagent -t cni-health-agent:dev bin
 #   minikube -p k8s-experiments image load cni-health-agent:dev
+# Warning: `image load` does not replace an image whose tag already exists on the nodes.
+# For an existing tag, load it into each node's Docker instead:
+#   docker save cni-health-agent:dev | docker exec -i <node> docker load
+# then `kubectl -n kube-system rollout restart ds/cni-health-agent`.
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:

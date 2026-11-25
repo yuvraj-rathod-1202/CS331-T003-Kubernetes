@@ -72,7 +72,7 @@ probes cross the same data path as application pods.
   is a small request and a 1400-byte one: a path with a too-small MTU drops full-size
   segments while small requests still pass.
 - **All peers, every round.** One round takes at most one probe timeout, because the
-  probes run in parallel. Each node probes all N-1 peers, so a round costs N² probes
+  probes run in parallel. Each node probes all N-1 peers, so a round costs N(N-1) probes
   per path across the cluster (6 on 3 nodes). That is fine up to about 50 nodes. Every
   node needs its own fresh verdict on every peer, because the link router steers from it.
 - **Starts from its last report.** A restarted agent reads its own Node's
@@ -266,7 +266,21 @@ still applies, because a rerouted packet enters the pod through its Calico inter
 ### Measured results
 
 See [`experiments/link-steering-experiment.md`](../../experiments/link-steering-experiment.md),
-section 7. The results table is not filled in yet.
+section 7, has the full table. Summary (3 nodes, 2026-11-25):
+
+| Case | Result |
+|---|---|
+| L1 | Steered to `backup` in 7 s (pod IP) and 8 s (Service). 0 failures after recovery |
+| L2 | Route removed 6 to 8 s after the fault. One Service request lost in one of two runs |
+| L3 | `relay` via the third node in about 7 s. 0 failures after recovery |
+| L4 | `linkRelay: false`: `none`, `LinksReachable=False`, `NoPath` Events, no node blamed |
+| L4b | A blamed as before (taint, `calico-node` restart). All 4 pairs with A `none` |
+| L5 | One-way fault: both ends steered in about 5 s. 0 failures after |
+| L6 | 2 MB checksum correct over the reroute and across a fault during a download |
+| L7 | 0 route changes in table 200 over 10 minutes |
+| L8, L12 | Router or agent pod deleted during L1: route present at every sample, 0 failures |
+| L10 | Node-level experiments 1 and 2 as recorded. Experiment 3 differs only by the existing recovery backoff |
+| L11 | `--cleanup` left no rules and an empty table 200 on all nodes |
 
 ### Link steering limits
 
@@ -276,6 +290,10 @@ section 7. The results table is not filled in yet.
   behaviour), so B's pods see the node address, not the client pod's.
 - On 3 nodes, any fault that leaves a pair with no relay also isolates a node at the
   node level, so the two layers act together.
+- A restarting health agent looks like both paths down to the other nodes, because their
+  probes target the agent pod. Seen once as a 1 s `NoPath` and `PathRestored` pair.
+- When several `NoPath` Events are emitted in the same instant, one can be missing from the
+  API (legacy recorder event names can collide). The condition still lists every pair.
 - Detection takes the agent's streak (`failureThreshold` x `probeIntervalSeconds`, about
   6 s) plus report and reconcile time.
 - A one-way fault makes both ends steer, because probes are round trips.

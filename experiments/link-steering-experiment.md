@@ -2,7 +2,7 @@
 
 How to set up and run the link steering experiments (L1 to L13). The design is in
 [`operator/docs/cni-resilience.md`](../operator/docs/cni-resilience.md), section "Per-link
-steering". The results tables in section 7 are empty until the runs are done.
+steering". Measured results are in section 7.
 
 ## 1. The idea in one paragraph
 
@@ -53,7 +53,7 @@ from your machine (`make run`), so it needs no image.
 
 ```bash
 cd operator
-CGO_ENABLED=0 go build -o bin/healthagent ./cmd/healthagent
+GOOS=linux CGO_ENABLED=0 go build -o bin/healthagent ./cmd/healthagent
 docker build -f Dockerfile.healthagent -t cni-health-agent:dev bin
 minikube -p k8s-experiments image load cni-health-agent:dev
 GOOS=linux CGO_ENABLED=0 go build -o bin/linkrouter ./cmd/linkrouter
@@ -61,6 +61,20 @@ docker build -f Dockerfile.linkrouter -t cni-link-router:dev bin
 minikube -p k8s-experiments image load cni-link-router:dev
 cd ..
 ```
+
+`minikube image load` does not replace an image whose tag already exists on the nodes
+(not even with `--overwrite=true`), so the pods keep running the old agent. The router
+image loaded fine only because its tag was new. For an existing tag, load it into each
+node's Docker directly, then check the build time:
+
+```bash
+for n in k8s-experiments k8s-experiments-m02 k8s-experiments-m03; do
+  docker save cni-health-agent:dev | docker exec -i $n docker load
+  docker exec $n docker image inspect cni-health-agent:dev --format '{{.Created}}'
+done
+```
+
+The `Created` time must be the time of your build. Restart the DaemonSet afterwards (3.2).
 
 ### 3.2 Deploy
 
@@ -293,11 +307,12 @@ kubectl exec link-client-pod -- sh -c 'curl -s -m 30 http://'$TARGET_IP'/big -o 
 ```
 
 The checksum must equal the one on the target, and the size must be 2097152 bytes
-(`ls -l /tmp/big1`). This covers MTU over the reroute.
+(`kubectl exec link-client-pod -- ls -l /tmp/big1`, run in the pod, because the file is there). This covers MTU over the reroute.
 
 Part 2, a download open across the fault. Remove the L1 fault first and wait for `primary`.
 Start a slow download in the background, so it takes about 20 s, then inject the L1 fault
-a few seconds later:
+a few seconds later. The background job, the fault injection and `wait` must run in the
+same shell:
 
 ```bash
 kubectl exec link-client-pod -- sh -c 'curl -s --limit-rate 100k -m 120 http://'$TARGET_IP'/big -o /tmp/big2; echo exit=$?; md5sum /tmp/big2' > /tmp/l6-part2.txt &
@@ -312,8 +327,9 @@ download is still running (it takes about 20 s). If it finished before the fault
 with a lower `--limit-rate`. Record both parts.
 
 **L7.** Hold L1 for 10 minutes. On A run `docker exec k8s-experiments-m02 timeout 600 ip monitor route`
-before injecting the fault, and count the events in table 200. The router does not log
-route changes, so this is the count. Check A's agent still reports A to B primary down:
+before injecting the fault, in a second terminal, and count the lines that contain
+`table 200`. (`ip monitor route table 200` is not valid, so filter with `grep 'table 200'`.)
+The router does not log route changes, so this is the count. Check A's agent still reports A to B primary down:
 `kubectl get node k8s-experiments-m02 -o jsonpath='{.metadata.annotations.cniresilience\.cn-operator/path-report}'`.
 
 **L8.** `kubectl -n kube-system delete pod -l app=cni-link-router --field-selector spec.nodeName=k8s-experiments-m02`.
@@ -378,30 +394,58 @@ kubectl get pods -o name | grep node-debugger | xargs -r kubectl delete
 ```
 
 The `ip` checks print nothing when the node is clean. This is also the L11 check. To
-remove the whole cluster: `minikube stop -p k8s-experiments`.
+stop the cluster use `minikube stop -p k8s-experiments`. To remove it use
+`minikube delete -p k8s-experiments`.
 
 ## 7. Results
 
-Not run yet. Fill in time to steer (seconds from fault injection to the first `200`),
-failed requests (lines with a code other than `200` in the client log, after the steer),
-and notes.
+Measured on 2026-11-25 on the lab cluster (3 nodes, A = `k8s-experiments-m02`,
+B = `k8s-experiments-m03`, C = `k8s-experiments`), with `probeIntervalSeconds: 2`,
+`probeTimeoutSeconds: 1`, `failureThreshold: 3`. The operator ran from the branch with
+`go run ./cmd/main.go --controllers=cniresilience`. Time to steer is fault injection to
+the first `200` in the client log. Route times are fault to route visible in table 200.
 
 | Case | Time to steer | Failed requests | Notes |
 |---|---|---|---|
-| L1 | | | |
-| L2 | | | |
-| L3 | | | |
-| L4 | | | |
-| L4b | | | |
-| L5 | | | |
-| L6 | | | |
-| L7 | | | |
-| L8 | | | |
-| L9 | | | |
-| L10 | | | |
-| L11 | | | |
-| L12 | | | |
-| L13 | | | |
+| L1 | 7 s (pod IP), 8 s (Service) | 0 after recovery | Route on A at +8 s. A to B `backup` |
+| L2 | route gone after 6 s / 8 s | run 1: 1 Service request; run 2: 0 | See note D |
+| L3 | about 7 s | 0 after recovery | Relay route at +8 s. `relay` via C |
+| L4 | n/a, no path by design | all `000` while faulted | `none`, `LinksReachable=False`, `Degraded`, no taint. `PathRestored` after removal, condition True after 9 s |
+| L4b | n/a | n/a | A blamed: 1 pod out of the Service, taint, one `calico-node` restart. 4 pairs `none`. Healthy after removal, taint gone after 8 s |
+| L5 | about 5 s | 0 after recovery | A and B both steered to `backup` |
+| L6 | n/a | 0 | 2 MB checksum correct. Slow download open across the fault: `exit=0`, checksum correct |
+| L7 | n/a | 0 in 600 s | 0 route events in table 200 during the hold |
+| L8 | n/a | 0 | Route present at every 1 s sample (20 s) |
+| L9 | n/a | n/a | Client `000` over the reroute with the policy, `200` after deleting it |
+| L10 | exp 1: `FailedOver` at +31 s | exp 2: 0 of 13 | Exp 3 differs, see notes |
+| L11 | n/a | n/a | Rules 90, 91, 100 and table 200 gone on all 3 nodes |
+| L12 | n/a | 0 | Route present at every 1 s sample (25 s) |
+| L13 | as L1 and L3 | 0 after recovery | Pod-IP and Service clients both recovered |
+
+Notes on the run:
+
+- L1: A has `172.16.146.0/26 via 10.244.2.0 dev flannel.1 proto 100 onlink`. B steered its
+  own direction too, and C's table 200 stayed empty. Phase `Degraded` comes from the
+  existing node-level check, not from steering.
+- L3: A and B route the peer's block `via 192.168.67.2 dev tunl0 onlink`. C needs no route.
+- C. A restarting health agent looks like "both paths down" to the other nodes, because
+  their probes target the agent pod. Seen once: a 1 s `NoPath` and `PathRestored` pair for
+  m03 to `k8s-experiments` during an agent rollout restart.
+- D. L2 run 1 lost one Service request (`000`) at the second the route was removed, none
+  to the pod IP. It was not reproduced in run 2.
+- E. When several `NoPath` Events are emitted in the same instant, one can be missing from
+  the API although the operator logs it (L4: 1 of 2 stored; L4b: 3 of 4). Likely an
+  event-name collision: the legacy recorder names events `<object>.<UnixNano hex>`, and the
+  operator ran on Windows, whose clock is coarse. The condition always listed every pair.
+- L6: part 1 fetched 2097152 bytes with the matching md5. Part 2 ran at 60 KB/s, started
+  6 s before the L1 fault and finished 28 s after it.
+- L7: A's agent still reports m03 `primary:false`.
+- L10: exp 1 as recorded (shadow `10.244.2.10`, taint, one `calico-node` restart). Exp 2:
+  `Healthy` at +5 s, shadow and taint gone. Exp 3: tainted at +28 s, message
+  `autoFailover disabled`, no shadow, 9 of 29 requests failed. Enabling it gave
+  `FailedOver` within 1 s. `calico-node` was not restarted in exp 3 because the existing
+  2-minute recovery backoff after exp 1 was still running (existing behaviour).
+- L12: the restarted agent kept m03 `primary:false` (seeded from its last report).
 
 ## 8. Limits we know about
 
