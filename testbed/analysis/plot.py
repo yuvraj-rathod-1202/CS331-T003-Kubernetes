@@ -115,14 +115,17 @@ def recovery_cdf(rows, out, fault, label):
     ax.set_xlabel("Time from fault to recovery (s)")
     ax.set_ylabel("Fraction of runs")
     ax.set_title("Service recovery: %s" % label, loc="left")
-    ax.legend(frameon=False, loc="lower right")
+    ax.legend(frameon=False, loc="center")
     save(fig, out, "recovery_cdf_%s" % fault)
 
 
-def grouped_bars(rows, out, metric, ylabel, title, name, scale=1.0, ylim=None, tail=95):
+def grouped_bars(rows, out, metric, ylabel, title, name, scale=1.0, ylim=None, tail=95,
+                 only=None):
     """Median bar with a whisker to the bad tail: p95 for times, p5 for ratios."""
     data = groups(rows, metric)
     configs, faults = present(rows)
+    if only:
+        faults = [f for f in faults if f[0] in only]
     n = len(configs)
     width = 0.8 / max(n, 1)
     fig, ax = plt.subplots(figsize=(WIDTH, 2.0))
@@ -149,7 +152,7 @@ def grouped_bars(rows, out, metric, ylabel, title, name, scale=1.0, ylim=None, t
         ax.set_ylim(*ylim)
     ax.grid(axis="x", visible=False)
     ax.set_title(title, loc="left")
-    ax.legend(frameon=False, ncol=2, loc="upper left", bbox_to_anchor=(0, -0.32))
+    ax.legend(frameon=False, ncol=2, loc="upper left", bbox_to_anchor=(0, -0.42))
     save(fig, out, name)
 
 
@@ -164,7 +167,8 @@ def main(argv):
     for fkey, flabel in faults:
         recovery_cdf(rows, out, fkey, flabel)
     grouped_bars(rows, out, "http_svc_recovery_s", "Recovery time (s)",
-                 "Service recovery (median, p95 whisker)", "recovery_bars")
+                 "Service recovery (median, p95 whisker)", "recovery_bars",
+                 only=("link-cut", "link-cut-both", "overlay-cut", "node-cni"))
     grouped_bars(rows, out, "http_svc_avail", "Successful probes (%)",
                  "Service availability during the fault (median, p5 whisker)",
                  "availability", scale=100.0, ylim=(0, 105), tail=5)
