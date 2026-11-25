@@ -64,12 +64,15 @@ does not fix the network; the usual fix is a manual restart or a reboot.
 - Every protected pod has `eth0` on **Calico** (`172.16.0.0/16`, IPIP) and `net1` on
   **Flannel** (`10.244.0.0/16`, VXLAN), added by **Multus**. The two share no agent,
   address range or tunnel.
-- A **health agent** on each node probes one peer per round, over both networks, with a
-  small and a large request. It writes the results on its Node.
+- A **health agent** on each node probes every peer each round, over both networks, with
+  a small and a large request. It writes the results on its Node.
 - The **operator** blames a node only when the probe pattern proves it. It then turns off
   the pods' readiness gate (Kubernetes drops `eth0` from the Service) and adds a
   **shadow EndpointSlice** with their `net1` addresses. It taints the node, restarts
   `calico-node` once, and fails back when every probe works again.
+- A **link router** on each node steers traffic when only the link between two nodes is
+  broken. It routes that peer's Calico pod range over Flannel, or through a third node
+  (`cmd/linkrouter`, [experiment guide](experiments/link-steering-experiment.md)).
 
 **Result.** On a 3-node cluster a broken primary path was detected in 10–31 s, then all
 requests succeeded over Flannel. Failback took about 10 s with no failed request.
@@ -86,12 +89,14 @@ operator/
 ├── cmd/ipam-agent/            # IPAM node agent
 ├── cmd/ipam-sim/              # IPAM simulator (runs the real planner)
 ├── cmd/healthagent/           # CNI health agent
+├── cmd/linkrouter/            # CNI link router (per-link path steering)
 ├── internal/controller/ipam/            # controller, buddy/, agent/, sim/
-├── internal/controller/cniresilience/   # controller, healthagent/, failover/, recovery/
-├── deploy/                    # ipam-agent, healthagent, calico-primary-pool, flannel-backup, multus-nad
+├── internal/controller/cniresilience/   # controller, healthagent/, failover/, recovery/, linkrouter/
+├── deploy/                    # ipam-agent, healthagent, linkrouter-daemonset, calico-primary-pool, flannel-backup, multus-nad
 ├── config/samples/            # ipam_sample.yaml, cniresilience_sample.yaml
 └── docs/                      # design docs and IPAM evaluation results
 experiments/cni-resilience-experiment.md      # CNI resilience setup and experiments
+experiments/link-steering-experiment.md       # per-link steering experiments (L1-L13)
 experiments/manifests/resilience-workload.yaml
 k8s-visualizer/                # dashboard: /project1 (IPAM), /project2 (CNI resilience)
 report/project2/               # report and figures
@@ -108,8 +113,9 @@ report/project2/               # report and figures
 | [`operator/docs/ipam-evaluation.md`](operator/docs/ipam-evaluation.md) | Simulator results against fixed and Calico-style allocation |
 | [`operator/docs/ipam-phase0-assumptions.md`](operator/docs/ipam-phase0-assumptions.md) | Assumptions tested on a real cluster, cluster flags |
 | [`operator/docs/ipam-decision-log.md`](operator/docs/ipam-decision-log.md) | Design decisions and what turned out wrong |
-| [`operator/docs/cni-resilience.md`](operator/docs/cni-resilience.md) | Dual-CNI design: health agent, blame rule, failover, recovery |
+| [`operator/docs/cni-resilience.md`](operator/docs/cni-resilience.md) | Dual-CNI design: health agent, blame rule, failover, recovery, per-link steering |
 | [`experiments/cni-resilience-experiment.md`](experiments/cni-resilience-experiment.md) | Cluster setup and the 10 measured fault experiments |
+| [`experiments/link-steering-experiment.md`](experiments/link-steering-experiment.md) | Per-link steering: setup and experiments L1–L13 (results not recorded yet) |
 | [`operator/README.md`](operator/README.md) | Building, testing and running the operator |
 | [`k8s-visualizer/README.md`](k8s-visualizer/README.md) | Dashboard pages |
 
