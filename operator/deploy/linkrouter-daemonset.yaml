@@ -1,0 +1,97 @@
+# DaemonSet for the CNI link router.
+#
+# The router runs in the host network namespace with only NET_ADMIN. It reads the
+# health agents' reports from the Node annotations and installs policy routing
+# (table 200, rules 90/91/100) that steers peer traffic onto the backup or relay
+# path. Build it with:
+#   GOOS=linux CGO_ENABLED=0 go build -o bin/linkrouter ./cmd/linkrouter
+#   docker build -f Dockerfile.linkrouter -t cni-link-router:dev bin
+#   minikube -p k8s-experiments image load cni-link-router:dev
+#
+# Uninstall: delete the DaemonSet, then remove the routes and rules on each node.
+# The debug pod shares the host network namespace:
+#   kubectl -n kube-system delete ds cni-link-router
+#   kubectl debug node/<node> --image=cni-link-router:dev --profile=netadmin -- /linkrouter --cleanup
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: cni-link-router
+  namespace: kube-system
+  labels:
+    app: cni-link-router
+    app.kubernetes.io/component: link-router
+    app.kubernetes.io/part-of: cniresilience
+spec:
+  selector:
+    matchLabels:
+      app: cni-link-router
+  template:
+    metadata:
+      labels:
+        app: cni-link-router
+        app.kubernetes.io/component: link-router
+    spec:
+      serviceAccountName: cni-link-router
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      priorityClassName: system-node-critical
+      tolerations:
+        # Run on all nodes, including control plane and tainted ones
+        - operator: Exists
+      containers:
+        - name: link-router
+          image: cni-link-router:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsUser: 0
+            capabilities:
+              add: ["NET_ADMIN"]
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cni-link-router
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cni-link-router
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["crd.projectcalico.org"]
+    resources: ["blockaffinities"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["remediation.cn-operator.yuvraj-rathod-1202.github.io"]
+    resources: ["cniresiliences"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cni-link-router
+subjects:
+  - kind: ServiceAccount
+    name: cni-link-router
+    namespace: kube-system
+roleRef:
+  kind: ClusterRole
+  name: cni-link-router
+  apiGroup: rbac.authorization.k8s.io

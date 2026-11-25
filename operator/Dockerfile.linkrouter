@@ -1,0 +1,5 @@
+FROM gcr.io/distroless/static:nonroot
+COPY linkrouter /linkrouter
+# NET_ADMIN in the host network namespace needs root.
+USER 0:0
+ENTRYPOINT ["/linkrouter"]
