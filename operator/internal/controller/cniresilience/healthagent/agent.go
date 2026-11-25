@@ -21,8 +21,8 @@ limitations under the License.
 // Node. The operator only reads those annotations (this file), so it needs no route
 // to the nodes and no raw sockets, and can run anywhere.
 //
-// The probe pattern is the rotating directed ring from deep-dive Part L: each round,
-// node i probes node (i+r) mod N, so one round costs exactly N probes.
+// Each round, every agent probes every other agent on both paths, so each node's
+// report holds a fresh verdict on every peer.
 package healthagent
 
 import (
@@ -167,6 +167,23 @@ type NodeHealthStatus struct {
 	Note string
 }
 
+// ParseReport returns the node's report, or false if the annotation is missing,
+// malformed, or older than SilentAfterSeconds. Callers treat all three as silence.
+func ParseReport(node *corev1.Node, now time.Time) (Report, bool) {
+	raw, ok := node.Annotations[ReportAnnotation]
+	if !ok {
+		return Report{}, false
+	}
+	var report Report
+	if err := json.Unmarshal([]byte(raw), &report); err != nil {
+		return Report{}, false
+	}
+	if now.Unix()-report.Time > SilentAfterSeconds {
+		return Report{}, false
+	}
+	return report, true
+}
+
 // ReadNodeHealth turns the agents' reports into per-node health.
 func ReadNodeHealth(ctx context.Context, c client.Client, now time.Time) (map[string]*NodeHealthStatus, error) {
 	nodeList := &corev1.NodeList{}
@@ -179,16 +196,8 @@ func ReadNodeHealth(ctx context.Context, c client.Client, now time.Time) (map[st
 	var primary, backup []Edge
 	for _, node := range nodeList.Items {
 		names = append(names, node.Name)
-		raw, ok := node.Annotations[ReportAnnotation]
+		report, ok := ParseReport(&node, now)
 		if !ok {
-			silent[node.Name] = true
-			continue
-		}
-		var report Report
-		if err := json.Unmarshal([]byte(raw), &report); err != nil {
-			return nil, fmt.Errorf("parse report on node %s: %w", node.Name, err)
-		}
-		if now.Unix()-report.Time > SilentAfterSeconds {
 			silent[node.Name] = true
 			continue
 		}
