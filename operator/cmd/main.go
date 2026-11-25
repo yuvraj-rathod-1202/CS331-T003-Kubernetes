@@ -284,7 +284,8 @@ func main() {
 
 	// Problem 2: CNI Resilience Controller (Lead: Yuvraj, with Deep & Arpan)
 	if enabled["cniresilience"] {
-		cniResReconciler := cniresctrl.NewCNIResilienceController(mgr.GetClient(), mgr.GetScheme())
+		cniResReconciler := cniresctrl.NewCNIResilienceController(mgr.GetClient(), mgr.GetScheme(),
+			mgr.GetEventRecorderFor("cniresilience"))
 		if err := cniResReconciler.SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "Failed to create controller", "controller", "cniresilience")
 			os.Exit(1)

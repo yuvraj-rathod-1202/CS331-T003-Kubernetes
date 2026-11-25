@@ -31,8 +31,10 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -75,6 +77,9 @@ type CNIResilienceController struct {
 	client.Client
 	Scheme *runtime.Scheme
 
+	// recorder emits the NoPath and PathRestored Events.
+	recorder record.EventRecorder
+
 	recoveryManager *recovery.Manager
 	failoverManager *failover.Manager
 
@@ -90,10 +95,11 @@ type CNIResilienceController struct {
 }
 
 // NewCNIResilienceController creates the controller and wires sub-components.
-func NewCNIResilienceController(c client.Client, scheme *runtime.Scheme) *CNIResilienceController {
+func NewCNIResilienceController(c client.Client, scheme *runtime.Scheme, recorder record.EventRecorder) *CNIResilienceController {
 	return &CNIResilienceController{
 		Client:              c,
 		Scheme:              scheme,
+		recorder:            recorder,
 		recoveryManager:     recovery.NewManager(c),
 		failoverManager:     failover.NewManager(c),
 		lastRecoveryAttempt: make(map[string]time.Time),
@@ -106,6 +112,7 @@ func NewCNIResilienceController(c client.Client, scheme *runtime.Scheme) *CNIRes
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;delete
 // +kubebuilder:rbac:groups="",resources=pods/status,verbs=get;patch
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch;create;update;patch;delete
 
@@ -192,6 +199,25 @@ func (r *CNIResilienceController) Reconcile(ctx context.Context, req ctrl.Reques
 	cr.Status.NodeStatuses = statuses
 	cr.Status.FailoverActive = len(failedOver) > 0
 	cr.Status.Phase = computePhase(cr.Status.FailoverActive, healthByNode)
+
+	var nodeList corev1.NodeList
+	if err := r.List(ctx, &nodeList); err != nil {
+		return ctrl.Result{}, err
+	}
+	links, entered, left := linkStatuses(nodeList.Items, time.Now(), cr.Status.Links)
+	cr.Status.Links = links
+	meta.SetStatusCondition(&cr.Status.Conditions, linksCondition(links, cr.Generation))
+	if cr.Status.Phase == phaseHealthy && len(noPathPairs(links)) > 0 {
+		cr.Status.Phase = phaseDegraded
+	}
+	for _, pair := range entered {
+		logger.Info("Link has no path", "from", pair[0], "to", pair[1])
+		r.recorder.Eventf(&cr, corev1.EventTypeWarning, remediationv1alpha1.ReasonNoPath, "No path from %s to %s", pair[0], pair[1])
+	}
+	for _, pair := range left {
+		logger.Info("Link has a path again", "from", pair[0], "to", pair[1])
+		r.recorder.Eventf(&cr, corev1.EventTypeNormal, "PathRestored", "Path from %s to %s restored", pair[0], pair[1])
+	}
 	return r.updateStatusAndRequeue(ctx, original, &cr)
 }
 
