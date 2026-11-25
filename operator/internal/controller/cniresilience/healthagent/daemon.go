@@ -195,11 +195,18 @@ func (d *Daemon) round(ctx context.Context, timeout time.Duration, threshold int
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			o := outcome{primary: check(ctx, p.primaryIP, timeout)}
+			var o outcome
+			var inner sync.WaitGroup
 			if p.backupIP != "" {
 				o.hasBackup = true
-				o.backup = check(ctx, p.backupIP, timeout)
+				inner.Add(1)
+				go func() {
+					defer inner.Done()
+					o.backup = check(ctx, p.backupIP, timeout)
+				}()
 			}
+			o.primary = check(ctx, p.primaryIP, timeout)
+			inner.Wait()
 			resultMu.Lock()
 			results[name] = o
 			resultMu.Unlock()
@@ -266,12 +273,14 @@ func (d *Daemon) publish(ctx context.Context) error {
 	return nil
 }
 
-// probe needs both requests to work, so a path that passes small packets but drops
+// probe needs both requests to work, and both share one timeout, so a path that passes small packets but drops
 // full-size ones counts as broken. Keep-alives are off because every request must open
 // a new connection: Calico lets established connections through ahead of later rules,
 // so a reused connection keeps working on a path where new ones fail.
 func probe(ctx context.Context, ip string, timeout time.Duration) bool {
-	httpClient := &http.Client{Timeout: timeout, Transport: &http.Transport{DisableKeepAlives: true}}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	httpClient := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
 	address := net.JoinHostPort(ip, strconv.Itoa(Port))
 	for _, path := range []string{"/small", "/large"} {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+address+path, nil)

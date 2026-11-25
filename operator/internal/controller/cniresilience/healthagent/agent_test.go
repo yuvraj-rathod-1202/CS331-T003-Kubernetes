@@ -273,3 +273,48 @@ func TestParseReport(t *testing.T) {
 		}
 	}
 }
+
+// A round must cost about one probe, however many peers and paths there are.
+func TestRoundRunsAllProbesConcurrently(t *testing.T) {
+	c := fake.NewClientBuilder().WithObjects(
+		agentPod("a", "10.0.0.1", ""), agentPod("b", "10.0.0.2", "10.1.0.2"), agentPod("c", "10.0.0.3", "10.1.0.3"),
+		nodeWith("a", ""),
+	).Build()
+	d := &Daemon{Client: c, NodeName: "a", Probe: func(context.Context, string, time.Duration) bool {
+		time.Sleep(200 * time.Millisecond)
+		return true
+	}}
+	d.init()
+	start := time.Now()
+	if err := d.round(context.Background(), 200*time.Millisecond, 3); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed > 350*time.Millisecond {
+		t.Fatalf("round took %v, want well under 2 probes", elapsed)
+	}
+}
+
+// Both requests of one probe share a single timeout.
+func TestProbeTimeoutCoversBothRequests(t *testing.T) {
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(150 * time.Millisecond)
+		if r.URL.Path == "/large" {
+			_, _ = w.Write(make([]byte, largeBodyBytes))
+		}
+	}))
+	listener, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(Port))
+	if err != nil {
+		t.Skipf("port %d busy: %v", Port, err)
+	}
+	server.Listener = listener
+	server.Start()
+	defer server.Close()
+
+	start := time.Now()
+	if probe(context.Background(), "127.0.0.1", 200*time.Millisecond) {
+		t.Fatal("probe passed although both requests together exceed the timeout")
+	}
+	if elapsed := time.Since(start); elapsed > 280*time.Millisecond {
+		t.Fatalf("probe took %v, want about 200ms", elapsed)
+	}
+}
