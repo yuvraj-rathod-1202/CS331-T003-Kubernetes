@@ -3,7 +3,7 @@
 # The agent is a normal pod, not hostNetwork, so its probes cross the real pod data
 # path. It answers on port 9100, probes every peer each round, and writes results to an
 # annotation on its own Node. Build it with:
-#   go build -o bin/healthagent ./cmd/healthagent
+#   GOOS=linux CGO_ENABLED=0 go build -o bin/healthagent ./cmd/healthagent
 #   docker build -f Dockerfile.healthagent -t cni-health-agent:dev bin
 #   minikube -p k8s-experiments image load cni-health-agent:dev
 # Warning: `image load` does not replace an image whose tag already exists on the nodes.

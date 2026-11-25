@@ -77,11 +77,19 @@ probes cross the same data path as application pods.
   node needs its own fresh verdict on every peer, because the link router steers from it.
 - **Starts from its last report.** A restarted agent reads its own Node's
   `path-report`. If it is younger than 30 s, each peer starts in the state it had, with
-  the streak at `failureThreshold`, so one opposite result does not flip it. Otherwise
+  a streak at run 0 in that state, so it takes `failureThreshold` opposite results to flip it. Otherwise
   it starts healthy. Without this, every router would drop its routes for 6-10 s after
   an agent restart while the link is still broken.
 - **Streaks.** A path flips state only after `failureThreshold` identical results in
   a row. One lost packet or one lucky reply changes nothing.
+- **Restarting peers are held.** A peer agent pod that is terminating, or whose
+  `ContainersReady` condition is not true, is not probed that round. Its state stays as
+  it was, so a restart is not read as both paths down.
+- **Stale on purpose when blind.** If the agent cannot list agent pods, it logs
+  `Listing agent pods failed`, and once no round has listed pods for 30 s it stops
+  writing its report (`No successful probe round recently, letting the report go stale`).
+  The report then goes stale, the router keeps its routes, and the operator treats the
+  node as silent, instead of everyone trusting verdicts that are no longer being measured.
 - **Report.** The agent writes the latest result per peer to its own Node annotation,
   and rewrites it at least every 10 s. A report older than 30 s means the node is
   *silent*.
@@ -265,8 +273,9 @@ still applies, because a rerouted packet enters the pod through its Calico inter
 
 ### Measured results
 
-See [`experiments/link-steering-experiment.md`](../../experiments/link-steering-experiment.md),
-section 7, has the full table. Summary (3 nodes, 2026-11-25):
+Section 7 of
+[`experiments/link-steering-experiment.md`](../../experiments/link-steering-experiment.md)
+has the full table. Summary (3 nodes, 2026-11-25):
 
 | Case | Result |
 |---|---|
@@ -290,8 +299,14 @@ section 7, has the full table. Summary (3 nodes, 2026-11-25):
   behaviour), so B's pods see the node address, not the client pod's.
 - On 3 nodes, any fault that leaves a pair with no relay also isolates a node at the
   node level, so the two layers act together.
-- A restarting health agent looks like both paths down to the other nodes, because their
-  probes target the agent pod. Seen once as a 1 s `NoPath` and `PathRestored` pair.
+- A restarting health agent used to look like both paths down to the other nodes, because
+  their probes target the agent pod (seen once as a 1 s `NoPath` and `PathRestored` pair).
+  Agents now skip peers that are terminating or not `ContainersReady` and hold their
+  state. A peer that is down without Kubernetes noticing is still probed and flips as usual.
+- The router logs each path change at Info (`Changed path` with `peer`, `from`, `to`,
+  `via`), a non-primary path that installs no route (`Path has no route`: no Calico
+  blocks, no flannel address, or a relay with no internal IP), and the start and end of
+  a stale own report. Each is logged when the state changes, not on every pass.
 - When several `NoPath` Events are emitted in the same instant, one can be missing from the
   API (legacy recorder event names can collide). The condition still lists every pair.
 - Detection takes the agent's streak (`failureThreshold` x `probeIntervalSeconds`, about
@@ -330,6 +345,13 @@ flowing, and after a restart it reads the state back and carries on.
 - A frozen node is no faster than plain Kubernetes: a pod's Ready is computed by the
   kubelet on its own node.
 - Each pod uses two addresses, and each node runs two CNI agents.
+- Any TCP traffic to or from port 9100 is never steered, because the probe exclusion rules
+  (90 and 91) send it to the main table. This includes other software on 9100, such as
+  node-exporter.
+- A pod whose IP Calico borrowed from another node's block is steered by the block's
+  owner, not by the node the pod runs on.
+- Rule preferences 90, 91 and 100, route table 200 and route protocol 100 are reserved
+  for the router. Do not use them for other routing.
 - Not built: same IP on both interfaces (Layer 2 takeover), Multipath TCP.
 
 ## Try it

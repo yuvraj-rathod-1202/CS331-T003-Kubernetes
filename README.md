@@ -115,7 +115,7 @@ report/project2/               # report and figures
 | [`operator/docs/ipam-decision-log.md`](operator/docs/ipam-decision-log.md) | Design decisions and what turned out wrong |
 | [`operator/docs/cni-resilience.md`](operator/docs/cni-resilience.md) | Dual-CNI design: health agent, blame rule, failover, recovery, per-link steering |
 | [`experiments/cni-resilience-experiment.md`](experiments/cni-resilience-experiment.md) | Cluster setup and the 10 measured fault experiments |
-| [`experiments/link-steering-experiment.md`](experiments/link-steering-experiment.md) | Per-link steering: setup and experiments L1–L13 (results not recorded yet) |
+| [`experiments/link-steering-experiment.md`](experiments/link-steering-experiment.md) | Per-link steering: setup and experiments L1–L13 (results in section 7) |
 | [`operator/README.md`](operator/README.md) | Building, testing and running the operator |
 | [`k8s-visualizer/README.md`](k8s-visualizer/README.md) | Dashboard pages |
 

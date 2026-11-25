@@ -7,6 +7,10 @@
 #   GOOS=linux CGO_ENABLED=0 go build -o bin/linkrouter ./cmd/linkrouter
 #   docker build -f Dockerfile.linkrouter -t cni-link-router:dev bin
 #   minikube -p k8s-experiments image load cni-link-router:dev
+# Warning: `image load` does not replace an image whose tag already exists on the nodes.
+# For an existing tag, load it into each node's Docker instead:
+#   docker save cni-link-router:dev | docker exec -i <node> docker load
+# then `kubectl -n kube-system rollout restart ds/cni-link-router`.
 #
 # Uninstall: delete the DaemonSet, then remove the routes and rules on each node.
 # The debug pod shares the host network namespace:

@@ -262,6 +262,7 @@ faults). Record each result in section 7.
 | L10 | Regression: experiments 1 to 3 of the first guide | Same outcomes as recorded there |
 | L11 | `--cleanup` | Table 200 empty, rules 90, 91 and 100 gone |
 | L12 | Restart the health agent on A during L1 | A's steering route stays. 0 failed requests |
+| L12b | Restart B's health agent during L1 | A's route to B stays, 0 failed requests |
 | L13 | During L1 and again during L3: Service traffic and direct pod-IP traffic, separately | Both succeed (checks that Service masquerade does not break the reroute) |
 
 ### Procedures
@@ -329,7 +330,7 @@ with a lower `--limit-rate`. Record both parts.
 **L7.** Hold L1 for 10 minutes. On A run `docker exec k8s-experiments-m02 timeout 600 ip monitor route`
 before injecting the fault, in a second terminal, and count the lines that contain
 `table 200`. (`ip monitor route table 200` is not valid, so filter with `grep 'table 200'`.)
-The router does not log route changes, so this is the count. Check A's agent still reports A to B primary down:
+The router logs `Changed path` lines (`kubectl -n kube-system logs <router pod>`), and the `ip monitor` count is the independent check. Check A's agent still reports A to B primary down:
 `kubectl get node k8s-experiments-m02 -o jsonpath='{.metadata.annotations.cniresilience\.cn-operator/path-report}'`.
 
 **L8.** `kubectl -n kube-system delete pod -l app=cni-link-router --field-selector spec.nodeName=k8s-experiments-m02`.
@@ -358,6 +359,8 @@ EOF
 With a node-level fault the router also steers the broken node's blocks, which is expected.
 
 **L11.** See section 6.
+
+**L12b.** Same as L12 but delete the agent pod on B (`k8s-experiments-m03`). A's agent must skip B while its pod is terminating or not ready, so A's route to B stays.
 
 **L12.** `kubectl -n kube-system delete pod -l app=cni-health-agent --field-selector spec.nodeName=k8s-experiments-m02`
 during L1. The new agent starts from its previous report, so A's route must not be removed
@@ -420,6 +423,7 @@ the first `200` in the client log. Route times are fault to route visible in tab
 | L10 | exp 1: `FailedOver` at +31 s | exp 2: 0 of 13 | Exp 3 differs, see notes |
 | L11 | n/a | n/a | Rules 90, 91, 100 and table 200 gone on all 3 nodes |
 | L12 | n/a | 0 | Route present at every 1 s sample (25 s) |
+| L12b | n/a | | |
 | L13 | as L1 and L3 | 0 after recovery | Pod-IP and Service clients both recovered |
 
 Notes on the run:
