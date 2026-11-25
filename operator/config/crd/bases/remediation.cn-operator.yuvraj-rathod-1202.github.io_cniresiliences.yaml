@@ -99,6 +99,18 @@ spec:
                   mark a path as down.
                 minimum: 1
                 type: integer
+              linkFailover:
+                default: true
+                description: |-
+                  LinkFailover controls whether a single broken node-to-node link is steered
+                  onto the backup path. A nil value means enabled.
+                type: boolean
+              linkRelay:
+                default: true
+                description: |-
+                  LinkRelay controls whether a link with no direct path is relayed through
+                  a third node. A nil value means enabled.
+                type: boolean
               primaryCNI:
                 description: PrimaryCNI describes the primary CNI (e.g. Calico).
                 properties:
@@ -144,6 +156,66 @@ spec:
           status:
             description: CNIResilienceStatus defines the observed state of CNIResilience.
             properties:
+              conditions:
+                description: Conditions holds the standard conditions, such as LinksReachable.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
               failoverActive:
                 description: FailoverActive is true if any node is currently using
                   the backup path.
@@ -155,6 +227,34 @@ spec:
                 description: LastReconcileTime is when the controller last ran.
                 format: date-time
                 type: string
+              links:
+                description: Links is the path currently used for each directed node-to-node
+                  link.
+                items:
+                  description: LinkStatus is the path used from one node to another.
+                  properties:
+                    from:
+                      description: From is the source node name.
+                      type: string
+                    path:
+                      description: Path is "primary", "backup", "relay" or "none".
+                      type: string
+                    since:
+                      description: Since is when the link last changed path.
+                      format: date-time
+                      type: string
+                    to:
+                      description: To is the destination node name.
+                      type: string
+                    via:
+                      description: Via is the relay node when Path is "relay".
+                      type: string
+                  required:
+                  - from
+                  - path
+                  - to
+                  type: object
+                type: array
               nodeStatuses:
                 description: NodeStatuses contains per-node health information.
                 items:
