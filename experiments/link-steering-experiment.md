@@ -241,7 +241,7 @@ faults). Record each result in section 7.
 | L4 | Set `linkRelay: false`, then L3 | A to B and B to A are `none`. `NoPath` Events. `LinksReachable=False` naming them. No node blamed. Remove the faults: `PathRestored` Events. Set `linkRelay` back to `true` |
 | L4b | L3, plus drop Calico and Flannel between A and C (everything into and out of A is cut) | `Classify` blames A, so node-level isolation, taint and `calico-node` restart of A happen as before. Every pair involving A is `none` and listed in the condition. This documents how the two layers interact |
 | L5 | Drop Calico in one direction only: on B only, drop IPIP from A | Both A and B steer (probes are round trips). Traffic OK both ways |
-| L6 | During L1: copy a 2 MB file from the target, and keep a download open across the fault | Checksums correct (MTU, open connections) |
+| L6 | 2 MB file on the target: (1) plain fetch during L1, (2) rate-limited download started before the L1 fault and still running when it lands | Checksums correct (MTU, open connections) |
 | L7 | Hold L1 for 10 minutes | No flapping: route changes on A = 1, and the agent still reports A to B primary down |
 | L8 | Restart the router pod on A during L1 | Routes stay. 0 failed requests. The new pod reconciles cleanly |
 | L9 | During L1: apply a NetworkPolicy that denies A's pod to B's pod | Still denied over the reroute |
@@ -277,16 +277,39 @@ the taint on A and the `calico-node` restart on A. Record which pairs are `none`
 `docker exec k8s-experiments-m03 iptables -t raw -I PREROUTING -p 4 -s $A_IP -j DROP -m comment --comment cniresilience-drop`.
 Both nodes see the link as down, because a probe needs a request and a response.
 
-**L6.** During L1, from a pod on A:
+**L6.** Start from the healthy state, with no fault. Create a 2 MB file on the target (B)
+and note its checksum. Use `link-client-pod` (on A) as the client. Its image has `curl`
+and `md5sum`.
 
 ```bash
-kubectl run dl --rm -i --restart=Never --image=curlimages/curl --overrides='{"spec":{"nodeSelector":{"kubernetes.io/hostname":"k8s-experiments-m02"}}}' -- sh -c "curl -s http://$TARGET_IP/ | md5sum"
+kubectl exec link-target -- sh -c 'dd if=/dev/urandom of=/usr/share/nginx/html/big bs=1k count=2048 && md5sum /usr/share/nginx/html/big'
 ```
 
-For a large file and an open download, serve a 2 MB file from the target
-(`kubectl exec link-target -- sh -c 'head -c 2097152 /dev/urandom > /usr/share/nginx/html/big'`
-and `md5sum` it there), start the download before the fault, and compare checksums.
-Record both.
+Part 1, plain fetch during L1. Inject the L1 fault and wait until the route is in
+table 200 on A (L1 passed). Then:
+
+```bash
+kubectl exec link-client-pod -- sh -c 'curl -s -m 30 http://'$TARGET_IP'/big -o /tmp/big1 && md5sum /tmp/big1'
+```
+
+The checksum must equal the one on the target, and the size must be 2097152 bytes
+(`ls -l /tmp/big1`). This covers MTU over the reroute.
+
+Part 2, a download open across the fault. Remove the L1 fault first and wait for `primary`.
+Start a slow download in the background, so it takes about 20 s, then inject the L1 fault
+a few seconds later:
+
+```bash
+kubectl exec link-client-pod -- sh -c 'curl -s --limit-rate 100k -m 120 http://'$TARGET_IP'/big -o /tmp/big2; echo exit=$?; md5sum /tmp/big2' > /tmp/l6-part2.txt &
+sleep 5
+# now inject the L1 fault (section 4), both ends
+wait
+cat /tmp/l6-part2.txt
+```
+
+Pass: `exit=0` and the checksum equals the target's. The fault must land while the
+download is still running (it takes about 20 s). If it finished before the fault, repeat
+with a lower `--limit-rate`. Record both parts.
 
 **L7.** Hold L1 for 10 minutes. On A run `docker exec k8s-experiments-m02 timeout 600 ip monitor route`
 before injecting the fault, and count the events in table 200. The router does not log
