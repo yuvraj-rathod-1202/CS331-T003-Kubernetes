@@ -252,6 +252,11 @@ def analyze_run(run_dir, meta):
     if steer:
         row["steer_s"] = (steer[0] - t_fault) / NS
         row["steer_to"] = steer[1]
+    # The path in use when the fault ends, e.g. "relay" after backup also failed.
+    during = [(t, to) for t, to in changes if t_fault <= t < t_clear]
+    if during:
+        row["steer_final"] = during[-1][1]
+        row["steer_final_s"] = (during[-1][0] - t_fault) / NS
     fb = next((t for t, to in changes if t >= t_clear and to == "primary"), None)
     if fb is not None:
         row["failback_s"] = (fb - t_clear) / NS
@@ -289,7 +294,7 @@ def column_order(rows):
         cols += ["http_%s_%s" % (n, s) for s in HTTP_FIELDS]
     for g in GROUPS:
         cols += ["mqtt_%s_%s" % (g, s) for s in MQTT_FIELDS]
-    cols += ["steer_s", "steer_to", "failback_s"]
+    cols += ["steer_s", "steer_to", "steer_final", "steer_final_s", "failback_s"]
     return cols
 
 

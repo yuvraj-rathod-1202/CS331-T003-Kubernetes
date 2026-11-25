@@ -26,7 +26,14 @@ if [ ! -x "$KUBECTL" ]; then
 fi
 
 # 1. Cluster
-if ! minikube status -p "$PROFILE" >/dev/null 2>&1; then
+# minikube's own start/status fail on a node container with two networks, so judge by
+# the containers, and detach the backup network before (re)starting a stopped cluster.
+running=1
+for n in $NODES; do
+  [ "$(docker inspect -f '{{.State.Running}}' "$n" 2>/dev/null)" = true ] || running=0
+done
+if [ "$running" = 0 ]; then
+  for n in $NODES; do docker network disconnect "$BACKUP_NET" "$n" >/dev/null 2>&1 || true; done
   log "Starting minikube profile $PROFILE"
   minikube start -p "$PROFILE" --nodes 3 --driver=docker --cni=calico \
     --kubernetes-version="$K8S_VERSION" --cpus=2 --memory=2500
@@ -65,10 +72,30 @@ if k get ippools.crd.projectcalico.org default-ipv4-ippool >/dev/null 2>&1; then
     grep 10-244 | xargs -r "$KUBECTL" delete >/dev/null || true
 fi
 
+# 4b. Tell kube-proxy the real pod network. With minikube's default clusterCIDR
+# (10.244.0.0/16) every Service connection from a Calico pod is masqueraded, and Linux
+# drops a masqueraded connection's NAT state when its output interface changes, so each
+# steering switch (tunl0 <-> flannel.1) would reset long-lived Service connections.
+# Traffic to backup (10.244) addresses is still masqueraded by Flannel's own rule.
+if ! k -n kube-system get cm kube-proxy -o jsonpath='{.data.config\.conf}' | grep -q 'clusterCIDR: 172.16.0.0/16'; then
+  log "Setting kube-proxy clusterCIDR to 172.16.0.0/16"
+  k -n kube-system get cm kube-proxy -o yaml | sed 's#clusterCIDR: 10.244.0.0/16#clusterCIDR: 172.16.0.0/16#' | k apply -f - >/dev/null
+  k -n kube-system rollout restart ds/kube-proxy >/dev/null
+fi
+k -n kube-system rollout status ds/kube-proxy --timeout=180s >/dev/null
+
 # 5. Multus and Flannel (backup only, bound to eth1).
 if ! k -n kube-system get ds kube-multus-ds >/dev/null 2>&1; then
   log "Installing Multus $MULTUS_VERSION"
   k apply -f "https://raw.githubusercontent.com/k8snetworkplumbingwg/multus-cni/$MULTUS_VERSION/deployments/multus-daemonset.yml" >/dev/null
+fi
+# The upstream manifest uses the floating :snapshot image and a 50Mi limit that gets the
+# container OOM-killed; pin the release image and give it room.
+if ! k -n kube-system get ds kube-multus-ds -o jsonpath='{.spec.template.spec.containers[0].image}' | grep -q ":$MULTUS_VERSION$"; then
+  k -n kube-system patch ds kube-multus-ds --type=json -p "[
+    {\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/image\",\"value\":\"ghcr.io/k8snetworkplumbingwg/multus-cni:$MULTUS_VERSION\"},
+    {\"op\":\"replace\",\"path\":\"/spec/template/spec/initContainers/0/image\",\"value\":\"ghcr.io/k8snetworkplumbingwg/multus-cni:$MULTUS_VERSION\"},
+    {\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/resources/limits/memory\",\"value\":\"256Mi\"}]" >/dev/null
 fi
 k -n kube-system rollout status ds/kube-multus-ds --timeout=300s >/dev/null
 log "Installing Flannel bound to $BACKUP_IF"
