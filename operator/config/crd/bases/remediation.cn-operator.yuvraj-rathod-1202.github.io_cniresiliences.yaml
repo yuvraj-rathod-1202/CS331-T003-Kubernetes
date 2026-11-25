@@ -228,8 +228,8 @@ spec:
                 format: date-time
                 type: string
               links:
-                description: Links is the path currently used for each directed node-to-node
-                  link.
+                description: Links lists the directed node-to-node links that are
+                  not on the primary path.
                 items:
                   description: LinkStatus is the path used from one node to another.
                   properties:

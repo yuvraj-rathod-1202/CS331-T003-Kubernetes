@@ -127,7 +127,7 @@ type CNIResilienceStatus struct {
 	// FailoverCount is total number of failovers performed.
 	FailoverCount int `json:"failoverCount,omitempty"`
 
-	// Links is the path currently used for each directed node-to-node link.
+	// Links lists the directed node-to-node links that are not on the primary path.
 	// +optional
 	Links []LinkStatus `json:"links,omitempty"`
 
