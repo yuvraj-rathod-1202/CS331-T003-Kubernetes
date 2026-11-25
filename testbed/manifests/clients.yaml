@@ -1,0 +1,65 @@
+# Traffic sources on node A and the MQTT subscriber on node B. Rendered by
+# testbed/workload.sh, which replaces __NODE_A__, __NODE_B__, __IMG__ and the addresses
+# __WEB_POD_IP__, __WEB_SVC_IP__, __BROKER_POD_IP__, __BROKER_SVC_IP__.
+# Addresses are written in directly so a DNS outage is never counted as a path outage.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: http-prober
+  namespace: default
+  labels: {edge-testbed: client}
+spec:
+  nodeSelector: {kubernetes.io/hostname: __NODE_A__}
+  tolerations:
+  - {key: cniresilience.cn-operator/recovering, operator: Exists}
+  containers:
+  - name: http-pod
+    image: __IMG__
+    imagePullPolicy: IfNotPresent
+    args: [http, --name, pod, --url, "http://__WEB_POD_IP__/", --interval, 100ms, --timeout, 500ms]
+  - name: http-svc
+    image: __IMG__
+    imagePullPolicy: IfNotPresent
+    args: [http, --name, svc, --url, "http://__WEB_SVC_IP__/", --interval, 100ms, --timeout, 500ms]
+---
+# Ten simulated sensors: five publish at QoS 1, five at QoS 0, each 10 messages/s,
+# all to the broker's Service address as a real IoT client would.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: iot-sensors
+  namespace: default
+  labels: {edge-testbed: client}
+spec:
+  nodeSelector: {kubernetes.io/hostname: __NODE_A__}
+  tolerations:
+  - {key: cniresilience.cn-operator/recovering, operator: Exists}
+  containers:
+  - name: pub-q1
+    image: __IMG__
+    imagePullPolicy: IfNotPresent
+    args: [pub, --broker, "tcp://__BROKER_SVC_IP__:1883", --group, q1, --clients, "5", --rate, "10", --qos, "1", --keepalive, 15s]
+  - name: pub-q0
+    image: __IMG__
+    imagePullPolicy: IfNotPresent
+    args: [pub, --broker, "tcp://__BROKER_SVC_IP__:1883", --group, q0, --clients, "5", --rate, "10", --qos, "0", --keepalive, 15s]
+---
+# The subscriber runs in B's host network and reads the broker's pod address on the same
+# node. Host-to-local-pod traffic does not cross B's FORWARD chain or the A<->B link, so
+# no fault in the matrix can hide a delivery from it.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: iot-sub
+  namespace: default
+  labels: {edge-testbed: client}
+spec:
+  hostNetwork: true
+  nodeSelector: {kubernetes.io/hostname: __NODE_B__}
+  tolerations:
+  - {key: cniresilience.cn-operator/recovering, operator: Exists}
+  containers:
+  - name: sub
+    image: __IMG__
+    imagePullPolicy: IfNotPresent
+    args: [sub, --broker, "tcp://__BROKER_POD_IP__:1883", --topic, "iot/#", --id, sub]

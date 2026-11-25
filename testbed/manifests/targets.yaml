@@ -1,0 +1,97 @@
+# Destinations on node B. Rendered by testbed/workload.sh, which replaces
+#   __NODE_B__  node name
+#   __GATES__   the readiness gate list: the operator's primary-path gate, or [] for the
+#               vanilla baseline (no operator, so a gated pod would never become Ready)
+# Both pods also get a Flannel (backup) interface net1 through Multus, which the
+# operator's node-level failover uses.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mosquitto-config
+  namespace: default
+data:
+  mosquitto.conf: |
+    listener 1883 0.0.0.0
+    allow_anonymous true
+    persistence false
+    max_queued_messages 100000
+    max_inflight_messages 100
+    log_dest stdout
+    log_type error
+    log_type warning
+    log_type notice
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mqtt-broker
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: mqtt-broker}
+  template:
+    metadata:
+      labels: {app: mqtt-broker, edge-testbed: target}
+      annotations:
+        k8s.v1.cni.cncf.io/networks: kube-system/flannel-backup
+    spec:
+      readinessGates: __GATES__
+      nodeSelector: {kubernetes.io/hostname: __NODE_B__}
+      tolerations:
+      - {key: cniresilience.cn-operator/recovering, operator: Exists}
+      containers:
+      - name: mosquitto
+        image: eclipse-mosquitto:2.0.20
+        ports:
+        - containerPort: 1883
+        volumeMounts:
+        - {name: config, mountPath: /mosquitto/config}
+      volumes:
+      - name: config
+        configMap: {name: mosquitto-config}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mqtt-broker
+  namespace: default
+spec:
+  selector: {app: mqtt-broker}
+  ports:
+  - {port: 1883, targetPort: 1883}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-target
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: web-target}
+  template:
+    metadata:
+      labels: {app: web-target, edge-testbed: target}
+      annotations:
+        k8s.v1.cni.cncf.io/networks: kube-system/flannel-backup
+    spec:
+      readinessGates: __GATES__
+      nodeSelector: {kubernetes.io/hostname: __NODE_B__}
+      tolerations:
+      - {key: cniresilience.cn-operator/recovering, operator: Exists}
+      containers:
+      - name: web
+        image: nginx:alpine
+        ports:
+        - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-target
+  namespace: default
+spec:
+  selector: {app: web-target}
+  ports:
+  - {port: 80, targetPort: 80}
