@@ -4,6 +4,8 @@
   analyze.py runs <campaign_dir> [-o summary.csv]
   analyze.py aggregate <summary.csv> [-o aggregate.csv]
   analyze.py cdf <summary.csv> --metric http_svc_recovery_s [-o cdf.csv]
+  analyze.py merge <base.csv> <override.csv> [-o merged.csv]
+      Every (config, fault) cell present in override replaces that whole cell in base.
 """
 import argparse
 import calendar
@@ -337,6 +339,24 @@ def _float(s):
         return None
 
 
+def cmd_merge(args):
+    base_cols, base = read_csv(args.base)
+    over_cols, over = read_csv(args.override)
+    replaced = {(r["config"], r["fault"]) for r in over}
+    rows = [r for r in base if (r["config"], r["fault"]) not in replaced] + over
+    rows.sort(key=lambda r: (r["config"], r["fault"], _int(r["rep"]) or 0))
+    cols = base_cols + [c for c in over_cols if c not in base_cols]
+    out = open(args.output, "w", newline="", encoding="utf-8") if args.output else sys.stdout
+    try:
+        w = csv.DictWriter(out, fieldnames=cols, restval="")
+        w.writeheader()
+        w.writerows(rows)
+    finally:
+        if args.output:
+            out.close()
+    return 0
+
+
 def cmd_aggregate(args):
     header, rows = read_csv(args.summary)
     metrics = [c for c in header if c not in ID_COLS and
@@ -408,6 +428,11 @@ def main(argv=None):
     p.add_argument("--metric", required=True)
     p.add_argument("-o", "--output")
     p.set_defaults(fn=cmd_cdf)
+    p = sp.add_parser("merge")
+    p.add_argument("base")
+    p.add_argument("override")
+    p.add_argument("-o", "--output")
+    p.set_defaults(fn=cmd_merge)
     args = ap.parse_args(argv)
     return args.fn(args)
 

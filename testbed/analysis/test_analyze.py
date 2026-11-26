@@ -193,6 +193,24 @@ class AnalyzeTest(unittest.TestCase):
         self.assertEqual([float(x["value"]) for x in c], [2.0, 3.0, 4.0])
         self.assertAlmostEqual(float(c[-1]["cum_fraction"]), 1.0)
 
+    def test_merge_replaces_whole_cells(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        base, over, out = (os.path.join(d, n) for n in ("b.csv", "o.csv", "m.csv"))
+        with open(base, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["config", "fault", "rep", "x"])
+            w.writerows([["full", "cut", 1, 1], ["full", "cut", 2, 2], ["full", "loss", 1, 3]])
+        with open(over, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["config", "fault", "rep", "x", "y"])
+            w.writerow(["full", "cut", 1, 9, 7])
+        analyze.main(["merge", base, over, "-o", out])
+        with open(out, newline="") as f:
+            rows = list(csv.DictReader(f))
+        self.assertEqual([(r["fault"], r["rep"], r["x"], r["y"]) for r in rows],
+                         [("cut", "1", "9", "7"), ("loss", "1", "3", "")])
+
     def test_rfc3339_parse(self):
         self.assertEqual(analyze.parse_rfc3339_ns("2026-11-25T10:26:23.123456789Z x"),
                          analyze.parse_rfc3339_ns("2026-11-25T10:26:23Z") + 123456789)

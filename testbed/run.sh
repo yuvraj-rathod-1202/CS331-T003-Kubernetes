@@ -3,7 +3,7 @@
 #
 #   testbed/run.sh <campaign-dir> [--reps N] [--configs "vanilla node full full-norelay"]
 #                  [--faults "link-cut ..."] [--steady S] [--fault-secs S] [--recover S]
-#                  [--fresh-clients]
+#                  [--fresh-clients] [--probe-interval S]
 #
 # Configurations
 #   vanilla       stock Kubernetes: no operator, no health agent, no link router, no gates
@@ -30,6 +30,7 @@ CONFIGS="vanilla node full full-norelay"
 FAULTS="link-cut link-cut-both link-loss30 link-flap overlay-cut node-cni"
 STEADY=20 FAULT_SECS=60 RECOVER=45
 FRESH_CLIENTS=0
+PROBE_INTERVAL=2  # seconds between probe rounds (Delta); the agents read it from the CR
 while [ $# -gt 0 ]; do
   case "$1" in
     --reps) REPS=$2; shift 2 ;;
@@ -39,6 +40,7 @@ while [ $# -gt 0 ]; do
     --fault-secs) FAULT_SECS=$2; shift 2 ;;
     --recover) RECOVER=$2; shift 2 ;;
     --fresh-clients) FRESH_CLIENTS=1; shift ;;
+    --probe-interval) PROBE_INTERVAL=$2; shift 2 ;;
     *) die "unknown option $1" ;;
   esac
 done
@@ -76,7 +78,7 @@ remove_routes() {
 set_cr() {  # autoFailover linkFailover linkRelay
   k apply -f "$REPO_DIR/operator/config/samples/cniresilience_sample.yaml" >/dev/null
   k patch cniresilience default-resilience --type=merge \
-    -p "{\"spec\":{\"autoFailover\":$1,\"linkFailover\":$2,\"linkRelay\":$3}}" >/dev/null
+    -p "{\"spec\":{\"autoFailover\":$1,\"linkFailover\":$2,\"linkRelay\":$3,\"probeIntervalSeconds\":$PROBE_INTERVAL}}" >/dev/null
 }
 
 apply_config() {
@@ -171,14 +173,14 @@ run_one() {  # config fault rep
   cat > "$dir/meta.json" <<EOF
 {"config": "$config", "fault": "$fault", "rep": $rep, "t_start_ns": $t_start, "t_fault_ns": $t_fault,
  "t_clear_ns": $t_clear, "t_end_ns": $t_end, "src_node": "$NODE_A", "dst_node": "$NODE_B",
- "fault_cmd": "$(fault_cmd "$fault")", "healthy_before": $healthy, "fresh_clients": $FRESH_CLIENTS,
+ "fault_cmd": "$(fault_cmd "$fault")", "healthy_before": $healthy, "fresh_clients": $FRESH_CLIENTS, "probe_interval_s": $PROBE_INTERVAL,
  "steady_s": $STEADY, "fault_s": $FAULT_SECS, "recover_s": $RECOVER}
 EOF
   log "done $config/$fault/rep$rep"
 }
 
 trap '"$TESTBED_DIR/fault.sh" clear' EXIT
-log "Campaign $CAMPAIGN: configs=[$CONFIGS] faults=[$FAULTS] reps=$REPS fresh_clients=$FRESH_CLIENTS"
+log "Campaign $CAMPAIGN: configs=[$CONFIGS] faults=[$FAULTS] reps=$REPS fresh_clients=$FRESH_CLIENTS probe_interval=$PROBE_INTERVAL"
 git -C "$REPO_DIR" log --oneline -1 > "$CAMPAIGN/commit.txt" 2>/dev/null || true
 for config in $CONFIGS; do
   apply_config "$config"
