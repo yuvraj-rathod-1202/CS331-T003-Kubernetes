@@ -3,6 +3,7 @@
 #
 #   testbed/run.sh <campaign-dir> [--reps N] [--configs "vanilla node full full-norelay"]
 #                  [--faults "link-cut ..."] [--steady S] [--fault-secs S] [--recover S]
+#                  [--fresh-clients]
 #
 # Configurations
 #   vanilla       stock Kubernetes: no operator, no health agent, no link router, no gates
@@ -15,6 +16,11 @@
 # Each run: wait until healthy, STEADY s of normal traffic, inject, FAULT s, clear,
 # RECOVER s, then save logs and meta.json to <campaign>/<config>/<fault>/repNN/.
 # Faults rotate inside each repetition so slow drifts do not line up with one fault.
+#
+# --fresh-clients recreates the client pods before every run. Without it, MQTT
+# connections live across runs, and a connection opened during a node failover stays
+# DNAT'ed to the broker's backup-network address after failback (conntrack keeps the
+# old translation). Later runs then measure a connection that is not on the primary path.
 set -euo pipefail
 . "$(dirname "$0")/env.sh"
 
@@ -23,6 +29,7 @@ REPS=10
 CONFIGS="vanilla node full full-norelay"
 FAULTS="link-cut link-cut-both link-loss30 link-flap overlay-cut node-cni"
 STEADY=20 FAULT_SECS=60 RECOVER=45
+FRESH_CLIENTS=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --reps) REPS=$2; shift 2 ;;
@@ -31,6 +38,7 @@ while [ $# -gt 0 ]; do
     --steady) STEADY=$2; shift 2 ;;
     --fault-secs) FAULT_SECS=$2; shift 2 ;;
     --recover) RECOVER=$2; shift 2 ;;
+    --fresh-clients) FRESH_CLIENTS=1; shift ;;
     *) die "unknown option $1" ;;
   esac
 done
@@ -145,6 +153,9 @@ run_one() {  # config fault rep
   if [ -f "$dir/meta.json" ]; then log "skip $config/$fault/rep$rep (done)"; return; fi
   mkdir -p "$dir"
   "$TESTBED_DIR/fault.sh" clear
+  if [ "$FRESH_CLIENTS" = 1 ]; then
+    if [ "$config" = vanilla ]; then "$TESTBED_DIR/workload.sh" up --no-gates; else "$TESTBED_DIR/workload.sh" up; fi
+  fi
   wait_healthy "$config" || { healthy=false; log "WARN not healthy before $config/$fault/rep$rep"; }
   local t_start t_fault t_clear t_end
   t_start=$(now_ns); sleep "$STEADY"
@@ -160,14 +171,14 @@ run_one() {  # config fault rep
   cat > "$dir/meta.json" <<EOF
 {"config": "$config", "fault": "$fault", "rep": $rep, "t_start_ns": $t_start, "t_fault_ns": $t_fault,
  "t_clear_ns": $t_clear, "t_end_ns": $t_end, "src_node": "$NODE_A", "dst_node": "$NODE_B",
- "fault_cmd": "$(fault_cmd "$fault")", "healthy_before": $healthy,
+ "fault_cmd": "$(fault_cmd "$fault")", "healthy_before": $healthy, "fresh_clients": $FRESH_CLIENTS,
  "steady_s": $STEADY, "fault_s": $FAULT_SECS, "recover_s": $RECOVER}
 EOF
   log "done $config/$fault/rep$rep"
 }
 
 trap '"$TESTBED_DIR/fault.sh" clear' EXIT
-log "Campaign $CAMPAIGN: configs=[$CONFIGS] faults=[$FAULTS] reps=$REPS"
+log "Campaign $CAMPAIGN: configs=[$CONFIGS] faults=[$FAULTS] reps=$REPS fresh_clients=$FRESH_CLIENTS"
 git -C "$REPO_DIR" log --oneline -1 > "$CAMPAIGN/commit.txt" 2>/dev/null || true
 for config in $CONFIGS; do
   apply_config "$config"
