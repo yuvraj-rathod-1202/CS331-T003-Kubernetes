@@ -1,7 +1,7 @@
 % 6DCIoT 2027 (IEEE PerCom 2027 workshops) submission draft.
 % Limit: 6 pages + 1 optional page, IEEE Computer Society format, double-blind.
 % Build: latexmk -pdf main.tex   (figures come from testbed/analysis/plot.py into figs/)
-% Red [..] = number still to fill from the campaign; blue [TODO ..] = text still to write.
+% Red [..] = still to fill (only the anonymised repository link is left).
 \documentclass[conference,compsoc]{IEEEtran}
 
 \usepackage{cite}
@@ -42,7 +42,7 @@ any pod or Service address. Node-level failover covers the faults that steering 
 On a three-node testbed with an MQTT sensor workload and emulated link cuts, loss,
 flapping and CNI faults, stock Kubernetes never recovered from a link or overlay fault
 within 60\,s. Our system restored service in a median of 6.4--6.7\,s, including when
-both direct links failed, kept every QoS~1 MQTT session open without a reconnection, and
+both direct links failed, kept every QoS~1 MQTT session open through these faults, and
 raised availability under 30\% loss from 41\% to 90\%. We also identify two default
 settings, source NAT in kube-proxy and strict reverse-path filtering, that reset or
 blackhole connections at every path switch, and show how to avoid them.
@@ -65,7 +65,7 @@ consequence is concrete: telemetry stops arriving, and messages published at QoS
 lost for good.
 
 Kubernetes does not see these faults. A node is declared \emph{NotReady} only after
-its kubelet stops reaching the API server for a grace period (40\,s by default), and
+its kubelet stops reaching the API server for a grace period (50\,s by default), and
 pods are evicted after a further toleration (300\,s by
 default)~\cite{k8snodelifecycle}. A broken data path between two worker nodes that
 both still reach the control plane is never detected: the Service keeps sending
@@ -165,11 +165,11 @@ carries packets to the destination node's Calico address block (R2).
 The health agent on each node probes the agent on every peer, once on its primary and
 once on its backup address, every $\Delta$ seconds with a timeout. A path changes state
 only after $k$ identical results in a row, which suppresses noise under partial loss
-(R3). Each agent publishes its verdicts with a timestamp on its Node object; a report
-older than 30\,s is treated as unknown, and unknown never causes a change (R4). On
-restart an agent starts from its last report instead of from ``healthy''. With $n$
-nodes the agents send $2n(n-1)$ probes per round. Detection therefore takes about
-$k\Delta$; we use $\Delta=2$\,s, a 1\,s timeout and $k=3$.
+(R3), so detection takes about $k\Delta$; we use $\Delta=2$\,s, a 1\,s timeout and
+$k=3$. With $n$ nodes the agents send $2n(n-1)$ probes per round. Each agent publishes
+its verdicts with a timestamp on its Node object; a report older than 30\,s is treated
+as unknown, and unknown never causes a change (R4). On restart an agent starts from its
+last report instead of from ``healthy''.
 
 \subsection{Per-link path choice}
 The link router on node $A$ reads all reports and chooses, for each peer $B$:
@@ -194,10 +194,10 @@ path. Two default settings do, and both broke connections in our first experimen
 \emph{Source NAT.} kube-proxy masquerades Service traffic whose source lies outside the
 pod range it is configured with, and Linux discards a masqueraded connection's NAT
 state when its output interface changes. The next packet leaves with a new source
-address, and the server answers with a reset. With the default range
+address, and the server answers with a reset. With minikube's default range
 (10.244.0.0/16, the backup network's), every Service connection from a primary-network
-pod was masqueraded, so every switch, in either direction, reset every MQTT session and
-stretched the longest gap from 6.5 to 13\,s. We configure kube-proxy with the primary
+pod was masqueraded, so every switch, in either direction, reset all ten MQTT sessions
+and forced every sensor to reconnect. We configure kube-proxy with the primary
 CNI's pod range. Pod traffic is then not masqueraded, and a switch changes only the
 tunnel.
 
@@ -243,7 +243,9 @@ the clients and node B the services; node C is the control plane and a potential
 \begin{itemize}
   \item \textbf{IoT workload:} ten MQTT~\cite{mqtt5} sensors on A, five at QoS~1 and
         five at QoS~0, each publishing 10 messages/s through the Service to a
-        Mosquitto broker on B. A subscriber on B timestamps every message.
+        Mosquitto broker on B. A subscriber on B timestamps every message. In a
+        deployment the devices sit outside the cluster; the sensors stand in for the
+        gateway pods that forward their traffic.
   \item \textbf{Request workload:} an HTTP prober on A sends 10 requests/s to an
         nginx pod on B, both to its pod address and to its Service, each over a new
         connection with a 500\,ms timeout.
@@ -488,6 +490,9 @@ we run two at once as redundant paths.
 \section{Limitations and Future Work}
 \label{sec:limits}
 \begin{itemize}
+  \item \textbf{Paths between nodes only.} We protect the pod network between edge
+        nodes, not the links from devices to their gateways (BLE, Zigbee, Wi-Fi),
+        which need redundancy on the device side.
   \item \textbf{Binary path state.} A path is up or down; under partial loss we switch
         only after $k$ failed probes in a row. A quality score from probe loss and
         delay would handle gray failures better.
