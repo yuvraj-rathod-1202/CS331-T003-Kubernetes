@@ -63,6 +63,17 @@ runs: the harness reads `fault.sh` and the manifests on every run.
 Netem acts only on packets to the peer's address on that interface, inside the node
 containers. Nothing on the host is changed.
 
+`--link-profile edge` (or `LINK_PROFILE=edge testbed/fault.sh profile`) adds background
+conditions on every node pair for the whole campaign: 5 ms +- 2 ms one-way delay on the
+primary link, and 20 ms +- 10 ms, 1 % loss and 10 Mbit/s on the backup link. Faults are
+applied on top; a fault's loss replaces the profile's loss. The paper's realistic-link
+runs:
+
+```bash
+testbed/run.sh results/profile-edge --reps 10 --configs full \
+  --faults "link-cut link-cut-both link-loss30" --fresh-clients --link-profile edge
+```
+
 ## Metrics (`analyze.py`)
 
 Per run, with F = the fault window and R = the window after clearing:

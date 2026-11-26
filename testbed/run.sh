@@ -3,7 +3,7 @@
 #
 #   testbed/run.sh <campaign-dir> [--reps N] [--configs "vanilla node full full-norelay"]
 #                  [--faults "link-cut ..."] [--steady S] [--fault-secs S] [--recover S]
-#                  [--fresh-clients] [--probe-interval S]
+#                  [--fresh-clients] [--probe-interval S] [--link-profile NAME]
 #
 # Configurations
 #   vanilla       stock Kubernetes: no operator, no health agent, no link router, no gates
@@ -21,6 +21,9 @@
 # connections live across runs, and a connection opened during a node failover stays
 # DNAT'ed to the broker's backup-network address after failback (conntrack keeps the
 # old translation). Later runs then measure a connection that is not on the primary path.
+#
+# --link-profile NAME puts background link conditions (see fault.sh) on every node pair
+# for the whole campaign; faults are applied on top of them.
 set -euo pipefail
 . "$(dirname "$0")/env.sh"
 
@@ -31,6 +34,7 @@ FAULTS="link-cut link-cut-both link-loss30 link-flap overlay-cut node-cni"
 STEADY=20 FAULT_SECS=60 RECOVER=45
 FRESH_CLIENTS=0
 PROBE_INTERVAL=2  # seconds between probe rounds (Delta); the agents read it from the CR
+LINK_PROFILE=
 while [ $# -gt 0 ]; do
   case "$1" in
     --reps) REPS=$2; shift 2 ;;
@@ -41,9 +45,11 @@ while [ $# -gt 0 ]; do
     --recover) RECOVER=$2; shift 2 ;;
     --fresh-clients) FRESH_CLIENTS=1; shift ;;
     --probe-interval) PROBE_INTERVAL=$2; shift 2 ;;
+    --link-profile) LINK_PROFILE=$2; shift 2 ;;
     *) die "unknown option $1" ;;
   esac
 done
+export LINK_PROFILE
 mkdir -p "$CAMPAIGN"
 CAMPAIGN=$(cd "$CAMPAIGN" && pwd)
 exec > >(tee -a "$CAMPAIGN/run.log") 2>&1
@@ -174,13 +180,14 @@ run_one() {  # config fault rep
 {"config": "$config", "fault": "$fault", "rep": $rep, "t_start_ns": $t_start, "t_fault_ns": $t_fault,
  "t_clear_ns": $t_clear, "t_end_ns": $t_end, "src_node": "$NODE_A", "dst_node": "$NODE_B",
  "fault_cmd": "$(fault_cmd "$fault")", "healthy_before": $healthy, "fresh_clients": $FRESH_CLIENTS, "probe_interval_s": $PROBE_INTERVAL,
+ "link_profile": "$LINK_PROFILE",
  "steady_s": $STEADY, "fault_s": $FAULT_SECS, "recover_s": $RECOVER}
 EOF
   log "done $config/$fault/rep$rep"
 }
 
-trap '"$TESTBED_DIR/fault.sh" clear' EXIT
-log "Campaign $CAMPAIGN: configs=[$CONFIGS] faults=[$FAULTS] reps=$REPS fresh_clients=$FRESH_CLIENTS probe_interval=$PROBE_INTERVAL"
+trap 'LINK_PROFILE= "$TESTBED_DIR/fault.sh" clear' EXIT
+log "Campaign $CAMPAIGN: configs=[$CONFIGS] faults=[$FAULTS] reps=$REPS fresh_clients=$FRESH_CLIENTS probe_interval=$PROBE_INTERVAL link_profile=${LINK_PROFILE:-none}"
 git -C "$REPO_DIR" log --oneline -1 > "$CAMPAIGN/commit.txt" 2>/dev/null || true
 for config in $CONFIGS; do
   apply_config "$config"

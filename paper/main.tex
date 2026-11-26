@@ -84,8 +84,9 @@ pair of nodes. Our contributions are:
         \emph{no path} alarm, installed as policy routes, together with node-level
         failover for faults steering cannot repair.
   \item An \textbf{edge testbed and evaluation} with an MQTT sensor workload and six
-        fault types, including gray failures, comparing stock Kubernetes, node-level
-        failover and our system over 10 repetitions (Section~\ref{sec:eval}).
+        fault types, including gray failures and wireless-like backup links,
+        comparing stock Kubernetes, node-level failover and our system over 10
+        repetitions (Section~\ref{sec:eval}).
   \item Two \textbf{conditions for safe path switches} under a container network: no
         source NAT on pod-to-Service traffic and loose reverse-path filtering on the
         tunnels. With the defaults, every switch resets or blackholes connections
@@ -358,27 +359,21 @@ backoff~\cite{rfc6298}. The retransmission timeout doubles while the path is dow
 the first retransmission after the switch can come up to one backoff interval late:
 the gap was 6.5\,s in 6 of 10 link-cut runs and about 13\,s in the other 4.
 
-QoS~0 sessions reconnected in 14 of those 50 runs, and these reconnections caused all
-of the QoS~0 losses under steering (median delivery 100\%, at worst 91\%). The network
-did not break these connections; the client did. A QoS~0 publisher receives nothing
-from the broker, so the client sends a keepalive ping every 15\,s. When a ping fell
-into the outage, its response arrived after the client's 10\,s ping timeout, and the
-client closed a TCP connection that was about to recover. QoS~1 publishers receive an
-acknowledgement for every message and did not need to ping during a short outage.
-Keepalive and ping timeouts longer than the expected repair time ($k\Delta$ plus one
-backoff interval) avoid this.
+QoS~0 sessions reconnected in 14 of those 50 runs, causing all QoS~0 losses under
+steering (median delivery 100\%, at worst 91\%). The client, not the network, closed
+them: a QoS~0 publisher receives nothing from the broker, so it pings every 15\,s, and
+a ping sent into the outage was answered after the client's 10\,s ping timeout. QoS~1
+publishers receive acknowledgements and did not ping. A ping timeout longer than the
+repair time ($k\Delta$ plus one backoff interval) avoids this.
 
-Without steering, during cuts and CNI faults every sensor lost its session once the
-15\,s MQTT keepalive expired, and reconnected only after the fault. QoS~1 still delivered every
-message, because the client stores and resends unacknowledged messages, but QoS~0
-lost about 57\% of them. The node CNI fault shows how much a reconnection costs. The
-Service was repaired after 29\,s, yet most sensors stayed silent for 57--59\,s. Their
-sessions dropped when the keepalive expired, 21--30\,s into the fault. The first
-reconnection attempt then went to the still-broken primary endpoint and waited out the
-client's 30\,s connect timeout. Only the next attempt reached the broker through the
-shadow EndpointSlice. Under 30\% loss, sessions survived in every configuration, but stock
-Kubernetes lost 22\% of QoS~0 messages; steering lost none and shortened the longest
-gap from 13.5\,s to 3.3\,s.
+Without steering, during cuts and CNI faults every sensor lost its session when the
+15\,s keepalive expired and reconnected only after the fault; QoS~1 resent every stored
+message, but QoS~0 lost about 57\%. The node CNI fault shows what a reconnection costs:
+the Service was repaired after 29\,s, yet most sensors stayed silent for 57--59\,s,
+because their first reconnection attempt went to the still-broken primary endpoint and
+waited out the client's 30\,s connect timeout. Under 30\% loss, sessions survived in
+every configuration, but stock Kubernetes lost 22\% of QoS~0 messages; steering lost
+none and shortened the longest gap from 13.5 to 3.3\,s.
 
 \begin{table}[t]
 \centering
@@ -409,13 +404,12 @@ did not make the router oscillate. In 9 of 10 runs it switched once and stayed o
 backup path. In one run it returned to the primary path after three lucky probes and
 left it again 9\,s later.
 
-Flapping with a 5\,s period is shorter than the detection bound $k\Delta$, and the
-outcome depended on the probe phase. In 6 of 10 runs no down period held three
-consecutive failed probes, the system never switched, and availability stayed at 50\%,
-the same as stock Kubernetes. In the other 4 runs it switched once, after about 6\,s,
-and stayed on the backup path until the fault ended, because switching back requires
-$k\Delta=6$\,s of successful probes, longer than an up period. Availability in those
-runs was 91\%. No run switched more than once during the fault: the streak rule acts as
+Flapping with a 5\,s period is shorter than the detection bound $k\Delta$, so the
+outcome depended on the probe phase. In 6 of 10 runs no down period held three failed
+probes in a row; the system never switched, and availability stayed at 50\%, as with
+stock Kubernetes. In the other 4 it switched once, after about 6\,s, and stayed on the
+backup path, because switching back needs $k\Delta=6$\,s of successful probes;
+availability was 91\%. No run switched more than once: the streak rule acts as
 hysteresis in both directions.
 
 \begin{figure}[t]
@@ -426,15 +420,26 @@ whisker to the 5th percentile).}
 \label{fig:avail}
 \end{figure}
 
+\subsection{Realistic link conditions}
+\label{sec:profile}
+So far the links were ideal apart from the fault. We repeated the link faults for the
+full system with every node pair impaired throughout the run: the primary link with
+5$\pm$2\,ms one-way delay, the backup like a wireless link with 20$\pm$10\,ms, 1\%
+loss and 10\,Mbit/s. Repair took as long as on ideal links: 6.0\,s for a link cut (p95
+7.4\,s), 6.6\,s (7.2\,s) for both links cut and 9.8\,s (21.0\,s) under 30\% loss. No
+QoS~1 session reconnected in any of the 30 runs, median QoS~0 delivery stayed at
+100\%, and availability during the fault was 87--89\%. The lossy backup raised no
+false alarm: no router switched before a fault, and 9 of 10 loss runs switched once.
+Its cost came after the fault, while traffic still crossed the backup: a median of one
+failed request per run (at most 7), against one in all 30 runs on ideal links.
+
 \subsection{Overhead and probe interval}
 We measured each component's cost over 120\,s on the healthy cluster. With
 $\Delta=2$\,s, the health agent used 0.17\% of one core and 35\,MB of memory per node,
 the link router 0.07\% and 35\,MB, and the operator 0.24\% and 58\,MB. Each probe
-opens two short connections, one of them carrying a 1{,}400-byte body to catch MTU
-problems. Nothing else uses the backup network, and the probes there amounted to
-3.3\,kB/s per node in each direction. The primary network carries the same probes plus
-the agent's API reads: it re-reads its peer list and configuration every round, which
-added about 11\,kB/s of downstream traffic per node and could be replaced by a watch.
+opens two short connections, one carrying a 1{,}400-byte body to catch MTU problems.
+On the backup network the probes amounted to 3.3\,kB/s per node and direction; the
+primary network also carries the agent's API reads, about 11\,kB/s per node.
 
 Table~\ref{tab:delta} shows the trade-off that $\Delta$ controls. Probe traffic and
 the agent's CPU scale with $1/\Delta$. Detection scales with $k\Delta$ only while a
@@ -507,18 +512,15 @@ applications and works for any transport.
 \textbf{Kubernetes and edge resilience.} Kubernetes handles node failure through
 heartbeats and eviction~\cite{k8snodelifecycle}; Section~\ref{sec:background}
 explains why probes, service meshes and CNI health checks do not repair broken paths.
-Multi-cluster fabrics such as
 Submariner~\cite{submariner} and Liqo~\cite{iorio2023liqo} connect clusters, and
-CEFIoT~\cite{javed2018cefiot} makes IoT processing fault-tolerant through replication
-across edge and cloud. KIFTO~\cite{costa2026kifto} detects faulty IoT devices and
-reschedules the affected workloads to healthy nodes; it moves pods, whereas we keep
-them in place and repair the path. Chen et al.~\cite{chen2026k8sresilience} inject
-node, pod and network faults into cloud--edge Kubernetes and measure how stock
-Kubernetes degrades; we propose a repair for the network faults. Jeffery et
-al.~\cite{jeffery2021rearchitecting} make the control plane tolerate edge networks by
-replacing its strongly consistent store; we address the data plane. Kang et
-al.~\cite{kang2021cni} compare CNIs for edge publish/subscribe traffic to choose one;
-we run two at once as redundant paths.
+CEFIoT~\cite{javed2018cefiot} replicates IoT processing across edge and cloud.
+KIFTO~\cite{costa2026kifto} reschedules the workloads of faulty IoT devices to healthy
+nodes; we keep pods in place and repair the path. Chen et
+al.~\cite{chen2026k8sresilience} measure how stock Kubernetes degrades under injected
+cloud--edge faults; we repair the network faults. Jeffery et
+al.~\cite{jeffery2021rearchitecting} make the control plane tolerate edge networks; we
+address the data plane. Kang et al.~\cite{kang2021cni} compare CNIs for edge
+publish/subscribe traffic; we run two at once as redundant paths.
 
 % ======================================================================
 \section{Limitations and Future Work}
@@ -530,16 +532,16 @@ we run two at once as redundant paths.
   \item \textbf{Binary path state.} A path is up or down; under partial loss we switch
         only after $k$ failed probes in a row. A quality score from probe loss and
         delay would handle gray failures better.
-  \item \textbf{Emulated testbed.} All nodes share one host and clock; a deployment on
+  \item \textbf{Emulated testbed.} All nodes share one host and clock, and link
+        conditions are emulated (Section~\ref{sec:profile}); a deployment on
         heterogeneous edge hardware (for example Raspberry Pi nodes with Wi-Fi and
         cellular uplinks) is future work.
   \item \textbf{Scale.} We measured three nodes; Table~\ref{tab:scale} only projects
         larger sites. Beyond a few dozen nodes the agents need watches instead of
         per-round API lists, and sampled or hierarchical probing.
-  \item \textbf{Slow node verdicts.} A node whose CNI fault also cuts its agent off
-        from the API server is blamed only once its last report goes stale (30\,s).
-        Reporting through the host network instead of the pod network could shorten
-        this to the detection time.
+  \item \textbf{Slow node verdicts.} A node whose agent is cut off by its own CNI
+        fault is blamed only once its report is stale (30\,s); reporting over the host
+        network could cut this to the detection time.
   \item \textbf{Connections stay on the failover path.} Connection tracking keeps a
         connection opened during node-level failover on the pods' backup addresses
         after failback (kube-proxy flushes only UDP entries). Such MQTT sessions
