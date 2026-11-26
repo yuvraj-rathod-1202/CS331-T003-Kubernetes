@@ -41,8 +41,8 @@ for a broken pair onto the backup network or through a relay node, without chang
 any pod or Service address. Node-level failover covers the faults that steering cannot.
 On a three-node testbed with an MQTT sensor workload and emulated link cuts, loss,
 flapping and CNI faults, stock Kubernetes never recovered from a link or overlay fault
-within 60\,s. Our system restored service in a median of 6.0--6.6\,s, including when
-both direct links failed, kept every MQTT session open without a reconnection, and
+within 60\,s. Our system restored service in a median of 6.4--6.7\,s, including when
+both direct links failed, kept every QoS~1 MQTT session open without a reconnection, and
 raised availability under 30\% loss from 41\% to 90\%. We also report three pitfalls
 (source NAT, reverse-path filtering and connection tracking) that break or silently
 weaken connections when paths change under a container network.
@@ -261,11 +261,13 @@ to the API server, so nothing was ever declared failed. Node-level failover did 
 help with link or overlay faults either, and this is by design: when only the pair
 A--B fails, the operator cannot blame either node.
 
-The full system repaired a primary link cut in a median of \tbd{6.0}\,s (p95
-\tbd{7.4}\,s), which matches the detection bound $k\Delta=6$\,s. Every run switched
-exactly once. Losing both direct links cost no extra time (\tbd{6.5}\,s): both probes
-to B fail in the same rounds, so the router went straight to the relay through C.
-Without the relay this fault was never repaired. Overlay faults, where the link works
+The full system repaired a primary link cut in a median of 6.4\,s (p95 7.5\,s), which
+matches the detection bound $k\Delta=6$\,s. Every run switched once, and switched back
+once after the fault. Losing both direct links cost almost no extra time (6.7\,s):
+both probes to B fail in the same rounds, so in 8 of 10 runs the router went straight
+to the relay through C. In the other two it chose the backup path one round before the
+backup probes also reached three failures, and moved to the relay 2\,s later. Without
+the relay this fault was never repaired. Overlay faults, where the link works
 but IPIP packets are dropped, were repaired in 6.6\,s, because the probes travel
 through the overlay itself and see what pods see.
 
@@ -299,8 +301,8 @@ within the 60\,s fault in any run}
 \toprule
 Fault & Kubernetes & Node failover & Full system \\
 \midrule
-Link cut        & -- & -- & \tbd{6.0 (7.4)} \\
-Both links cut  & -- & -- & \tbd{6.5 (7.6)}$^\dagger$ \\
+Link cut        & -- & -- & 6.4 (7.5) \\
+Both links cut  & -- & -- & 6.7 (7.6)$^\dagger$ \\
 30\% loss       & -- & -- & 9.6 (19.2) \\
 Overlay fault   & -- & -- & 6.6 (7.4) \\
 Node CNI fault  & -- & 29.1 (30.1) & 29.6 (30.9) \\
@@ -310,22 +312,35 @@ Node CNI fault  & -- & 29.1 (30.1) & 29.6 (30.9) \\
 \end{table}
 
 \subsection{IoT service continuity}
-Table~\ref{tab:mqtt} shows what the sensors experienced. Under steering, no MQTT
-session was interrupted by a link or overlay fault: there were no reconnections, and
-QoS~0 delivery stayed at 100\%. The broker's address does not change, and neither does
-the connection's NAT state (Section~\ref{sec:lessons}), so TCP simply retransmits
-over the new path. The longest silence of a sensor is therefore the detection time
-plus TCP's retransmission backoff~\cite{rfc6298}. The retransmission timeout doubles
-while the path is down, so the first retransmission after the switch can arrive up to
-one backoff interval late: \tbd{6.5}\,s typically, and about 13\,s in the worst runs.
+Table~\ref{tab:mqtt} shows what the sensors experienced. Under steering, no QoS~1
+session reconnected in any of the 50 runs with a link or overlay fault, including the
+runs where both links were cut and traffic went through the relay. The broker's
+address does not change, and neither does the connection's NAT state
+(Section~\ref{sec:lessons}), so TCP simply retransmits over the new path. The longest
+silence of a sensor is therefore the detection time plus TCP's retransmission
+backoff~\cite{rfc6298}. The retransmission timeout doubles while the path is down, so
+the first retransmission after the switch can come up to one backoff interval late:
+the gap was 6.5\,s in 6 of 10 link-cut runs and about 13\,s in the other 4.
+
+QoS~0 sessions reconnected in 14 of those 50 runs, and these reconnections caused all
+of the QoS~0 losses under steering (median delivery 100\%, at worst 91\%). The network
+did not break these connections; the client did. A QoS~0 publisher receives nothing
+from the broker, so the client sends a keepalive ping every 15\,s. When a ping fell
+into the outage, its response arrived after the client's 10\,s ping timeout, and the
+client closed a TCP connection that was about to recover. QoS~1 publishers receive an
+acknowledgement for every message and did not need to ping during a short outage.
+Keepalive and ping timeouts longer than the expected repair time ($k\Delta$ plus one
+backoff interval) avoid this.
 
 Without steering, during cuts and CNI faults every sensor lost its session once the
 15\,s MQTT keepalive expired, and reconnected only after the fault. QoS~1 still delivered every
 message, because the client stores and resends unacknowledged messages, but QoS~0
 lost about 57\% of them. The node CNI fault shows how much a reconnection costs. The
-Service was repaired after 29\,s, yet sensors stayed silent for 57--59\,s because the
-MQTT client backs off exponentially between reconnection attempts (1, 2, 4, 8,
-16\,s). Under 30\% loss, sessions survived in every configuration, but stock
+Service was repaired after 29\,s, yet most sensors stayed silent for 57--59\,s. Their
+sessions dropped when the keepalive expired, 21--30\,s into the fault. The first
+reconnection attempt then went to the still-broken primary endpoint and waited out the
+client's 30\,s connect timeout. Only the next attempt reached the broker through the
+shadow EndpointSlice. Under 30\% loss, sessions survived in every configuration, but stock
 Kubernetes lost 22\% of QoS~0 messages; steering lost none and shortened the longest
 gap from 13.5\,s to 3.3\,s.
 
@@ -340,7 +355,8 @@ gap from 13.5\,s to 3.3\,s.
 \toprule
 Fault & Kubernetes & Node failover & Full system \\
 \midrule
-Link cut        & 43 / 62.4 & \tbd{} & \tbd{100 / 6.5} \\
+Link cut        & 43 / 62.4 & 43 / 61.1 & 100 / 6.5 \\
+Both links cut  & 43 / 63.4 & 42 / 60.9 & 100 / 13.0 \\
 30\% loss       & 78 / 13.5 & 80 / 8.5 & 100 / 3.3 \\
 Overlay fault   & 44 / 62.2 & 43 / 61.7 & 100 / 6.5 \\
 Node CNI fault  & 43 / 63.0 & 60 / 57.4 & 56 / 58.8 \\
@@ -497,8 +513,9 @@ Kubernetes cannot see a broken path between two healthy edge nodes, so IoT traff
 on that path is lost for as long as the fault lasts. Running two pod networks over
 separate links, probing every node pair on both, and steering each broken pair onto
 the backup network or through a relay repairs such faults in about 6\,s without
-changing any address. In our testbed this kept every MQTT session open through link
-and overlay faults, where stock Kubernetes lost more than half of the QoS~0 telemetry.
+changing any address. In our testbed this kept every QoS~1 MQTT session open through
+link cuts and overlay faults, where stock Kubernetes lost every session and more than
+half of the QoS~0 telemetry.
 
 \bibliographystyle{IEEEtran}
 \bibliography{refs}

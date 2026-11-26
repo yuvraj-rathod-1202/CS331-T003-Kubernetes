@@ -129,22 +129,35 @@ def grouped_bars(rows, out, metric, ylabel, title, name, scale=1.0, ylim=None, t
     n = len(configs)
     width = 0.8 / max(n, 1)
     fig, ax = plt.subplots(figsize=(WIDTH, 2.0))
-    for i, (key, cname, color, _, hatch) in enumerate(configs):
+    # Each fault's group is centred on the configurations that have data for it.
+    slots = {}
+    for j, (fkey, _) in enumerate(faults):
+        have = [c[0] for c in configs if data.get((c[0], fkey))]
+        for i, key in enumerate(have):
+            slots[(key, fkey)] = j + width * (i - (len(have) - 1) / 2.0)
+    zeros = []
+    for key, cname, color, _, hatch in configs:
         xs, meds, errs = [], [], [[], []]
-        for j, (fkey, _) in enumerate(faults):
+        for fkey, _ in faults:
             vals = [v * scale for v in data.get((key, fkey), [])]
             if not vals:
                 continue
             med = percentile(vals, 50)
             worst = percentile(vals, tail)
-            xs.append(j - 0.4 + width * (i + 0.5))
+            xs.append(slots[(key, fkey)])
             meds.append(med)
             errs[0].append(max(0.0, med - worst))
             errs[1].append(max(0.0, worst - med))
+            if med < 0.5:  # in plotted units: under 0.5 % or 0.5 s
+                zeros.append(slots[(key, fkey)])
         # The edge line in the surface color leaves a visible gap between adjacent bars.
         ax.bar(xs, meds, width=width, color=color, hatch=hatch, edgecolor="white",
                linewidth=0.8, label=cname, yerr=errs, error_kw={"elinewidth": 0.7,
                "capsize": 1.5, "ecolor": MUTED})
+    # A bar of height zero is invisible: label it, so it does not read as missing data.
+    for x in zeros:
+        ax.annotate("0", (x, 0), xytext=(0, 1.5), textcoords="offset points",
+                    ha="center", va="bottom", fontsize=5.5, color=MUTED)
     ax.set_xticks(range(len(faults)))
     ax.set_xticklabels([f[1] for f in faults], rotation=20, ha="right")
     ax.set_ylabel(ylabel)
