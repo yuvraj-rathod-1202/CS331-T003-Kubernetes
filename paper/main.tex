@@ -374,9 +374,34 @@ whisker to the 5th percentile).}
 \label{fig:avail}
 \end{figure}
 
-\subsection{Overhead}
-\todo{Probe bandwidth and CPU per node; $2n(n-1)$ probes per round; detection time vs.\
-probe interval $\Delta\in\{0.5,1,2\}$\,s (M5).}
+\subsection{Overhead and probe interval}
+On the healthy cluster with $\Delta=2$\,s, the health agent used \tbd{0.1--0.2}\% of
+one core and \tbd{35}\,MB of memory per node, and the link router \tbd{0.1}\% and
+\tbd{35}\,MB; the operator used \tbd{0.3}\% and \tbd{59}\,MB. Each probe opens two
+short connections, one of them carrying a 1{,}400-byte body to catch MTU problems.
+Probe traffic on the backup network, where nothing else runs, was \tbd{2--3}\,kB/s per
+node in each direction, and the same again on the primary network. With $n$ nodes this
+grows as $n-1$ per node.
+
+Table~\ref{tab:delta} shows the trade-off that $\Delta$ controls. Detection, and with
+it recovery from a link cut, scales with $k\Delta$, while probe traffic scales with
+$1/\Delta$.
+
+\begin{table}[t]
+\centering
+\caption{Probe interval $\Delta$ ($k=3$): median (p95) Service recovery from a
+primary link cut over 10 runs, and backup-network probe traffic per node}
+\label{tab:delta}
+\footnotesize
+\begin{tabular}{@{}lccc@{}}
+\toprule
+$\Delta$ [s] & 1 & 2 & 4 \\
+\midrule
+Recovery [s]      & \tbd{} & \tbd{6.0 (7.4)} & \tbd{} \\
+Probe traffic [kB/s] & \tbd{} & \tbd{} & \tbd{} \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 % ======================================================================
 \section{Lessons: Changing Paths Under a Container Network}
@@ -436,8 +461,15 @@ endpoints at layer~7 (outlier detection~\cite{istiooutlier}) but can only avoid 
 endpoint, not repair the path to it. Multi-cluster fabrics such as
 Submariner~\cite{submariner} and Liqo~\cite{iorio2023liqo} connect clusters, and
 CEFIoT~\cite{javed2018cefiot} makes IoT processing fault-tolerant through replication
-across edge and cloud. \todo{Add 2--3 recent edge-Kubernetes resilience papers,
-including any PerCom/6DCIoT work; verify every reference.}
+across edge and cloud. KIFTO~\cite{costa2026kifto} detects faulty IoT devices and
+reschedules the affected workloads to healthy nodes; it moves pods, whereas we keep
+them in place and repair the path. Chen et al.~\cite{chen2026k8sresilience} inject
+node, pod and network faults into cloud--edge Kubernetes and measure how stock
+Kubernetes degrades; we propose a repair for the network faults. Jeffery et
+al.~\cite{jeffery2021rearchitecting} make the control plane tolerate edge networks by
+replacing its strongly consistent store; we address the data plane. Kang et
+al.~\cite{kang2021cni} compare CNIs for edge publish/subscribe traffic to choose one;
+we run two at once as redundant paths.
 
 % ======================================================================
 \section{Limitations and Future Work}
