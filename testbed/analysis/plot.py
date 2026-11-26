@@ -26,16 +26,17 @@ import matplotlib.pyplot as plt  # noqa: E402
 CONFIGS = [
     ("vanilla", "Kubernetes", "#257de0", "-", ""),
     ("node", "Node failover", "#f47230", "--", "//"),
-    ("full", "Link steering", "#00b894", "-.", "\\\\"),
-    ("full-norelay", "Steering, no relay", "#f2a600", ":", "xx"),
+    ("full", "Full system", "#00b894", "-.", "\\\\"),
+    ("full-norelay", "Full, no relay", "#f2a600", ":", "xx"),
 ]
+# Axis labels break onto two lines so six groups fit a column without overlapping.
 FAULTS = [
-    ("link-cut", "Link cut"),
-    ("link-cut-both", "Both links cut"),
-    ("link-loss30", "30% loss"),
+    ("link-cut", "Link\ncut"),
+    ("link-cut-both", "Both links\ncut"),
+    ("link-loss30", "30%\nloss"),
     ("link-flap", "Flapping"),
-    ("overlay-cut", "Overlay fault"),
-    ("node-cni", "Node CNI fault"),
+    ("overlay-cut", "Overlay\nfault"),
+    ("node-cni", "Node CNI\nfault"),
 ]
 INK = "#1f1f1f"
 MUTED = "#6b6b6b"
@@ -100,7 +101,7 @@ def recovery_cdf(rows, out, fault, label):
         if r["fault"] == fault and r.get("http_svc_recovered") == "0":
             censored[r["config"]] += 1
     configs, _ = present(rows)
-    fig, ax = plt.subplots(figsize=(WIDTH, 1.9))
+    fig, ax = plt.subplots(figsize=(WIDTH, 1.7))
     xmax = 0
     for key, name, color, ls, _ in configs:
         vals = sorted(data.get((key, fault), []))
@@ -114,7 +115,7 @@ def recovery_cdf(rows, out, fault, label):
     ax.set_ylim(0, 1.02)
     ax.set_xlabel("Time from fault to recovery (s)")
     ax.set_ylabel("Fraction of runs")
-    ax.set_title("Service recovery: %s" % label, loc="left")
+    ax.set_title("Service recovery: %s" % label.replace("\n", " "), loc="left")
     ax.legend(frameon=False, loc="center")
     save(fig, out, "recovery_cdf_%s" % fault)
 
@@ -128,7 +129,7 @@ def grouped_bars(rows, out, metric, ylabel, title, name, scale=1.0, ylim=None, t
         faults = [f for f in faults if f[0] in only]
     n = len(configs)
     width = 0.8 / max(n, 1)
-    fig, ax = plt.subplots(figsize=(WIDTH, 2.0))
+    fig, ax = plt.subplots(figsize=(WIDTH, 1.8))
     # Each fault's group is centred on the configurations that have data for it.
     slots = {}
     for j, (fkey, _) in enumerate(faults):
@@ -159,13 +160,13 @@ def grouped_bars(rows, out, metric, ylabel, title, name, scale=1.0, ylim=None, t
         ax.annotate("0", (x, 0), xytext=(0, 1.5), textcoords="offset points",
                     ha="center", va="bottom", fontsize=5.5, color=MUTED)
     ax.set_xticks(range(len(faults)))
-    ax.set_xticklabels([f[1] for f in faults], rotation=20, ha="right")
+    ax.set_xticklabels([f[1] for f in faults], linespacing=1.0)
     ax.set_ylabel(ylabel)
     if ylim:
         ax.set_ylim(*ylim)
     ax.grid(axis="x", visible=False)
     ax.set_title(title, loc="left")
-    ax.legend(frameon=False, ncol=2, loc="upper left", bbox_to_anchor=(0, -0.42))
+    ax.legend(frameon=False, ncol=2, loc="upper left", bbox_to_anchor=(0, -0.24))
     save(fig, out, name)
 
 

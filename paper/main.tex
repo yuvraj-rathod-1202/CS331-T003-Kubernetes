@@ -115,6 +115,15 @@ while the link works (for example a filtering rule or a broken tunnel endpoint);
 traffic altogether. Kubernetes detects none of them, because the kubelet's heartbeat to
 the API server does not cross the broken pod path.
 
+\subsection{Why existing checks miss these faults}
+The kubelet runs readiness and liveness probes on the pod's own node~\cite{k8sprobes},
+so a pod behind a broken path stays Ready, and clients across the fault keep sending to
+it. Service meshes stop sending to endpoints whose requests fail~\cite{istiooutlier},
+but cannot repair the path: with one replica, or all replicas behind it, nothing is
+left to send to. Cilium's health checker probes the other nodes, typically once a
+minute, but only reports the result~\cite{ciliumhealth}. None of these changes the
+path that pod traffic takes.
+
 \subsection{Requirements}
 Repair must (R1) act within seconds, (R2) not change pod or Service addresses, so that
 open connections such as MQTT sessions survive, (R3) not flap under partial loss,
@@ -426,7 +435,6 @@ problems. Nothing else uses the backup network, and the probes there amounted to
 3.3\,kB/s per node in each direction. The primary network carries the same probes plus
 the agent's API reads: it re-reads its peer list and configuration every round, which
 added about 11\,kB/s of downstream traffic per node and could be replaced by a watch.
-Per node, probing grows with $n-1$.
 
 Table~\ref{tab:delta} shows the trade-off that $\Delta$ controls. Probe traffic and
 the agent's CPU scale with $1/\Delta$. Detection scales with $k\Delta$ only while a
@@ -455,6 +463,32 @@ Agent CPU [\%]        & 0.33 & 0.17 & 0.09 \\
 \end{tabular}
 \end{table}
 
+Table~\ref{tab:scale} projects these costs to larger sites. An agent probes all peers
+concurrently, so a round takes no longer with more nodes, but its probe traffic grows
+with $n-1$: at $n=50$, 81\,kB/s per network and direction, about 7\% of a 10\,Mbit/s
+wireless link. If CPU grows with the probe count as it does with $1/\Delta$, the agent
+needs about 4\% of a core. The API reads grow faster: every agent lists all agent pods
+(about 8\,kB each) every round, so the API server serves $O(n^2)$ bytes per round,
+about 8\,MB/s at $n=50$. Watches instead of lists remove this cost.
+
+\begin{table}[t]
+\centering
+\caption{Projected cost per node with $n$ nodes ($\Delta=2$\,s), scaled from the
+measured $n=3$. Probe traffic per network and direction}
+\label{tab:scale}
+\footnotesize
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+$n$ & 3 (measured) & 10 & 25 & 50 \\
+\midrule
+Probes per round           & 4    & 18  & 48  & 98  \\
+Probe traffic [kB/s]       & 3.3  & 15  & 40  & 81  \\
+API reads [kB/s]           & 11   & 33  & 80  & 159 \\
+Agent CPU [\% of a core]   & 0.17 & 0.8 & 2.0 & 4.2 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
 % ======================================================================
 \section{Related Work}
 \label{sec:related}
@@ -471,9 +505,9 @@ both endpoints support it and have several addresses; our approach is transparen
 applications and works for any transport.
 
 \textbf{Kubernetes and edge resilience.} Kubernetes handles node failure through
-heartbeats and eviction~\cite{k8snodelifecycle}. Service meshes detect failing
-endpoints at layer~7 (outlier detection~\cite{istiooutlier}) but can only avoid an
-endpoint, not repair the path to it. Multi-cluster fabrics such as
+heartbeats and eviction~\cite{k8snodelifecycle}; Section~\ref{sec:background}
+explains why probes, service meshes and CNI health checks do not repair broken paths.
+Multi-cluster fabrics such as
 Submariner~\cite{submariner} and Liqo~\cite{iorio2023liqo} connect clusters, and
 CEFIoT~\cite{javed2018cefiot} makes IoT processing fault-tolerant through replication
 across edge and cloud. KIFTO~\cite{costa2026kifto} detects faulty IoT devices and
@@ -499,22 +533,19 @@ we run two at once as redundant paths.
   \item \textbf{Emulated testbed.} All nodes share one host and clock; a deployment on
         heterogeneous edge hardware (for example Raspberry Pi nodes with Wi-Fi and
         cellular uplinks) is future work.
-  \item \textbf{Scale.} Probing grows as $n(n-1)$; larger sites need sampled or
-        hierarchical probing.
+  \item \textbf{Scale.} We measured three nodes; Table~\ref{tab:scale} only projects
+        larger sites. Beyond a few dozen nodes the agents need watches instead of
+        per-round API lists, and sampled or hierarchical probing.
   \item \textbf{Slow node verdicts.} A node whose CNI fault also cuts its agent off
         from the API server is blamed only once its last report goes stale (30\,s).
         Reporting through the host network instead of the pod network could shorten
         this to the detection time.
-  \item \textbf{Connections stay on the failover path.} During node-level failover
-        the shadow EndpointSlice translates new Service connections to the pods'
-        backup addresses, and connection tracking keeps that translation for the life
-        of the connection, long after failback; kube-proxy clears stale entries only
-        for UDP. MQTT sensors that reconnected during a node CNI fault stayed on the
-        backup network in later runs. A primary link cut did not affect them, but a
-        cut of both links did, because the relay carries only primary-network
-        traffic: every sensor reconnected, after gaps of 22--30\,s. The operator could
-        reset connections to shadow addresses at failback, at the cost of one
-        reconnection, or the router could also steer backup-network traffic.
+  \item \textbf{Connections stay on the failover path.} Connection tracking keeps a
+        connection opened during node-level failover on the pods' backup addresses
+        after failback (kube-proxy flushes only UDP entries). Such MQTT sessions
+        survived a later primary link cut but dropped for 22--30\,s when both links
+        failed, since the relay carries only primary-network traffic. Resetting them
+        at failback, or also steering backup traffic, would avoid this.
   \item \textbf{One relay hop}, IPv4 only, and the probe port is never steered.
 \end{itemize}
 
