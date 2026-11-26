@@ -43,9 +43,9 @@ On a three-node testbed with an MQTT sensor workload and emulated link cuts, los
 flapping and CNI faults, stock Kubernetes never recovered from a link or overlay fault
 within 60\,s. Our system restored service in a median of 6.4--6.7\,s, including when
 both direct links failed, kept every QoS~1 MQTT session open without a reconnection, and
-raised availability under 30\% loss from 41\% to 90\%. We also report three pitfalls
-(source NAT, reverse-path filtering and connection tracking) that break or silently
-weaken connections when paths change under a container network.
+raised availability under 30\% loss from 41\% to 90\%. We also identify two default
+settings, source NAT in kube-proxy and strict reverse-path filtering, that reset or
+blackhole connections at every path switch, and show how to avoid them.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -86,10 +86,10 @@ pair of nodes. Our contributions are:
   \item An \textbf{edge testbed and evaluation} with an MQTT sensor workload and six
         fault types, including gray failures, comparing stock Kubernetes, node-level
         failover and our system over 10 repetitions (Section~\ref{sec:eval}).
-  \item Three \textbf{lessons} for any system that changes paths under a container
-        network: source NAT and strict reverse-path filtering break connections at
-        the moment of a switch, and connection tracking keeps connections on a
-        failover path long after the fault (Section~\ref{sec:lessons}).
+  \item Two \textbf{conditions for safe path switches} under a container network: no
+        source NAT on pod-to-Service traffic and loose reverse-path filtering on the
+        tunnels. With the defaults, every switch resets or blackholes connections
+        (Section~\ref{sec:safe}).
 \end{itemize}
 The implementation and testbed are open source.\footnote{Anonymised repository:
 \tbd{https://anonymous.4open.science/r/...}}
@@ -186,6 +186,31 @@ resource's status, raises a \emph{LinksReachable} condition and emits \emph{NoPa
 and \emph{PathRestored} events. When all probes recover, traffic moves back to the
 primary path.
 
+\subsection{Making path switches safe}
+\label{sec:safe}
+A connection survives a path switch (R2) only if nothing on its way depends on the
+path. Two default settings do, and both broke connections in our first experiments.
+
+\emph{Source NAT.} kube-proxy masquerades Service traffic whose source lies outside the
+pod range it is configured with, and Linux discards a masqueraded connection's NAT
+state when its output interface changes. The next packet leaves with a new source
+address, and the server answers with a reset. With the default range
+(10.244.0.0/16, the backup network's), every Service connection from a primary-network
+pod was masqueraded, so every switch, in either direction, reset every MQTT session and
+stretched the longest gap from 6.5 to 13\,s. We configure kube-proxy with the primary
+CNI's pod range. Pod traffic is then not masqueraded, and a switch changes only the
+tunnel.
+
+\emph{Strict reverse-path filtering.} Each node switches on its own probes, so for a
+few seconds $A\to B$ and $B\to A$ can use different tunnels. Strict reverse-path
+filtering, the default on our nodes, drops a packet that arrives on an interface the
+node would not reply through, so the pair stays broken until both nodes agree. Under
+30\% loss, where the two nodes switch at different times, availability stayed at 63\%
+and requests kept failing after the fault had cleared. The link router therefore sets
+loose filtering on the two tunnel devices, the standard setting for multihomed
+hosts~\cite{rfc3704}. In the same test this raised availability to 91\% and removed
+the failures after recovery.
+
 \subsection{Node-level failover}
 Steering repairs a path but cannot repair a node whose CNI data plane drops all pod
 traffic. For this case the operator, which sees all reports, blames a node only when
@@ -201,7 +226,7 @@ The system is written in Go, about 2{,}400 lines plus 1{,}800 lines of tests: an
 operator built with controller-runtime, a health-agent DaemonSet and a
 link-router DaemonSet that manages routes and rules through netlink. The router needs
 only the \texttt{NET\_ADMIN} capability; a short-lived init container sets loose
-reverse-path filtering on the two tunnel devices (Section~\ref{sec:lessons}). A
+reverse-path filtering on the two tunnel devices (Section~\ref{sec:safe}). A
 cleanup mode removes every route and rule it owns. All state lives in Kubernetes
 objects, so any component can restart at any time without losing or misapplying routes.
 
@@ -232,8 +257,8 @@ three configurations: \emph{Kubernetes} (no repair), \emph{node failover} only, 
 the \emph{full} system; an ablation disables the relay. Each run has 20\,s of normal
 traffic, a 60\,s fault and 45\,s of recovery, and every cell is repeated 10 times. A
 probe counts as recovered at the first of ten consecutive successful requests (1\,s).
-For the two link-cut faults, the clients reconnect before every run
-(Section~\ref{sec:lessons} explains why).
+For the two link-cut faults, the clients reconnect before every run, so that every run
+starts on the primary path (Section~\ref{sec:limits} explains why).
 
 \begin{table}[t]
 \centering
@@ -316,7 +341,7 @@ Table~\ref{tab:mqtt} shows what the sensors experienced. Under steering, no QoS~
 session reconnected in any of the 50 runs with a link or overlay fault, including the
 runs where both links were cut and traffic went through the relay. The broker's
 address does not change, and neither does the connection's NAT state
-(Section~\ref{sec:lessons}), so TCP simply retransmits over the new path. The longest
+(Section~\ref{sec:safe}), so TCP simply retransmits over the new path. The longest
 silence of a sensor is therefore the detection time plus TCP's retransmission
 backoff~\cite{rfc6298}. The retransmission timeout doubles while the path is down, so
 the first retransmission after the switch can come up to one backoff interval late:
@@ -429,43 +454,6 @@ Agent CPU [\%]        & 0.33 & 0.17 & 0.09 \\
 \end{table}
 
 % ======================================================================
-\section{Lessons: Changing Paths Under a Container Network}
-\label{sec:lessons}
-
-\textbf{Source NAT ties a connection to an interface.} kube-proxy masquerades Service
-traffic whose source lies outside its configured pod range. In our first runs the range
-still named the default network, so every Service connection from a primary-network pod
-was masqueraded to the address of its outgoing tunnel. Linux discards the NAT state of
-a masqueraded connection when its output interface changes, so the next packet left
-with a new source address and the broker answered with a reset. Every switch, in both
-directions, cost each MQTT client a reconnection and stretched the longest gap from
-6.5 to 13\,s. Configuring kube-proxy with the primary CNI's real pod range removes the
-NAT, and with it the resets.
-
-\textbf{Strict reverse-path filtering punishes asymmetry.} Each node switches on its
-own probes, so for a few seconds $A\to B$ and $B\to A$ can use different tunnels. With
-strict reverse-path filtering, the default on our nodes, each side drops packets that
-arrive on the tunnel it would not reply through. Under 30\% loss, where the two nodes
-switch at different times, this held availability at 63\%, and requests kept failing
-after the fault had cleared. Loose filtering on the tunnel devices, the standard
-setting for multihomed hosts~\cite{rfc3704}, raised availability to 91\% and removed
-the failures after recovery.
-
-\textbf{Connection tracking outlives the failover.} Node-level failover redirects a
-Service to the pods' backup addresses by publishing a shadow EndpointSlice. A
-connection opened while the shadow exists is translated to a backup address, and
-connection tracking keeps that translation for as long as the connection lives, long
-after failback. Our MQTT sensors reconnected during each node CNI fault and then stayed
-on the backup network for the following runs. A later primary link cut did not touch
-them at all, but a cut of both links broke them, because the relay carries only
-primary-network traffic: all sensors reconnected, after gaps of 22--30\,s. kube-proxy
-clears stale UDP entries when an endpoint disappears but leaves TCP connections alone.
-A repair system should either reset connections to shadow addresses at failback, at
-the cost of one reconnection, or protect backup-network traffic as well. We measured
-the link-cut faults with fresh connections so that every run starts on the primary
-path.
-
-% ======================================================================
 \section{Related Work}
 \label{sec:related}
 
@@ -512,6 +500,16 @@ we run two at once as redundant paths.
         from the API server is blamed only once its last report goes stale (30\,s).
         Reporting through the host network instead of the pod network could shorten
         this to the detection time.
+  \item \textbf{Connections stay on the failover path.} During node-level failover
+        the shadow EndpointSlice translates new Service connections to the pods'
+        backup addresses, and connection tracking keeps that translation for the life
+        of the connection, long after failback; kube-proxy clears stale entries only
+        for UDP. MQTT sensors that reconnected during a node CNI fault stayed on the
+        backup network in later runs. A primary link cut did not affect them, but a
+        cut of both links did, because the relay carries only primary-network
+        traffic: every sensor reconnected, after gaps of 22--30\,s. The operator could
+        reset connections to shadow addresses at failback, at the cost of one
+        reconnection, or the router could also steer backup-network traffic.
   \item \textbf{One relay hop}, IPv4 only, and the probe port is never steered.
 \end{itemize}
 
