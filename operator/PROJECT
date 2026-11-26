@@ -14,7 +14,7 @@ resources:
   controller: true
   domain: cn-operator.yuvraj-rathod-1202.github.io
   group: remediation
-  kind: NetworkRemediation
+  kind: CNIResilience
   path: CS331-CN-Project-1/operator/api/v1alpha1
   version: v1alpha1
 version: "3"

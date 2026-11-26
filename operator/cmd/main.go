@@ -42,13 +42,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	remediationv1alpha1 "CS331-CN-Project-1/operator/api/v1alpha1"
-	"CS331-CN-Project-1/operator/internal/controller"
-	cnimod "CS331-CN-Project-1/operator/internal/controller/cni"
 	cniresctrl "CS331-CN-Project-1/operator/internal/controller/cniresilience"
-	corednsmod "CS331-CN-Project-1/operator/internal/controller/coredns"
-	ipamctrl "CS331-CN-Project-1/operator/internal/controller/ipam"
-	netpolmod "CS331-CN-Project-1/operator/internal/controller/networkpolicy"
-	podconnmod "CS331-CN-Project-1/operator/internal/controller/podconnectivity"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -71,19 +65,14 @@ func main() {
 	var webhookCertPath, webhookCertName, webhookCertKey string
 	var enableLeaderElection bool
 	var controllersFlag string
-	var ipamConfigureKubeProxy bool
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
-	flag.StringVar(&controllersFlag, "controllers", "ipam,cniresilience",
-		"Comma-separated controllers to run: networkremediation, ipam, cniresilience, or all. "+
-			"networkremediation (Project 1) is off by default: its PodConnectivity module "+
-			"cordons and taints a node on a fault and never reverses it.")
-	flag.BoolVar(&ipamConfigureKubeProxy, "ipam-configure-kube-proxy", false,
-		"IPAM: set kube-proxy's local-traffic detection for multi-pool pods and restart kube-proxy.")
+	flag.StringVar(&controllersFlag, "controllers", "cniresilience",
+		"Comma-separated controllers to run: cniresilience, or all.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
@@ -205,64 +194,6 @@ func main() {
 	}
 	setupLog.Info("Controllers enabled", "controllers", controllersFlag)
 
-	if enabled["networkremediation"] {
-		reconciler := &controller.NetworkRemediationReconciler{
-			Client: mgr.GetClient(),
-			Scheme: mgr.GetScheme(),
-		}
-
-		// Register all four remediation modules.
-		// Each module implements the Check → Evaluate → Remediate pipeline.
-		reconciler.RegisterModule(
-			cnimod.New(mgr.GetClient()),
-			func(spec *remediationv1alpha1.NetworkRemediationSpec) bool { return spec.CNI.Enabled },
-			func(status *remediationv1alpha1.NetworkRemediationStatus, ms remediationv1alpha1.ModuleStatus) {
-				status.CNI = ms
-			},
-		)
-		reconciler.RegisterModule(
-			corednsmod.New(mgr.GetClient()),
-			func(spec *remediationv1alpha1.NetworkRemediationSpec) bool { return spec.CoreDNS.Enabled },
-			func(status *remediationv1alpha1.NetworkRemediationStatus, ms remediationv1alpha1.ModuleStatus) {
-				status.CoreDNS = ms
-			},
-		)
-		reconciler.RegisterModule(
-			netpolmod.New(mgr.GetClient()),
-			func(spec *remediationv1alpha1.NetworkRemediationSpec) bool { return spec.NetworkPolicy.Enabled },
-			func(status *remediationv1alpha1.NetworkRemediationStatus, ms remediationv1alpha1.ModuleStatus) {
-				status.NetworkPolicy = ms
-			},
-		)
-		podConnMod, err := podconnmod.New(mgr.GetClient(), mgr.GetConfig())
-		if err != nil {
-			setupLog.Error(err, "Failed to create pod connectivity module")
-			os.Exit(1)
-		}
-		reconciler.RegisterModule(
-			podConnMod,
-			func(spec *remediationv1alpha1.NetworkRemediationSpec) bool { return spec.PodConnectivity.Enabled },
-			func(status *remediationv1alpha1.NetworkRemediationStatus, ms remediationv1alpha1.ModuleStatus) {
-				status.PodConnectivity = ms
-			},
-		)
-
-		if err := reconciler.SetupWithManager(mgr); err != nil {
-			setupLog.Error(err, "Failed to create controller", "controller", "networkremediation")
-			os.Exit(1)
-		}
-	}
-
-	// Problem 1: Dynamic Buddy-Style IPAM Controller (Lead: Ramji, with Viraj & Param)
-	if enabled["ipam"] {
-		ipamReconciler := ipamctrl.NewIPAMController(mgr.GetClient(), mgr.GetScheme())
-		ipamReconciler.ConfigureKubeProxy = ipamConfigureKubeProxy
-		if err := ipamReconciler.SetupWithManager(mgr); err != nil {
-			setupLog.Error(err, "Failed to create controller", "controller", "ipam")
-			os.Exit(1)
-		}
-	}
-
 	// Register the spec.nodeName field index on Pods.
 	// This is required by the CNI Resilience health agent, which uses
 	// client.MatchingFields{"spec.nodeName": nodeName} to list pods per node.
@@ -282,7 +213,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Problem 2: CNI Resilience Controller (Lead: Yuvraj, with Deep & Arpan)
+	// CNI resilience: node-level failover and per-link steering.
 	if enabled["cniresilience"] {
 		cniResReconciler := cniresctrl.NewCNIResilienceController(mgr.GetClient(), mgr.GetScheme(),
 			mgr.GetEventRecorderFor("cniresilience"))
@@ -310,9 +241,9 @@ func main() {
 }
 
 // parseControllers turns the --controllers value into a set. "all" enables
-// every controller, so the default behaves as before the flag existed.
+// every controller.
 func parseControllers(v string) (map[string]bool, error) {
-	known := []string{"networkremediation", "ipam", "cniresilience"}
+	known := []string{"cniresilience"}
 	out := map[string]bool{}
 	for name := range strings.SplitSeq(v, ",") {
 		name = strings.TrimSpace(name)

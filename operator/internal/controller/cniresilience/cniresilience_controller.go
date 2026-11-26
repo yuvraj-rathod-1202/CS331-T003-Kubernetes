@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package cniresilience implements the top-level controller for Problem 2.
+// Package cniresilience implements the CNI resilience controller.
 //
 // On each reconcile it reads the per-node health the agents reported, then:
 //   - primary path broken: fail over (if a backup works) and restart the CNI agent;

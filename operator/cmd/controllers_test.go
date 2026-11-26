@@ -20,18 +20,14 @@ import "testing"
 
 func TestParseControllers(t *testing.T) {
 	all, err := parseControllers("all")
-	if err != nil || len(all) != 3 {
+	if err != nil || len(all) != 1 || !all["cniresilience"] {
 		t.Fatalf("all: %v %v", all, err)
 	}
-	one, err := parseControllers(" ipam ")
-	if err != nil || len(one) != 1 || !one["ipam"] {
-		t.Fatalf("ipam: %v %v", one, err)
+	one, err := parseControllers(" cniresilience ")
+	if err != nil || len(one) != 1 || !one["cniresilience"] {
+		t.Fatalf("cniresilience: %v %v", one, err)
 	}
-	two, err := parseControllers("ipam,cniresilience")
-	if err != nil || !two["ipam"] || !two["cniresilience"] || two["networkremediation"] {
-		t.Fatalf("two: %v %v", two, err)
-	}
-	for _, bad := range []string{"", "nope", "ipam,nope"} {
+	for _, bad := range []string{"", "nope", "cniresilience,nope", "ipam"} {
 		if _, err := parseControllers(bad); err == nil {
 			t.Errorf("%q should be rejected", bad)
 		}

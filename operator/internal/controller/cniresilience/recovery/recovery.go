@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package recovery implements CNI repair actions for Problem 2.
+// Package recovery implements CNI repair actions.
 //
 // When a node's primary path is proven broken, the controller taints the node so no
 // new pods land there and this package restarts the CNI agent pod. The taint stays on until the

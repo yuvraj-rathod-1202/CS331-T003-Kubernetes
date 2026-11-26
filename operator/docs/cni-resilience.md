@@ -1,17 +1,14 @@
-# CNI resilience (Project 2, Problem 2)
+# CNI resilience
 
 Every pod normally has one network interface from one CNI. If that CNI's data path
 breaks on a node, the pods there are unreachable while the node still reports `Ready`,
-so Kubernetes does nothing. This part of Project 2 gives pods a second, independent
+so Kubernetes does nothing. This system gives pods a second, independent
 network path and moves Service traffic to it when the first one is proven broken.
 
 Code: `internal/controller/cniresilience/` (controller, `healthagent/`, `failover/`,
-`recovery/`, `linkrouter/`), `cmd/healthagent/`, `cmd/linkrouter/`. Experiment guides and
-measured results:
-[`experiments/cni-resilience-experiment.md`](../../experiments/cni-resilience-experiment.md)
-(node-level failover),
-[`experiments/link-steering-experiment.md`](../../experiments/link-steering-experiment.md)
-(per-link steering).
+`recovery/`, `linkrouter/`), `cmd/healthagent/`, `cmd/linkrouter/`. The testbed that
+sets up the cluster and measures the system is in [`testbed/`](../../testbed/README.md);
+the results are in the paper ([`paper/`](../../paper/)).
 
 ## Two networks per pod
 
@@ -225,7 +222,7 @@ All of it is owned by the router. It never reads or deletes anything else.
 
 | Item | Content |
 |---|---|
-| Table `200` | One route per steered peer block: `<block> via <next hop> dev <flannel.1 or tunl0> onlink`, route protocol `100` (the IPAM agent uses 99) |
+| Table `200` | One route per steered peer block: `<block> via <next hop> dev <flannel.1 or tunl0> onlink`, route protocol `100` |
 | Rule, pref 90 | `ipproto tcp dport 9100 lookup main`: probes to peers use the real path |
 | Rule, pref 91 | `ipproto tcp sport 9100 lookup main`: probe replies use the real path |
 | Rule, pref 100 | `lookup 200`: steering. An empty table falls through to `main` |
@@ -271,32 +268,13 @@ B's Calico blocks over Flannel for direct pod traffic. If B is cut off on both p
 the operator isolates it as before, and every router reports `none` for B. NetworkPolicy
 still applies, because a rerouted packet enters the pod through its Calico interface.
 
-### Measured results
-
-Section 7 of
-[`experiments/link-steering-experiment.md`](../../experiments/link-steering-experiment.md)
-has the full table. Summary (3 nodes, 2026-11-25):
-
-| Case | Result |
-|---|---|
-| L1 | Steered to `backup` in 7 s (pod IP) and 8 s (Service). 0 failures after recovery |
-| L2 | Route removed 6 to 8 s after the fault. One Service request lost in one of two runs |
-| L3 | `relay` via the third node in about 7 s. 0 failures after recovery |
-| L4 | `linkRelay: false`: `none`, `LinksReachable=False`, `NoPath` Events, no node blamed |
-| L4b | A blamed as before (taint, `calico-node` restart). All 4 pairs with A `none` |
-| L5 | One-way fault: both ends steered in about 5 s. 0 failures after |
-| L6 | 2 MB checksum correct over the reroute and across a fault during a download |
-| L7 | 0 route changes in table 200 over 10 minutes |
-| L8, L12 | Router or agent pod deleted during L1: route present at every sample, 0 failures |
-| L10 | Node-level experiments 1 and 2 as recorded. Experiment 3 differs only by the existing recovery backoff |
-| L11 | `--cleanup` left no rules and an empty table 200 on all nodes |
-
 ### Link steering limits
 
 - If A reaches every relay candidate only over Flannel, a link with both direct paths
   down gets no relay: `none` plus an alert.
-- Service traffic is still masqueraded to the node's tunnel address (existing
-  behaviour), so B's pods see the node address, not the client pod's.
+- kube-proxy must be configured with Calico's pod range (`clusterCIDR`). Otherwise it
+  masquerades Service traffic from Calico pods, and every path switch resets the
+  connections. `testbed/bootstrap.sh` sets it.
 - On 3 nodes, any fault that leaves a pair with no relay also isolates a node at the
   node level, so the two layers act together.
 - A restarting health agent used to look like both paths down to the other nodes, because
@@ -321,23 +299,10 @@ Shadow slices, gate conditions and taints are all Kubernetes objects. The operat
 only a short recovery backoff in memory. If it stops during a failover, traffic keeps
 flowing, and after a restart it reads the state back and carries on.
 
-## Measured results (3 nodes, see the experiment guide)
-
-| Case | Result |
-|---|---|
-| Primary path of one worker blocked | Blamed in 10–31 s, then all requests succeed over Flannel |
-| Fault removed | Fail back in about 10 s, no failed request |
-| Same fault, `autoFailover: false` | About half the requests keep failing |
-| Calico IPIP dropped on one worker | Failover in 11 s |
-| Primary and backup of one worker blocked | Pod isolated; all requests succeed through the other worker |
-| Operator stopped during failover | Traffic keeps working |
-| `calico-node` pod deleted | Replaced in ~30 s, no failed request, no action |
-| Both workers blocked | `Unknown`, no action (ambiguous) |
-| Worker frozen (`docker pause`) | No faster than Kubernetes (~55 s) |
-
 ## Known limits
 
-- Detection takes 10–31 s: 3 identical results plus up to the 10 s report heartbeat.
+- A broken path is detected after 3 identical probe results (about 6 s). A node whose
+  own report cannot be published is blamed only once that report is stale (30 s).
 - Only Service traffic to pods with a gate and `net1` is protected. A client on the
   broken node itself has no backup.
 - Gated pods are Ready only while the operator runs (it sets the gate). Start it before
@@ -364,5 +329,6 @@ go run ./cmd/main.go --controllers=cniresilience
 kubectl get cniresilience default-resilience -o yaml
 ```
 
-Full cluster setup (Calico move, Multus, Flannel, workload) is in
-[`experiments/cni-resilience-experiment.md`](../../experiments/cni-resilience-experiment.md).
+Full cluster setup (Calico move, Multus, Flannel, workload) is scripted in
+[`testbed/bootstrap.sh`](../../testbed/bootstrap.sh) and
+[`testbed/workload.sh`](../../testbed/workload.sh).

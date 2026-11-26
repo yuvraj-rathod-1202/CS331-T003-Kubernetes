@@ -17,7 +17,7 @@ func TestOwnedRoute(t *testing.T) {
 	}{
 		{"ours", 200, 100, true},
 		{"other table", 254, 100, false},
-		{"ipam agent protocol", 200, 99, false},
+		{"another owner's protocol", 200, 99, false},
 		{"main table proto 99", 254, 99, false},
 	}
 	for _, tc := range tests {

@@ -22,7 +22,7 @@ import (
 )
 
 // =============================================================================
-// This file defines the CRD types for Problem 2: CNI Resilience.
+// This file defines the CRD types for CNI resilience.
 //
 // CNIResilience is a cluster-scoped resource. One per cluster. It configures
 // the dual-CNI health monitoring and holds the observed health of every node's

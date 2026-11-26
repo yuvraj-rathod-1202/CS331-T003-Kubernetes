@@ -6,18 +6,14 @@ metadata:
 rules:
 - apiGroups:
   - ""
-  resourceNames:
-  - kube-proxy
   resources:
-  - configmaps
+  - events
   verbs:
-  - get
+  - create
   - patch
-  - update
 - apiGroups:
   - ""
   resources:
-  - configmaps
   - nodes
   verbs:
   - get
@@ -28,36 +24,12 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - events
-  verbs:
-  - create
-  - get
-  - list
-  - patch
-  - watch
-- apiGroups:
-  - ""
-  resources:
-  - nodes/status
-  verbs:
-  - get
-  - patch
-  - update
-- apiGroups:
-  - ""
-  resources:
   - pods
   verbs:
   - delete
   - get
   - list
   - watch
-- apiGroups:
-  - ""
-  resources:
-  - pods/eviction
-  verbs:
-  - create
 - apiGroups:
   - ""
   resources:
@@ -72,43 +44,6 @@ rules:
   verbs:
   - get
   - list
-  - watch
-- apiGroups:
-  - apps
-  resourceNames:
-  - kube-proxy
-  resources:
-  - daemonsets
-  verbs:
-  - get
-  - patch
-- apiGroups:
-  - apps
-  resources:
-  - deployments
-  verbs:
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - crd.projectcalico.org
-  resources:
-  - ipamblocks
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - crd.projectcalico.org
-  resources:
-  - ippools
-  verbs:
-  - get
-  - list
-  - patch
-  - update
   - watch
 - apiGroups:
   - discovery.k8s.io
@@ -126,10 +61,6 @@ rules:
   - remediation.cn-operator.yuvraj-rathod-1202.github.io
   resources:
   - cniresiliences
-  - ippools
-  - networkremediations
-  - nodeblocks
-  - nodeipallocations
   verbs:
   - create
   - delete
@@ -142,17 +73,7 @@ rules:
   - remediation.cn-operator.yuvraj-rathod-1202.github.io
   resources:
   - cniresiliences/status
-  - ippools/status
-  - networkremediations/status
-  - nodeblocks/status
-  - nodeipallocations/status
   verbs:
   - get
   - patch
-  - update
-- apiGroups:
-  - remediation.cn-operator.yuvraj-rathod-1202.github.io
-  resources:
-  - networkremediations/finalizers
-  verbs:
   - update
