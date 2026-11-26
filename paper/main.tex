@@ -391,30 +391,39 @@ whisker to the 5th percentile).}
 \end{figure}
 
 \subsection{Overhead and probe interval}
-On the healthy cluster with $\Delta=2$\,s, the health agent used \tbd{0.1--0.2}\% of
-one core and \tbd{35}\,MB of memory per node, and the link router \tbd{0.1}\% and
-\tbd{35}\,MB; the operator used \tbd{0.3}\% and \tbd{59}\,MB. Each probe opens two
-short connections, one of them carrying a 1{,}400-byte body to catch MTU problems.
-Probe traffic on the backup network, where nothing else runs, was \tbd{2--3}\,kB/s per
-node in each direction, and the same again on the primary network. With $n$ nodes this
-grows as $n-1$ per node.
+We measured each component's cost over 120\,s on the healthy cluster. With
+$\Delta=2$\,s, the health agent used 0.17\% of one core and 35\,MB of memory per node,
+the link router 0.07\% and 35\,MB, and the operator 0.24\% and 58\,MB. Each probe
+opens two short connections, one of them carrying a 1{,}400-byte body to catch MTU
+problems. Nothing else uses the backup network, and the probes there amounted to
+3.3\,kB/s per node in each direction. The primary network carries the same probes plus
+the agent's API reads: it re-reads its peer list and configuration every round, which
+added about 11\,kB/s of downstream traffic per node and could be replaced by a watch.
+Per node, probing grows with $n-1$.
 
-Table~\ref{tab:delta} shows the trade-off that $\Delta$ controls. Detection, and with
-it recovery from a link cut, scales with $k\Delta$, while probe traffic scales with
-$1/\Delta$.
+Table~\ref{tab:delta} shows the trade-off that $\Delta$ controls. Probe traffic and
+the agent's CPU scale with $1/\Delta$. Detection scales with $k\Delta$ only while a
+round fits in the interval. A failed probe waits for the full 1\,s timeout, and
+rounds start on interval boundaries, so with $\Delta=1$\,s each failing round
+overran its slot and failing rounds came only every 2\,s. Detection stayed at about
+6\,s while costing twice the traffic. A shorter interval needs a proportionally
+shorter timeout. At $\Delta=4$\,s, recovery took 11.7\,s. The outage then approached
+the MQTT keepalive, and in one of the 10 runs all QoS~1 sessions reconnected.
 
 \begin{table}[t]
 \centering
-\caption{Probe interval $\Delta$ ($k=3$): median (p95) Service recovery from a
-primary link cut over 10 runs, and backup-network probe traffic per node}
+\caption{Probe interval $\Delta$ ($k=3$, 1\,s probe timeout): Service recovery from a
+primary link cut, median (p95) of 10 runs; probe traffic per node and direction on
+the backup network; health-agent CPU per node}
 \label{tab:delta}
 \footnotesize
 \begin{tabular}{@{}lccc@{}}
 \toprule
 $\Delta$ [s] & 1 & 2 & 4 \\
 \midrule
-Recovery [s]      & \tbd{} & \tbd{6.0 (7.4)} & \tbd{} \\
-Probe traffic [kB/s] & \tbd{} & \tbd{} & \tbd{} \\
+Recovery [s]          & 6.0 (6.6) & 6.4 (7.5) & 11.7 (13.1) \\
+Probe traffic [kB/s]  & 6.6 & 3.3 & 1.6 \\
+Agent CPU [\%]        & 0.33 & 0.17 & 0.09 \\
 \bottomrule
 \end{tabular}
 \end{table}
