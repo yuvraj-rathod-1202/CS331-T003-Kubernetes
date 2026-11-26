@@ -208,8 +208,8 @@ node would not reply through, so the pair stays broken until both nodes agree. U
 30\% loss, where the two nodes switch at different times, availability stayed at 63\%
 and requests kept failing after the fault had cleared. The link router therefore sets
 loose filtering on the two tunnel devices, the standard setting for multihomed
-hosts~\cite{rfc3704}. In the same test this raised availability to 91\% and removed
-the failures after recovery.
+hosts~\cite{rfc3704}. This raised availability to about 90\% and removed the failures
+after recovery.
 
 \subsection{Node-level failover}
 Steering repairs a path but cannot repair a node whose CNI data plane drops all pod
