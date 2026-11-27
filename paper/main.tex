@@ -232,8 +232,8 @@ mechanisms run together; Section~\ref{sec:eval} measures each.
 % ======================================================================
 \section{Implementation}
 \label{sec:impl}
-The system is written in Go, about 2{,}400 lines plus 1{,}800 lines of tests: an
-operator built with controller-runtime, a health-agent DaemonSet and a
+The system is written in Go: an operator built with controller-runtime, a
+health-agent DaemonSet and a
 link-router DaemonSet that manages routes and rules through netlink. The router needs
 only the \texttt{NET\_ADMIN} capability; a short-lived init container sets loose
 reverse-path filtering on the two tunnel devices (Section~\ref{sec:safe}). A
