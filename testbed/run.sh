@@ -76,7 +76,7 @@ case " $* " in *" --faults "*) FAULTS_OVERRIDDEN=1 ;; esac
 
 remove_routes() {
   for n in $NODES; do
-    docker exec "$n" sh -c 'for p in 90 91 100; do while ip rule del pref $p 2>/dev/null; do :; done; done
+    docker exec "$(nbox "$n")" sh -c 'for p in 90 91 100; do while ip rule del pref $p 2>/dev/null; do :; done; done
                             ip route flush table 200 2>/dev/null; true'
   done
 }
@@ -127,7 +127,7 @@ wait_healthy() {
     if [ "$config" != vanilla ]; then
       [ "$(k get cniresilience default-resilience -o jsonpath='{.status.phase}' 2>/dev/null)" = Healthy ] || ok=0
       for n in $NODE_A $NODE_B; do
-        [ -z "$(docker exec "$n" ip route show table 200 2>/dev/null)" ] || ok=0
+        [ -z "$(docker exec "$(nbox "$n")" ip route show table 200 2>/dev/null)" ] || ok=0
       done
     fi
     local lines bad

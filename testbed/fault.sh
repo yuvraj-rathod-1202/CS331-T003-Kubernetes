@@ -70,7 +70,7 @@ root_cmd() { echo "tc qdisc replace dev $1 root handle 1: prio bands 5 priomap 1
 netem_to_peer() {
   local node=$1 dev=$2 peer=$3 spec
   spec=$(compose "$(link_of "$dev")" "$4")
-  docker exec "$node" sh -c "
+  docker exec "$(nbox "$node")" sh -c "
     tc qdisc show dev $dev | grep -q 'qdisc prio 1:' || $(root_cmd "$dev")
     tc qdisc replace dev $dev parent 1:4 handle 40: netem $spec
     tc filter show dev $dev parent 1: | grep -q 'flowid 1:4' ||
@@ -96,7 +96,7 @@ apply_profile() {
         cmds="$cmds
         tc filter add dev $dev parent 1: protocol ip prio 1 u32 match ip dst $(node_ip "$m" "$dev")/32 flowid 1:$band"
       done
-      docker exec "$n" sh -c "$cmds"
+      docker exec "$(nbox "$n")" sh -c "$cmds"
     done
   done
 }
@@ -117,7 +117,7 @@ start_flap() {
     up=$(compose "$(link_of "$dev")" "loss 0%")
     down=$(compose "$(link_of "$dev")" "loss 100%")
     for node in $NODE_A $([ "$ONEWAY" = 1 ] || echo "$NODE_B"); do
-      docker exec -d "$node" sh -c "echo \$\$ > /run/$TAG-flap-$dev.pid
+      docker exec -d "$(nbox "$node")" sh -c "echo \$\$ > /run/$TAG-flap-$dev.pid
         while :; do sleep $secs; tc qdisc change dev $dev parent 1:4 handle 40: netem $up
                     sleep $secs; tc qdisc change dev $dev parent 1:4 handle 40: netem $down; done"
     done
@@ -127,7 +127,7 @@ start_flap() {
 clear_all() {
   local n dev
   for n in $NODES; do
-    docker exec "$n" sh -c "
+    docker exec "$(nbox "$n")" sh -c "
       for f in /run/$TAG-flap-*.pid; do [ -f \"\$f\" ] && kill \$(cat \"\$f\") 2>/dev/null; rm -f \"\$f\"; done
       for dev in $PRIMARY_IF $BACKUP_IF; do
         tc qdisc show dev \$dev 2>/dev/null | grep -q 'qdisc prio 1:' && tc qdisc del dev \$dev root
@@ -144,9 +144,9 @@ status() {
   local n dev
   for n in $NODES; do
     for dev in $PRIMARY_IF $BACKUP_IF; do
-      docker exec "$n" tc qdisc show dev "$dev" | grep netem | sed "s/^/$n $dev: /" || true
+      docker exec "$(nbox "$n")" tc qdisc show dev "$dev" | grep netem | sed "s/^/$n $dev: /" || true
     done
-    docker exec "$n" sh -c "iptables -S; iptables -t raw -S" | grep -- "$TAG" | sed "s/^/$n: /" || true
+    docker exec "$(nbox "$n")" sh -c "iptables -S; iptables -t raw -S" | grep -- "$TAG" | sed "s/^/$n: /" || true
   done
 }
 
@@ -156,10 +156,10 @@ case "${1:-}" in
   link-delay) apply_link "${3:-primary}" "delay ${2:?ms}ms" ;;
   link-flap) start_flap "${3:-primary}" "${2:?seconds}" ;;
   overlay-cut)
-    docker exec "$NODE_A" iptables -t raw -I PREROUTING -p 4 -s "$(node_ip "$NODE_B" "$PRIMARY_IF")" -j DROP -m comment --comment "$TAG"
-    docker exec "$NODE_B" iptables -t raw -I PREROUTING -p 4 -s "$(node_ip "$NODE_A" "$PRIMARY_IF")" -j DROP -m comment --comment "$TAG"
+    docker exec "$(nbox "$NODE_A")" iptables -t raw -I PREROUTING -p 4 -s "$(node_ip "$NODE_B" "$PRIMARY_IF")" -j DROP -m comment --comment "$TAG"
+    docker exec "$(nbox "$NODE_B")" iptables -t raw -I PREROUTING -p 4 -s "$(node_ip "$NODE_A" "$PRIMARY_IF")" -j DROP -m comment --comment "$TAG"
     ;;
-  node-cni) docker exec "$NODE_B" iptables -I FORWARD -s 172.16.0.0/16 -j DROP -m comment --comment "$TAG" ;;
+  node-cni) docker exec "$(nbox "$NODE_B")" iptables -I FORWARD -s 172.16.0.0/16 -j DROP -m comment --comment "$TAG" ;;
   clear) clear_all ;;
   profile) apply_profile ;;
   status) status ;;

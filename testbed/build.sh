@@ -26,9 +26,15 @@ docker build -q -t "$IMG_IOTSIM" "$REPO_DIR/testbed/iotsim" >/dev/null
 
 [ "${1:-}" = "--no-load" ] && exit 0
 
-# `minikube image load` does not replace an existing tag, so load with docker directly.
-for n in $NODES; do
-  log "Loading images into $n"
-  docker save "$IMG_AGENT" "$IMG_ROUTER" "$IMG_IOTSIM" | docker exec -i "$n" docker load -q >/dev/null
-done
+if [ "$DISTRO" = k3s ]; then
+  # K3s nodes run containerd: import into its k8s.io namespace on every node.
+  log "Importing images into the K3s nodes"
+  "$K3D" image import -c "$PROFILE" -m direct "$IMG_AGENT" "$IMG_ROUTER" "$IMG_IOTSIM" >/dev/null
+else
+  # `minikube image load` does not replace an existing tag, so load with docker directly.
+  for n in $NODES; do
+    log "Loading images into $n"
+    docker save "$IMG_AGENT" "$IMG_ROUTER" "$IMG_IOTSIM" | docker exec -i "$n" docker load -q >/dev/null
+  done
+fi
 log "Build done: $(docker image inspect "$IMG_ROUTER" --format '{{.Created}}')"

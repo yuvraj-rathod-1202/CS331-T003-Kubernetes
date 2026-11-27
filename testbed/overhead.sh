@@ -13,17 +13,17 @@ SECS=${1:-120}
 HZ=$(getconf CLK_TCK)
 
 # pid of the newest process named $2 inside node $1
-pid_in() { docker exec "$1" pgrep -n -x "$2"; }
+pid_in() { docker exec "$(nbox "$1")" pgrep -n -x "$2"; }
 
 snap() {  # node pid -> "rx_eth0 tx_eth0 rx_net1 tx_net1 cpu_ticks rss_kb"
-  docker exec "$1" sh -c "
+  docker exec "$(nbox "$1")" sh -c "
     awk '/eth0:|net1:/ {gsub(\":\",\" \"); print \$1, \$2, \$10}' /proc/$2/net/dev
     awk '{print \"cpu\", \$14 + \$15}' /proc/$2/stat
     awk '/VmRSS/ {print \"rss\", \$2}' /proc/$2/status"
 }
 
 cpu_rss() {  # node pid -> "cpu_ticks rss_kb"
-  docker exec "$1" sh -c "awk '{printf \"%d \", \$14 + \$15}' /proc/$2/stat; awk '/VmRSS/ {print \$2}' /proc/$2/status"
+  docker exec "$(nbox "$1")" sh -c "awk '{printf \"%d \", \$14 + \$15}' /proc/$2/stat; awk '/VmRSS/ {print \$2}' /proc/$2/status"
 }
 
 declare -A A0 R0 AP RP
