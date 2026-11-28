@@ -41,10 +41,19 @@ if [ ! -x "$K3D" ]; then
 fi
 
 # 1. Cluster: 1 server (C) and 2 agents (A, B), API only on localhost.
+# kube-proxy gets Calico's pod range (Section 3.4 of the paper). KUBE_PROXY_POD_CIDR=
+# (empty) leaves K3s's default, the cluster range 10.244.0.0/16, which masquerades
+# Service traffic from Calico pods; only for the source-NAT ablation.
+KUBE_PROXY_POD_CIDR=${KUBE_PROXY_POD_CIDR-172.16.0.0/16}
+proxy_args=()
+if [ -n "$KUBE_PROXY_POD_CIDR" ]; then
+  proxy_args=(--k3s-arg "--kube-proxy-arg=cluster-cidr=$KUBE_PROXY_POD_CIDR@server:*"
+              --k3s-arg "--kube-proxy-arg=cluster-cidr=$KUBE_PROXY_POD_CIDR@agent:*")
+fi
 # (k3d lists a half-deleted cluster too, so judge by the server container.)
 if ! docker inspect "$NODE_C" >/dev/null 2>&1; then
   "$K3D" cluster delete "$PROFILE" >/dev/null 2>&1 || true
-  log "Creating K3s cluster $PROFILE ($K3S_IMAGE)"
+  log "Creating K3s cluster $PROFILE ($K3S_IMAGE, kube-proxy pod range ${KUBE_PROXY_POD_CIDR:-default})"
   "$K3D" cluster create "$PROFILE" --image "$K3S_IMAGE" --servers 1 --agents 2 \
     --subnet "$PRIMARY_SUBNET" --no-lb --api-port 127.0.0.1:6551 \
     --kubeconfig-update-default=false --kubeconfig-switch-context=false \
@@ -54,8 +63,7 @@ if ! docker inspect "$NODE_C" >/dev/null 2>&1; then
     --k3s-arg "--disable=servicelb@server:*" \
     --k3s-arg "--disable=metrics-server@server:*" \
     --k3s-arg "--cluster-cidr=10.244.0.0/16@server:*" \
-    --k3s-arg "--kube-proxy-arg=cluster-cidr=172.16.0.0/16@server:*" \
-    --k3s-arg "--kube-proxy-arg=cluster-cidr=172.16.0.0/16@agent:*"
+    "${proxy_args[@]}"
 fi
 "$K3D" cluster start "$PROFILE" >/dev/null 2>&1 || true
 "$K3D" kubeconfig get "$PROFILE" > "$KUBECONFIG"

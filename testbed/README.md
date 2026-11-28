@@ -1,14 +1,15 @@
 # Edge testbed
 
 Reproducible measurements of the CNI resilience operator and per-link steering on a
-3-node cluster whose two pod networks run over **separate** underlay links.
+3-node cluster whose two pod networks run over **separate** underlay links. The paper's
+results come from **K3s** (`DISTRO=k3s`); the same harness also runs on minikube.
 
 ```
-              eth0: 192.168.58.0/24 (minikube network)  -> Calico IPIP, primary
-  C (control) ──────────────┬──────────────────────┐
+              eth0: cluster network (K3s: 192.168.59.0/24)  -> Calico IPIP, primary
+  C (server) ───────────────┬──────────────────────┐
      │                      │                      │
-     A (m02) ───────────────┴───────────── B (m03)
-     │  eth1: 192.168.200.0/24 (second Docker network) -> Flannel VXLAN, backup
+     A (agent-0) ───────────┴──────────── B (agent-1)
+     │  eth1: second Docker network (K3s: 192.168.201.0/24) -> Flannel VXLAN, backup
 ```
 
 - **A** runs the traffic sources: an HTTP prober (10 probes/s to the pod IP and to the
@@ -18,25 +19,49 @@ Reproducible measurements of the CNI resilience operator and per-link steering o
 - Every fault hits the A–B link or node B, so all measured traffic crosses it.
 - Everything runs on one host, so all timestamps come from one clock.
 
+## Distributions
+
+| | `DISTRO=k3s` (paper) | `DISTRO=minikube` |
+|---|---|---|
+| Cluster | K3s v1.35.1 in Docker containers via k3d, cluster `edge-k3s` | minikube, Docker driver, profile `edge-lab` |
+| Setup | `testbed/bootstrap-k3s.sh` | `testbed/bootstrap.sh` |
+| State | `~/edge-k3s` (kubeconfig, kubectl, k3d) | `~/edge-lab` |
+| Nodes C, A, B | `k3d-edge-k3s-server-0`, `-agent-0`, `-agent-1` | `edge-lab`, `-m02`, `-m03` |
+
+On K3s, its bundled Flannel, network policy controller, Traefik, ServiceLB and
+metrics-server are disabled; Calico v3.31.3, Multus v4.3.2 and Flannel v0.26.7 are
+installed as on minikube. The K3s node image has no `tc` or `pgrep`, so every command
+that touches a node's network or processes runs in a helper container
+(`<node>-net`) that shares the node's network and PID namespaces.
+
 ## Requirements
 
-Linux host with Docker (your user in the `docker` group), minikube, `tmux`, `git`,
-Python 3 with matplotlib, about 8 GB free RAM, and the `sch_netem`, `ipip` and `vxlan`
-kernel modules (Fedora: `kernel-modules-extra` for `sch_netem`). No sudo, no Go: Go
-builds run in a container.
+Linux host with Docker (your user in the `docker` group), `tmux`, `git`, Python 3 with
+matplotlib, about 8 GB free RAM, and the `sch_netem`, `ipip` and `vxlan` kernel modules
+(Fedora: `kernel-modules-extra` for `sch_netem`). minikube only for `DISTRO=minikube`;
+the K3s bootstrap downloads k3d and kubectl itself. No sudo, no Go: Go builds run in a
+container.
 
 ## Use
 
 ```bash
-testbed/bootstrap.sh                 # cluster, second network, Calico, Multus, Flannel, CRDs, images
+export DISTRO=k3s                    # every script reads it
+testbed/bootstrap-k3s.sh             # cluster, second network, Calico, Multus, Flannel, CRDs, images
 testbed/operator.sh start            # operator on the host, in tmux
 testbed/workload.sh up               # targets on B, clients on A
 testbed/fault.sh link-cut primary    # inject; fault.sh clear removes everything
-testbed/run.sh results/main --reps 10                     # full campaign (about 7 h)
+testbed/campaign-all.sh results      # the paper's whole evaluation (about 13 h)
+testbed/ablations.sh results         # pinning and source-NAT experiments (about 1 h)
 python3 testbed/analysis/analyze.py runs results/main -o summary.csv
 python3 testbed/analysis/analyze.py aggregate summary.csv -o aggregate.csv
 python3 testbed/analysis/plot.py summary.csv figs
 ```
+
+`campaign-all.sh` runs, with fresh client pods before every run: the main campaign
+(`main/`), the realistic-link runs (`profile-edge/`), the probe-interval sweep
+(`sweep-d1/`, `sweep-d4/`), the overhead measurement (`overhead-d{1,2,4}.txt`) and the
+strict reverse-path-filtering ablation (`rp-strict/`). `run.sh` runs single campaigns
+(see its header for options).
 
 From a development machine, `testbed/sync.sh user@host` copies the committed branch with
 a git bundle and overlays the working copy of `testbed/`. Do not sync while a campaign
@@ -66,13 +91,7 @@ containers. Nothing on the host is changed.
 `--link-profile edge` (or `LINK_PROFILE=edge testbed/fault.sh profile`) adds background
 conditions on every node pair for the whole campaign: 5 ms +- 2 ms one-way delay on the
 primary link, and 20 ms +- 10 ms, 1 % loss and 10 Mbit/s on the backup link. Faults are
-applied on top; a fault's loss replaces the profile's loss. The paper's realistic-link
-runs:
-
-```bash
-testbed/run.sh results/profile-edge --reps 10 --configs full \
-  --faults "link-cut link-cut-both link-loss30" --fresh-clients --link-profile edge
-```
+applied on top; a fault's loss replaces the profile's loss.
 
 ## Metrics (`analyze.py`)
 
@@ -86,18 +105,21 @@ Per run, with F = the fault window and R = the window after clearing:
 
 ## Setup findings that matter for the results
 
-- **minikube cannot manage a node with two networks.** `minikube start` and `status` fail
-  while eth1 is attached. `bootstrap.sh` checks the containers instead, and detaches eth1
-  before restarting a stopped cluster.
-- **kube-proxy must know the real pod network.** With minikube's default
-  `clusterCIDR` (10.244.0.0/16), Service connections from Calico pods (172.16.0.0/16)
-  are masqueraded. Linux drops a masqueraded connection's NAT state when its output
-  interface changes, so every switch (tunl0 <-> flannel.1) reset long-lived connections
-  (MQTT: 10 reconnects, 13 s stall). `bootstrap.sh` sets `clusterCIDR` to Calico's pool.
+- **kube-proxy must know the real pod network.** With its default pod range, the
+  cluster's 10.244.0.0/16 (the backup network's), Service connections from Calico pods
+  (172.16.0.0/16) are masqueraded. Linux drops a masqueraded connection's NAT state when
+  its output interface changes, so every switch (tunl0 <-> flannel.1) resets long-lived
+  connections. Both bootstraps give kube-proxy Calico's pool (K3s:
+  `--kube-proxy-arg=cluster-cidr`).
 - **Loose reverse-path filtering on the tunnels.** Nodes switch independently, so A->B
   and B->A briefly use different tunnels, and strict `rp_filter` drops everything in
   that window. The link router's init container sets `rp_filter=2` on `tunl0` and
   `flannel.1`.
 - **Multus v4.3.2's manifest** uses the `:snapshot` image with a 50Mi limit that gets
-  OOM-killed; `bootstrap.sh` pins the release image and raises the limit.
+  OOM-killed; both bootstraps pin the release image and raise the limit.
 - **Mosquitto** needs `set_tcp_nodelay true`, or Nagle adds about 40 ms to QoS 0.
+- **minikube cannot manage a node with two networks.** `minikube start` and `status` fail
+  while eth1 is attached. `bootstrap.sh` checks the containers instead, and detaches eth1
+  before restarting a stopped cluster.
+- **K3s with a custom CNI** uses the standard `/opt/cni/bin` and `/etc/cni/net.d`, but
+  keeps its own plugins elsewhere; `bootstrap-k3s.sh` links them into `/opt/cni/bin`.
