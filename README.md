@@ -33,16 +33,18 @@ paper/                      paper source (LaTeX) and compiled PDF
 
 ## Reproduce the evaluation
 
-Everything runs on one Linux host with Docker; see [`testbed/README.md`](testbed/README.md).
+The paper's results come from a 3-node K3s cluster (K3s v1.35 in Docker containers via
+k3d) on one Linux host; see [`testbed/README.md`](testbed/README.md). The harness also
+runs on minikube (`DISTRO=minikube`, `testbed/bootstrap.sh`).
 
 ```bash
-testbed/bootstrap.sh                 # 3-node cluster with two networks, Calico, Multus, Flannel
-testbed/build.sh                     # operator, agent, router and workload images
-testbed/operator.sh start            # operator on the host
-testbed/workload.sh up               # MQTT sensors and HTTP prober on A, broker and nginx on B
-testbed/run.sh results/main --reps 10
+export DISTRO=k3s
+testbed/bootstrap-k3s.sh             # K3s cluster with two networks, Calico, Multus, Flannel, images
+testbed/campaign-all.sh results      # whole evaluation, fresh clients every run (about 13 h)
+testbed/ablations.sh results         # pinning and source-NAT experiments (about 1 h)
 python3 testbed/analysis/analyze.py runs results/main -o summary.csv
 python3 testbed/analysis/plot.py summary.csv paper/figs
+python3 testbed/analysis/paper_numbers.py results   # every number the paper quotes
 ```
 
 ## Build and test the operator
