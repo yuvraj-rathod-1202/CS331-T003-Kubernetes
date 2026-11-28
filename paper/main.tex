@@ -539,6 +539,11 @@ publish/subscribe traffic; we run two at once as redundant paths.
         conditions are emulated (Section~\ref{sec:profile}); a deployment on
         heterogeneous edge hardware (for example Raspberry Pi nodes with Wi-Fi and
         cellular uplinks) is future work.
+  \item \textbf{K3s only.} Every experiment ran on K3s. The design needs only two
+        CNIs attached through Multus, policy routing on each node and a few API reads,
+        so it can be adopted on KubeEdge~\cite{kubeedge} as well, whose edge nodes run
+        CNI plugins and serve API reads locally through EdgeCore; we have not
+        measured it there.
   \item \textbf{Scale.} We measured three nodes; Table~\ref{tab:scale} only projects
         larger sites. Beyond a few dozen nodes the agents need watches instead of
         per-round API lists, and sampled or hierarchical probing.
